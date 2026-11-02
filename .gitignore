@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.uv/
+
+# Rust
+target/
+Cargo.lock.bak
+
+# Android / Gradle
+.gradle/
+**/build/
+local.properties
+*.apk
+*.aab
+
+# Logs
+logs/
+*.log
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp

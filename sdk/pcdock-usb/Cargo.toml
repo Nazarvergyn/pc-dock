@@ -1,0 +1,10 @@
+[package]
+name = "pcdock-usb"
+version = "0.1.0"
+edition = "2021"
+description = "USB-адаптер PC Dock: выполняет запросы ядра через libusb."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+pcdock-core = { path = "../pcdock-core" }
+rusb = "0.9"

@@ -1,0 +1,3 @@
+[workspace]
+members = ["pcdock-core", "pcdock-usb", "pcdock-ffi"]
+resolver = "2"
