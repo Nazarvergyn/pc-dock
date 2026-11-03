@@ -128,6 +128,7 @@ def _load():
         "event_disconnected": fn("pcdock_event_disconnected", ctypes.c_int32, voidp, u32p, voidp, sizep),
         "device_enable": fn("pcdock_session_device_enable", ctypes.c_int32, voidp, ctypes.c_uint32, ctypes.c_bool),
         "touch": fn("pcdock_session_touch", ctypes.c_int32, voidp, ctypes.c_uint8, ctypes.c_uint32, ctypes.c_float, ctypes.c_float),
+        "touch_ex": fn("pcdock_session_touch_ex", ctypes.c_int32, voidp, ctypes.c_uint8, ctypes.c_uint32, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float),
         "cursor_move_abs": fn("pcdock_session_cursor_move_abs", ctypes.c_int32, voidp, ctypes.c_float, ctypes.c_float),
         "cursor_move_rel": fn("pcdock_session_cursor_move_rel", ctypes.c_int32, voidp, ctypes.c_int32, ctypes.c_int32),
         "cursor_resync": fn("pcdock_session_cursor_resync", ctypes.c_int32, voidp),
@@ -354,7 +355,18 @@ class SdkSession:
         self._check(self._f["device_enable"](self._h, kind, bool(enabled)), "device_enable")
 
     def touch(self, cid, phase, x, y):
-        self._check(self._f["touch"](self._h, cid, phase, float(x), float(y)), "touch")
+        """Совместимость: идёт через touch_ex с default пятном/силой."""
+        self.touch_ex(cid, phase, x, y, -1.0, -1.0, -1.0)
+
+    def touch_ex(self, cid, phase, x, y, width=-1.0, height=-1.0, pressure=-1.0):
+        """Касание с пятном/силой. Отрицательное = default ядра."""
+        self._check(
+            self._f["touch_ex"](
+                self._h, cid, phase, float(x), float(y),
+                float(width), float(height), float(pressure),
+            ),
+            "touch_ex",
+        )
 
     def cursor_move_abs(self, x, y):
         self._check(self._f["cursor_move_abs"](self._h, float(x), float(y)), "cursor_move_abs")

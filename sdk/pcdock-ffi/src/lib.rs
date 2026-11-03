@@ -641,6 +641,40 @@ pub extern "C" fn pcdock_session_touch(p: *mut PcdockSession, id: u8, phase: u32
     })
 }
 
+/// Касание с явными пятном и силой: `width`/`height` — доли ширины экрана 0.0..1.0,
+/// `pressure` — 0.0..1.0. Отрицательное значение = default из конфига.
+/// Скрипт автотестов задаёт их сам на каждый вызов: клик и свайп собираются
+/// из DOWN/MOVE/UP с нужными паузами и координатами на стороне вызывающего.
+#[no_mangle]
+pub extern "C" fn pcdock_session_touch_ex(
+    p: *mut PcdockSession,
+    id: u8,
+    phase: u32,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    pressure: f32,
+) -> i32 {
+    guard(|| {
+        let h = check_handle(p)?;
+        let mut pt = TouchPoint::new(id, touch_phase(phase)?, x, y);
+        if width >= 0.0 {
+            pt.width = Some(width);
+        }
+        if height >= 0.0 {
+            pt.height = Some(height);
+        }
+        if pressure >= 0.0 {
+            pt.pressure = Some(pressure);
+        }
+        match h.session.touch(pt) {
+            Ok(()) => Ok(PCDOCK_OK),
+            Err(_) => Err(PCDOCK_ERR_INPUT),
+        }
+    })
+}
+
 /// Абсолютное положение курсора в долях картинки 0.0..1.0.
 #[no_mangle]
 pub extern "C" fn pcdock_session_cursor_move_abs(p: *mut PcdockSession, x: f32, y: f32) -> i32 {
