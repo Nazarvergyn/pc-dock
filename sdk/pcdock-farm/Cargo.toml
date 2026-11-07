@@ -1,0 +1,7 @@
+[package]
+name = "pcdock-farm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pcdock-core = { path = "../pcdock-core" }
