@@ -11,3 +11,4 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 pcdock-core = { path = "../pcdock-core" }
+pcdock-farm = { path = "../pcdock-farm" }
