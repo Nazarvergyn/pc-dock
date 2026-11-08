@@ -1,0 +1,18 @@
+[package]
+name = "pcdockd"
+version = "0.1.0"
+edition = "2021"
+description = "PC Dock daemon: owns phones on any transport, serves one app protocol."
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "pcdockd"
+path = "src/main.rs"
+
+[dependencies]
+pcdock-core = { path = "../pcdock-core" }
+pcdock-usb = { path = "../pcdock-usb" }
+pcdock-daemon = { path = "../pcdock-daemon" }
+pcdock-serve = { path = "../pcdock-serve" }
+clap = { version = "4", features = ["derive"] }
+rusb = "0.9"
