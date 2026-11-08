@@ -16,15 +16,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class Link(
     private val pfd: ParcelFileDescriptor,
-    private val listener: Listener,
-) {
-    interface Listener {
-        /** Вызывается из потока чтения. */
-        fun onPacket(packet: Packet)
-
-        /** Вызывается один раз при закрытии канала, из любого потока. */
-        fun onClosed(reason: String)
-    }
+    private val listener: HostLink.Listener,
+) : HostLink {
 
     private val tag = "DeviceMedia"
     private val input = FileInputStream(pfd.fileDescriptor)
@@ -40,35 +33,35 @@ class Link(
     private val closed = AtomicBoolean(false)
 
     @Volatile
-    var bytesWritten = 0L; private set
+    override var bytesWritten = 0L; private set
 
     @Volatile
-    var packetsWritten = 0L; private set
+    override var packetsWritten = 0L; private set
 
     @Volatile
-    var videoDropped = 0L; private set
+    override var videoDropped = 0L; private set
 
     @Volatile
-    var audioDropped = 0L; private set
+    override var audioDropped = 0L; private set
 
     @Volatile
-    var maxWriteMs = 0L; private set
+    override var maxWriteMs = 0L; private set
 
     @Volatile
-    var bytesRead = 0L; private set
+    override var bytesRead = 0L; private set
 
     private val reader = Thread({ readLoop() }, "usb-reader")
     private val writer = Thread({ writeLoop() }, "usb-writer")
 
-    fun start() {
+    override fun start() {
         reader.start()
         writer.start()
     }
 
-    val isClosed: Boolean get() = closed.get()
+    override val isClosed: Boolean get() = closed.get()
 
     /** Управляющий пакет или любые байты, которые нельзя терять. */
-    fun sendControl(bytes: ByteArray) {
+    override fun sendControl(bytes: ByteArray) {
         synchronized(lock) {
             control.addLast(bytes)
             lock.notifyAll()
@@ -76,7 +69,7 @@ class Link(
     }
 
     /** Кадр экрана: заменяет предыдущий, ещё не отправленный. */
-    fun offerVideo(bytes: ByteArray) {
+    override fun offerVideo(bytes: ByteArray) {
         synchronized(lock) {
             if (latestVideo != null) videoDropped++
             latestVideo = bytes
@@ -85,7 +78,7 @@ class Link(
     }
 
     /** Звук: очередь FIFO, при переполнении самые старые пакеты отбрасываются (PROTOCOL.md §9). */
-    fun offerAudio(bytes: ByteArray) {
+    override fun offerAudio(bytes: ByteArray) {
         synchronized(lock) {
             audio.addLast(bytes)
             audioBytes += bytes.size
@@ -98,7 +91,7 @@ class Link(
         }
     }
 
-    fun close(reason: String) {
+    override fun close(reason: String) {
         if (!closed.compareAndSet(false, true)) return
         Log.w(tag, "Канал USB закрыт: $reason")
         try {

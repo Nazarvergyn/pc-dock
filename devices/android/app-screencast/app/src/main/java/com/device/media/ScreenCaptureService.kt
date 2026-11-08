@@ -42,7 +42,7 @@ import java.io.IOException
  *
  * Всё состояние меняется только в потоке [handler]; потоки чтения и записи USB живут в [Link].
  */
-class ScreenCaptureService : Service(), Link.Listener {
+class ScreenCaptureService : Service(), HostLink.Listener {
     companion object {
         @Volatile
         var isRunning = false
@@ -97,7 +97,7 @@ class ScreenCaptureService : Service(), Link.Listener {
     private var permissionRequested = false
 
     // Состояние сессии
-    private var link: Link? = null
+    private var link: HostLink? = null
     private var sessionActive = false
     private var lastHostRx = 0L
     private var stream = StreamConfig()
@@ -118,6 +118,11 @@ class ScreenCaptureService : Service(), Link.Listener {
     private var prevMusicVolume = -1
     private var audioActive = false
     private var audioFramesSent = 0L
+
+    // TCP-канал для ADB-режима: сокет на localhost, проброс делает демон (`adb forward`).
+    // С USB-аксессуаром взаимоисключающе на одном кабеле: активен один канал.
+    private var tcpStarted = false
+    private var tcpServer: java.net.ServerSocket? = null
 
     // Экран не гаснет, пока идёт док-сессия: иначе при блокировке нечего захватывать
     // и PIN-код не ввести. Гасится обратно при отключении USB.
@@ -337,6 +342,49 @@ class ScreenCaptureService : Service(), Link.Listener {
                 }
             }
         }, 5000)
+        startTcpListener()
+    }
+
+    /** Слушатель ADB-канала: localhost:47631, принимает одно соединение. */
+    private fun startTcpListener() {
+        if (tcpStarted) return
+        tcpStarted = true
+        Thread({
+            try {
+                val server = java.net.ServerSocket(47631, 1, java.net.InetAddress.getByName("127.0.0.1"))
+                tcpServer = server
+                Log.d(TAG, "TCP-слушатель ADB поднят на 127.0.0.1:47631")
+                while (running) {
+                    val socket = try {
+                        server.accept()
+                    } catch (e: Exception) {
+                        if (running) Log.w(TAG, "TCP-accept: $e")
+                        break
+                    }
+                    handler?.post { attachTcp(socket) }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "TCP-слушатель не встал: $e")
+            }
+        }, "tcp-accept").start()
+    }
+
+    private fun attachTcp(socket: java.net.Socket) {
+        if (link != null) {
+            Log.w(TAG, "TCP: канал уже занят, лишнее соединение закрываю")
+            try {
+                socket.close()
+            } catch (_: Exception) {
+            }
+            return
+        }
+        connects++
+        val l = TcpLink(socket, this)
+        link = l
+        sessionActive = false
+        stream = StreamConfig()
+        Log.d(TAG, "ADB подключён (#$connects): ${socket.remoteSocketAddress}, жду HELLO от ПК")
+        l.start()
     }
 
     /** Проекция умерла (система/пользователь): сервис и USB живут, ждём нового разрешения. */
@@ -756,9 +804,14 @@ class ScreenCaptureService : Service(), Link.Listener {
         l.start()
     }
 
-    // Link.Listener (вызывается из потоков USB)
+    // HostLink.Listener (вызывается из потоков каналов)
     override fun onPacket(packet: Packet) {
         handler?.post { handlePacket(packet) }
+    }
+
+    /** HID-команда из ADB-канала: перевод во ввод — следующим шагом (accessibility-мост). */
+    override fun onHid(cmd: HidCommand) {
+        Log.d(TAG, "HID по ADB: request=${cmd.request} id=${cmd.hidId} ${cmd.payload.size}Б (мост ввода — todo)")
     }
 
     override fun onClosed(reason: String) {
@@ -834,7 +887,7 @@ class ScreenCaptureService : Service(), Link.Listener {
         }
     }
 
-    private fun onHostHello(l: Link, p: Packet) {
+    private fun onHostHello(l: HostLink, p: Packet) {
         val hello = Messages.parseHello(p.payload)
         if (hello == null || hello.role != 0) return
         val versionMax = minOf(Proto.VERSION, hello.versionMax)
@@ -956,6 +1009,11 @@ class ScreenCaptureService : Service(), Link.Listener {
             }
         }
         link?.close("service destroyed")
+        try {
+            tcpServer?.close()
+        } catch (_: Exception) {
+        }
+        tcpServer = null
         pendingImage?.close()
         imageReader?.setOnImageAvailableListener(null, null)
         virtualDisplay?.release()
