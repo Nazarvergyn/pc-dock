@@ -58,6 +58,10 @@ struct Args {
     #[arg(long, default_value = "pcdockd/1.0")]
     name: String,
 
+    /// Подробные логи (-v debug, -vv trace). Без флага — info.
+    #[arg(short = 'v', action = clap::ArgAction::Count)]
+    verbose: u8,
+
     /// Видео/звук по умолчанию для новых трубок.
     #[arg(long, default_value_t = true)]
     video: bool,
@@ -67,12 +71,22 @@ struct Args {
 
 fn main() {
     let args = Args::parse();
+    if std::env::var("RUST_LOG").is_err() {
+        let level = match args.verbose {
+            0 => "info",
+            1 => "debug",
+            _ => "trace",
+        };
+        // SAFETY: однопоточный старт, гонок нет.
+        unsafe { std::env::set_var("RUST_LOG", level) };
+    }
+    env_logger::init();
     if !args.auto && args.phones.is_empty() {
-        eprintln!("нужен --auto или хотя бы один --phone (см. --help)");
+        log::error!("нужен --auto или хотя бы один --phone (см. --help)");
         std::process::exit(2);
     }
     if args.auto && !args.phones.is_empty() {
-        eprintln!("--phone без --auto это «только эти»; с --auto используй --except");
+        log::error!("--phone без --auto это «только эти»; с --auto используй --except");
         std::process::exit(2);
     }
 
@@ -89,7 +103,7 @@ fn main() {
     let _ = next_id; // id выдан, дальше трубки живут в Daemon
 
     if daemon.phones().is_empty() {
-        eprintln!("нет трубок: демон слушать нечего (трубки можно добавить позже — пока выхожу)");
+        log::error!("нет трубок: демон слушать нечего");
         std::process::exit(1);
     }
 
@@ -98,8 +112,8 @@ fn main() {
         match args.tcp.as_deref().unwrap_or("") {
             "" => {}
             addr => match serve.run_tcp(addr) {
-                Ok(bound) => println!("TCP: {bound}"),
-                Err(e) => eprintln!("TCP {addr} не встал: {e}"),
+                Ok(bound) => log::info!("TCP: {bound}"),
+                Err(e) => log::error!("TCP {addr} не встал: {e}"),
             },
         }
     }
@@ -107,8 +121,8 @@ fn main() {
         match args.ws.as_deref().unwrap_or("") {
             "" => {}
             addr => match serve.run_ws(addr) {
-                Ok(bound) => println!("WS: {bound}"),
-                Err(e) => eprintln!("WS {addr} не встал: {e}"),
+                Ok(bound) => log::info!("WS: {bound}"),
+                Err(e) => log::error!("WS {addr} не встал: {e}"),
             },
         }
     }
@@ -116,13 +130,13 @@ fn main() {
         match args.local.as_deref().unwrap_or("") {
             "" => {}
             name => match serve.run_local(name) {
-                Ok(()) => println!("local: {name}"),
-                Err(e) => eprintln!("local {name} не встал: {e}"),
+                Ok(()) => log::info!("local: {name}"),
+                Err(e) => log::error!("local {name} не встал: {e}"),
             },
         }
     }
 
-    println!("pcdockd работает, трубки: {:?}", serve.daemon().lock().unwrap().phones());
+    log::info!("pcdockd работает, трубки: {:?}", serve.daemon().lock().unwrap().phones());
     // Воркеры и слушатели живут в своих потоках; главный ждёт вечно.
     loop {
         std::thread::sleep(std::time::Duration::from_secs(3600));
@@ -148,7 +162,7 @@ fn auto_add(daemon: &mut Daemon, args: &Args, mut next_id: u32) -> u32 {
             if args.except.iter().any(|e| e == &spec || e == "adb") {
                 continue;
             }
-            println!("ADB {serial}: транспорт не готов, пропускаю (трубка не добавлена)");
+            log::warn!("ADB {serial}: транспорт не готов, пропускаю");
         }
     }
     if !args.no_serial {
@@ -157,7 +171,7 @@ fn auto_add(daemon: &mut Daemon, args: &Args, mut next_id: u32) -> u32 {
             if args.except.iter().any(|e| e == &spec || e == "serial") {
                 continue;
             }
-            println!("serial {port}: транспорт не готов, пропускаю (трубка не добавлена)");
+            log::warn!("serial {port}: транспорт не готов, пропускаю");
         }
     }
     next_id
@@ -170,21 +184,21 @@ fn add_spec(daemon: &mut Daemon, args: &Args, spec: &str, next_id: u32) -> u32 {
     }
     if let Some(serial) = spec.strip_prefix("adb:") {
         if serial.is_empty() {
-            eprintln!("пустой серийник в --phone {spec}");
+            log::error!("пустой серийник в --phone {spec}");
             return next_id;
         }
-        println!("ADB {serial}: транспорт не готов, пропускаю");
+        log::warn!("ADB {serial}: транспорт не готов, пропускаю");
         return next_id;
     }
     if let Some(path) = spec.strip_prefix("serial:") {
         if path.is_empty() {
-            eprintln!("пустой путь в --phone {spec}");
+            log::error!("пустой путь в --phone {spec}");
             return next_id;
         }
-        println!("serial {path}: транспорт не готов, пропускаю");
+        log::warn!("serial {path}: транспорт не готов, пропускаю");
         return next_id;
     }
-    eprintln!("неизвестный формат --phone {spec} (жди usb, adb:СЕРИЙНИК, serial:ПУТЬ)");
+    log::error!("неизвестный формат --phone {spec}");
     next_id
 }
 
@@ -201,7 +215,7 @@ fn add_usb(daemon: &mut Daemon, args: &Args, id: u32, _label: &str) -> u32 {
     let link = match UsbLink::new(cfg, Settings::default()) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("USB-трубка не создалась: {e}");
+            log::error!("USB-трубка не создалась: {e}");
             return id;
         }
     };
@@ -209,11 +223,11 @@ fn add_usb(daemon: &mut Daemon, args: &Args, id: u32, _label: &str) -> u32 {
         Ok(()) => {
             // Поток поднимет сессию сам; video/audio по умолчанию из Config.
             // Живое переключение — командой SetStream по сокету.
-            println!("трубка {id}: USB");
+            log::info!("трубка {id}: USB");
             id + 1
         }
         Err(e) => {
-            eprintln!("трубка {id} не добавилась: {e}");
+            log::error!("трубка {id} не добавилась: {e}");
             id
         }
     }
@@ -227,7 +241,7 @@ fn usb_scan() -> Vec<String> {
     let ctx = match rusb::Context::new() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("USB-скан не удался: {e}");
+            log::error!("USB-скан не удался: {e}");
             return out;
         }
     };

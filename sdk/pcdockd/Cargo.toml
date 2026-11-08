@@ -15,4 +15,6 @@ pcdock-usb = { path = "../pcdock-usb" }
 pcdock-daemon = { path = "../pcdock-daemon" }
 pcdock-serve = { path = "../pcdock-serve" }
 clap = { version = "4", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"
 rusb = "0.9"

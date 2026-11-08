@@ -212,30 +212,28 @@ impl Serve {
                 for s in listener.incoming().flatten() {
                     let me2 = me.clone();
                     thread::spawn(move || {
-                        let ws = match tungstenite::accept(s) {
+                        let mut ws = match tungstenite::accept(s) {
                             Ok(ws) => ws,
                             Err(_) => return,
                         };
-                        let ws = Arc::new(Mutex::new(ws));
+                        // Один поток на обе стороны: чтение с таймаутом,
+                        // запись — сливом канала. Отдельный писатель
+                        // невозможен: чтение держало бы Mutex сокета.
+                        let _ = ws.get_ref().set_read_timeout(Some(Duration::from_millis(20)));
                         let (tx, rx) = mpsc::sync_channel::<OutMsg>(64);
                         let id = me2.add_client(tx);
-                        // Запись — отдельным потоком, чтение — здесь.
-                        let ws_w = ws.clone();
-                        thread::spawn(move || {
-                            for msg in rx {
-                                let out = match &msg {
-                                    OutMsg::Json(text) => Message::Text(text.clone()),
-                                    OutMsg::Video(payload) | OutMsg::Audio(payload) => {
-                                        Message::Binary(payload.clone())
-                                    }
-                                };
-                                if ws_w.lock().unwrap().send(out).is_err() {
-                                    break;
+                        let send_out = |ws: &mut tungstenite::WebSocket<std::net::TcpStream>,
+                                        msg: &OutMsg| {
+                            let out = match msg {
+                                OutMsg::Json(text) => Message::Text(text.clone()),
+                                OutMsg::Video(payload) | OutMsg::Audio(payload) => {
+                                    Message::Binary(payload.clone())
                                 }
-                            }
-                        });
+                            };
+                            ws.send(out).is_ok()
+                        };
                         loop {
-                            match ws.lock().unwrap().read() {
+                            match ws.read() {
                                 Ok(Message::Text(text)) => match serde_json::from_str::<ClientMsg>(&text) {
                                     Ok(msg) => me2.handle(id, msg),
                                     Err(e) => me2.send_json(
@@ -245,8 +243,18 @@ impl Serve {
                                         },
                                     ),
                                 },
-                                Ok(Message::Close(_)) | Err(_) => break,
-                                _ => {}
+                                Ok(Message::Close(_)) => break,
+                                Ok(_) => {}
+                                Err(tungstenite::Error::Io(e))
+                                    if e.kind() == std::io::ErrorKind::TimedOut
+                                        || e.kind() == std::io::ErrorKind::WouldBlock => {}
+                                Err(_) => break,
+                            }
+                            while let Ok(msg) = rx.try_recv() {
+                                if !send_out(&mut ws, &msg) {
+                                    me2.remove_client(id);
+                                    return;
+                                }
                             }
                         }
                         me2.remove_client(id);
