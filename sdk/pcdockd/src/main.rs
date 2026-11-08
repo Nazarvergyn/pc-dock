@@ -162,7 +162,7 @@ fn auto_add(daemon: &mut Daemon, args: &Args, mut next_id: u32) -> u32 {
             if args.except.iter().any(|e| e == &spec || e == "adb") {
                 continue;
             }
-            log::warn!("ADB {serial}: транспорт не готов, пропускаю");
+            next_id = add_adb(daemon, args, &serial, next_id);
         }
     }
     if !args.no_serial {
@@ -187,8 +187,7 @@ fn add_spec(daemon: &mut Daemon, args: &Args, spec: &str, next_id: u32) -> u32 {
             log::error!("пустой серийник в --phone {spec}");
             return next_id;
         }
-        log::warn!("ADB {serial}: транспорт не готов, пропускаю");
-        return next_id;
+        return add_adb(daemon, args, serial, next_id);
     }
     if let Some(path) = spec.strip_prefix("serial:") {
         if path.is_empty() {
@@ -233,6 +232,31 @@ fn add_usb(daemon: &mut Daemon, args: &Args, id: u32, _label: &str) -> u32 {
     }
 }
 
+/// ADB-трубка: локальный порт проброса выбираем рядом с телефонным.
+fn add_adb(daemon: &mut Daemon, args: &Args, serial: &str, id: u32) -> u32 {
+    let cfg = Config {
+        name: args.name.clone(),
+        stream: Some(pcdock_core::packet::SetStream {
+            video: args.video,
+            audio: args.audio,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let local_port = 47000 + (id as u16 % 1000);
+    let link = pcdock_adb::AdbLink::new(cfg, serial, local_port);
+    match daemon.add_phone(id, Box::new(link)) {
+        Ok(()) => {
+            log::info!("трубка {id}: ADB {serial} (проброс {local_port})");
+            id + 1
+        }
+        Err(e) => {
+            log::error!("трубка {id} не добавилась: {e}");
+            id
+        }
+    }
+}
+
 /// Видимые USB-устройства-телефоны: `usb:VID:PID` (+ серийник при наличии).
 /// Ограничение v1: транспорт открывает первое совпавшее устройство,
 /// поэтому авторежим берёт только первое (остальные — после прицельного открытия).
@@ -260,21 +284,15 @@ fn usb_scan() -> Vec<String> {
     out
 }
 
-/// Серийники `adb devices`. Транспорт позже, пока только список.
+/// Серийники через ADB-сервер (без шелл-аутов). Нет сервера — пусто.
 fn adb_scan() -> Vec<String> {
-    let out = std::process::Command::new("adb").arg("devices").output();
-    let Ok(out) = out else { return Vec::new() };
-    let text = String::from_utf8_lossy(&out.stdout);
-    text.lines()
-        .skip(1)
-        .filter_map(|l| {
-            let mut it = l.split_whitespace();
-            match (it.next(), it.next()) {
-                (Some(s), Some("device")) => Some(s.to_owned()),
-                _ => None,
-            }
-        })
-        .collect()
+    match pcdock_adb::Adb::local().devices() {
+        Ok(devs) => devs,
+        Err(e) => {
+            log::debug!("ADB-скан: {e}");
+            Vec::new()
+        }
+    }
 }
 
 /// Кандидаты serial-труб: USB-COM порты.

@@ -1,3 +1,3 @@
 [workspace]
-members = ["pcdock-core", "pcdock-usb", "pcdock-ffi", "pcdock-farm", "pcdock-daemon", "pcdock-serve", "pcdockd"]
+members = ["pcdock-core", "pcdock-usb", "pcdock-ffi", "pcdock-farm", "pcdock-daemon", "pcdock-serve", "pcdock-adb", "pcdockd"]
 resolver = "2"

@@ -1,0 +1,14 @@
+[package]
+name = "pcdock-adb"
+version = "0.1.0"
+edition = "2021"
+description = "ADB transport: talks to the ADB server, forwards a port, pumps packets over TCP."
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "pcdock_adb"
+path = "src/lib.rs"
+
+[dependencies]
+pcdock-core = { path = "../pcdock-core" }
+pcdock-daemon = { path = "../pcdock-daemon" }

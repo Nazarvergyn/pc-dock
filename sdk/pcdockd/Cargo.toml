@@ -14,6 +14,7 @@ pcdock-core = { path = "../pcdock-core" }
 pcdock-usb = { path = "../pcdock-usb" }
 pcdock-daemon = { path = "../pcdock-daemon" }
 pcdock-serve = { path = "../pcdock-serve" }
+pcdock-adb = { path = "../pcdock-adb" }
 clap = { version = "4", features = ["derive"] }
 log = "0.4"
 env_logger = "0.11"
