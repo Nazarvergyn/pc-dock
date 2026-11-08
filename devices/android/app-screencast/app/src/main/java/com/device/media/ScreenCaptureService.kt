@@ -13,6 +13,7 @@ import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
+import android.hardware.display.VirtualDisplay
 import android.hardware.usb.UsbManager
 import android.media.AudioManager
 import android.media.Image
@@ -36,8 +37,8 @@ import java.io.IOException
 
 /**
  * Живёт постоянно: держит MediaProjection (диалог захвата нужен один раз), сам подхватывает USB-аксессуар
- * и говорит с ПК по протоколу v2 (PROTOCOL.md). Если ПК не прислал HELLO, через 2.5 с переходит
- * в запасной режим v1 («длина и JPEG»), чтобы старый просмотрщик продолжал работать.
+ * и говорит с ПК по протоколу v2 (PROTOCOL.md). Без HELLO от ПК сессия не поднимается: один протокол,
+ * запасного режима нет.
  *
  * Всё состояние меняется только в потоке [handler]; потоки чтения и записи USB живут в [Link].
  */
@@ -56,13 +57,10 @@ class ScreenCaptureService : Service(), Link.Listener {
         private const val CHANNEL_ID = "dock_channel"
         private const val DEFAULT_JPEG_QUALITY = 70
         private const val USB_POLL_MS = 1000L
-        private const val LEGACY_AFTER_MS = 2500L
         private const val HOST_SILENT_MS = 6000L
         private const val IDLE_FRAME_INTERVAL_MS = 1000L
         private const val NAME = "pcdock-android/1.0"
     }
-
-    private enum class Mode { UNKNOWN, V2, LEGACY }
 
     private class Layout(
         val streamW: Int,
@@ -100,8 +98,6 @@ class ScreenCaptureService : Service(), Link.Listener {
 
     // Состояние сессии
     private var link: Link? = null
-    private var connectedAt = 0L
-    private var mode = Mode.UNKNOWN
     private var sessionActive = false
     private var lastHostRx = 0L
     private var stream = StreamConfig()
@@ -505,7 +501,7 @@ class ScreenCaptureService : Service(), Link.Listener {
     private fun sendDisplayInfo() {
         val l = layout ?: return
         val link = link ?: return
-        if (mode == Mode.V2 && sessionActive) {
+        if (sessionActive) {
             link.sendControl(
                 Messages.displayInfo(l.streamW, l.streamH, l.screenW, l.screenH, l.dpi, l.rotation).encode()
             )
@@ -551,7 +547,7 @@ class ScreenCaptureService : Service(), Link.Listener {
     // ---------- звук ----------
 
     private fun canDeliverAudio(): Boolean =
-        link != null && mode == Mode.V2 && sessionActive && stream.audio && audioActive
+        link != null && sessionActive && stream.audio && audioActive
 
     private fun startAudio() {
         if (audioActive) return
@@ -621,7 +617,7 @@ class ScreenCaptureService : Service(), Link.Listener {
     // ---------- кадры ----------
 
     private fun canDeliver(): Boolean =
-        link != null && ((mode == Mode.V2 && sessionActive && stream.video) || mode == Mode.LEGACY)
+        link != null && sessionActive && stream.video
 
     private fun onImage(reader: ImageReader) {
         try {
@@ -698,11 +694,7 @@ class ScreenCaptureService : Service(), Link.Listener {
 
     private fun deliverFrame(jpeg: ByteArray, ptsUs: Long) {
         val l = link ?: return
-        when (mode) {
-            Mode.V2 -> l.offerVideo(Messages.videoFrame(jpeg, ptsUs).encode())
-            Mode.LEGACY -> l.offerVideo(Messages.legacyFrame(jpeg))
-            Mode.UNKNOWN -> return
-        }
+        l.offerVideo(Messages.videoFrame(jpeg, ptsUs).encode())
         framesSent++
     }
 
@@ -714,12 +706,7 @@ class ScreenCaptureService : Service(), Link.Listener {
             tryConnect()
             return
         }
-        if (mode == Mode.UNKNOWN && now - connectedAt >= LEGACY_AFTER_MS) {
-            mode = Mode.LEGACY
-            Log.w(TAG, "ПК не прислал HELLO за ${LEGACY_AFTER_MS}мс: запасной режим v1 (длина + JPEG)")
-            lastJpeg?.let { deliverFrame(it, lastPtsUs) }
-        }
-        if (mode == Mode.V2 && sessionActive && now - lastHostRx >= HOST_SILENT_MS) {
+        if (sessionActive && now - lastHostRx >= HOST_SILENT_MS) {
             sessionActive = false
             Log.w(TAG, "ПК молчит ${HOST_SILENT_MS}мс: сессия приостановлена, жду HELLO")
         }
@@ -763,8 +750,6 @@ class ScreenCaptureService : Service(), Link.Listener {
         connects++
         val l = Link(descriptor, this)
         link = l
-        connectedAt = SystemClock.elapsedRealtime()
-        mode = Mode.UNKNOWN
         sessionActive = false
         stream = StreamConfig()
         Log.d(TAG, "USB подключён (#$connects): ${accessory.manufacturer} ${accessory.model}, жду HELLO от ПК")
@@ -783,7 +768,6 @@ class ScreenCaptureService : Service(), Link.Listener {
                 stopAudio()
                 releaseDockWakeLock()
                 link = null
-                mode = Mode.UNKNOWN
                 sessionActive = false
             }
         }
@@ -800,7 +784,7 @@ class ScreenCaptureService : Service(), Link.Listener {
 
     /** Любой пакет от живого хоста снимает «паузу по тишине» без сброса настроек (в отличие от HELLO). */
     private fun reactivateIfPaused(reason: String) {
-        if (mode == Mode.V2 && !sessionActive) {
+        if (!sessionActive) {
             sessionActive = true
             Log.w(TAG, "Сессия возобновлена по $reason (пауза по тишине снята)")
             lastJpeg?.let { if (canDeliver()) deliverFrame(it, lastPtsUs) }
@@ -863,7 +847,6 @@ class ScreenCaptureService : Service(), Link.Listener {
         Log.d(TAG, "HELLO от ПК: ${hello.name}, версия $versionMax, возможности ${hello.capabilities}")
         // Любой HELLO перезапускает сессию: настройки потока сбрасываются
         stopAudio()
-        mode = Mode.V2
         sessionActive = true
         stream = StreamConfig()
         relayout("HELLO")
@@ -898,7 +881,7 @@ class ScreenCaptureService : Service(), Link.Listener {
             "?"
         }
         Log.d(
-            TAG, "[hb ${sec}s] usb=${if (l != null) "подключён" else "нет"} режим=$mode сессия=$sessionActive " +
+            TAG, "[hb ${sec}s] usb=${if (l != null) "подключён" else "нет"} сессия=$sessionActive " +
                     "проекция=${if (projectionAlive) "жива" else "МЕРТВА"} кадр_назад=${frameAge}с locked=${locked} " +
                     "подключений=$connects колбэков=$imageCallbacks отправлено=$framesSent придержано=$framesThrottled " +
                     (if (l != null) "записано=${l.packetsWritten}пак/${l.bytesWritten}Б прочитано=${l.bytesRead}Б " +

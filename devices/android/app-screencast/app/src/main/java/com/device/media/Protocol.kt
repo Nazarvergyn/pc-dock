@@ -216,10 +216,4 @@ object Messages {
         null
     }
 
-    /** Старый формат (v1): [u32 длина][JPEG]. Нужен для запасного режима, пока ПК не перешёл на v2. */
-    fun legacyFrame(jpeg: ByteArray): ByteArray {
-        val b = ByteBuffer.allocate(4 + jpeg.size)
-        b.putInt(jpeg.size).put(jpeg)
-        return b.array()
-    }
 }
