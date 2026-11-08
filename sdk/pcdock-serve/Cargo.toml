@@ -1,0 +1,18 @@
+[package]
+name = "pcdock-serve"
+version = "0.1.0"
+edition = "2021"
+description = "App protocol and carriers: TCP, WebSocket, Unix socket, named pipe. One message set everywhere."
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "pcdock_serve"
+path = "src/lib.rs"
+
+[dependencies]
+pcdock-core = { path = "../pcdock-core" }
+pcdock-daemon = { path = "../pcdock-daemon" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tungstenite = "0.24"
+interprocess = "2"
