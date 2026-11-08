@@ -15,3 +15,4 @@ dependencyResolutionManagement {
 rootProject.name = "app-screencast"
 include(":app")
 include(":lib-protocol")
+include(":lib-dock")
