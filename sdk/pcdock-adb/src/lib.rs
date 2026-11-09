@@ -22,6 +22,33 @@ pub const PHONE_PORT: u16 = 47631;
 /// Таймауты по умолчанию.
 pub const IO_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// Источник фактов для фермы: устройства, видимые ADB-серверу. Нет сервера — пусто.
+pub struct AdbDiscovery {
+    adb: Adb,
+}
+
+impl AdbDiscovery {
+    pub fn new(adb: Adb) -> Self {
+        Self { adb }
+    }
+}
+
+impl pcdock_core::link::Discovery for AdbDiscovery {
+    fn scan(&mut self) -> Vec<pcdock_core::link::Sighting> {
+        use pcdock_core::link::{Sighting, Transport};
+        self.adb
+            .devices()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|serial| Sighting {
+                transport: Transport::Adb,
+                address: serial.clone(),
+                serial: Some(serial),
+            })
+            .collect()
+    }
+}
+
 /// Минимальный клиент ADB-сервера: `devices` и `forward`. Без шелл-аутов.
 pub struct Adb {
     addr: String,

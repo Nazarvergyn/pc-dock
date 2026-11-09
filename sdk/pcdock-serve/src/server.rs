@@ -16,7 +16,7 @@ use std::time::Duration;
 use interprocess::local_socket::{self, traits::ListenerExt, ListenerOptions, ToNsName};
 use interprocess::TryClone;
 use pcdock_core::input::{DeviceKind, MouseButton, TouchPhase};
-use pcdock_core::link::{InputCmd, PhoneId};
+use pcdock_core::link::{InputCmd, PhoneId, PhoneState};
 use pcdock_farm::{FarmEvent, LiveFarm};
 use tungstenite::Message;
 
@@ -364,6 +364,15 @@ fn route(clients: &Clients, ev: FarmEvent) {
                 }
             }
         }
+        // Обнаружение и состояния касаются всех клиентов: подписки на телефон ещё может не быть.
+        ev @ (FarmEvent::Appeared { .. } | FarmEvent::State { .. } | FarmEvent::Lost { .. }) => {
+            let (_, msg) = map_daemon_event(ev);
+            let text =
+                serde_json::to_string(&msg).unwrap_or_else(|_| r#"{"ev":"Error","detail":"encode"}"#.into());
+            for c in map.values() {
+                let _ = c.tx.send(OutMsg::Json(text.clone()));
+            }
+        }
         other => {
             let (phone, msg) = map_daemon_event(other);
             let text =
@@ -394,6 +403,20 @@ fn map_daemon_event(ev: FarmEvent) -> (PhoneId, ServerMsg) {
         FarmEvent::Disconnected { phone, reason } => (phone, ServerMsg::Disconnected { phone, reason }),
         FarmEvent::LinkDown { phone, detail } => (phone, ServerMsg::LinkDown { phone, detail }),
         FarmEvent::Warning { phone, detail } => (phone, ServerMsg::Warning { phone, detail }),
+        FarmEvent::Appeared { phone, transport, address, serial } => {
+            (phone, ServerMsg::Appeared { phone, transport: transport.to_string(), address, serial })
+        }
+        FarmEvent::State { phone, state } => {
+            let state = match state {
+                PhoneState::Appeared => "appeared",
+                PhoneState::Connecting => "connecting",
+                PhoneState::Ready => "ready",
+                PhoneState::NeedsPermission => "needs_permission",
+                PhoneState::Lost => "lost",
+            };
+            (phone, ServerMsg::State { phone, state: state.into() })
+        }
+        FarmEvent::Lost { phone } => (phone, ServerMsg::Lost { phone }),
         FarmEvent::Video { .. } | FarmEvent::Audio { .. } => {
             unreachable!("видео и звук идут бинарными пакетами")
         }

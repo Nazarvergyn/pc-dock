@@ -87,18 +87,76 @@ pub enum ClientMsg {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "ev")]
 pub enum ServerMsg {
-    Phones { phones: Vec<u32> },
-    Watched { phone: u32, on: bool },
-    Connected { phone: u32, version: u16, caps: u32, name: String },
-    Display { phone: u32, stream_w: u16, stream_h: u16, screen_w: u16, screen_h: u16, dpi: u16, rotation: u8 },
-    AudioConfig { phone: u32, codec: u8, rate: u32, channels: u8 },
-    Status { phone: u32, code: u16, detail: String },
-    PeerSilent { phone: u32 },
-    Malformed { phone: u32, detail: String },
-    Disconnected { phone: u32, reason: String },
-    LinkDown { phone: u32, detail: String },
-    Warning { phone: u32, detail: String },
-    Error { detail: String },
+    Phones {
+        phones: Vec<u32>,
+    },
+    Watched {
+        phone: u32,
+        on: bool,
+    },
+    Connected {
+        phone: u32,
+        version: u16,
+        caps: u32,
+        name: String,
+    },
+    Display {
+        phone: u32,
+        stream_w: u16,
+        stream_h: u16,
+        screen_w: u16,
+        screen_h: u16,
+        dpi: u16,
+        rotation: u8,
+    },
+    AudioConfig {
+        phone: u32,
+        codec: u8,
+        rate: u32,
+        channels: u8,
+    },
+    Status {
+        phone: u32,
+        code: u16,
+        detail: String,
+    },
+    PeerSilent {
+        phone: u32,
+    },
+    Malformed {
+        phone: u32,
+        detail: String,
+    },
+    Disconnected {
+        phone: u32,
+        reason: String,
+    },
+    LinkDown {
+        phone: u32,
+        detail: String,
+    },
+    Warning {
+        phone: u32,
+        detail: String,
+    },
+    /// Обнаружен телефон: номер, путь (`usb`/`adb`/`serial`), адрес и серийник, если известен.
+    Appeared {
+        phone: u32,
+        transport: String,
+        address: String,
+        serial: Option<String>,
+    },
+    /// Состояние: `appeared`, `connecting`, `ready`, `needs_permission`, `lost`.
+    State {
+        phone: u32,
+        state: String,
+    },
+    Lost {
+        phone: u32,
+    },
+    Error {
+        detail: String,
+    },
 }
 
 /// Типы пакетов в потоковых трубах (TCP, unix-сокет, пайп).

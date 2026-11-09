@@ -93,3 +93,42 @@ fn classify_usb(e: &crate::Error) -> LinkError {
         _ => LinkError::Fatal(e.to_string()),
     }
 }
+
+/// Источник фактов о телефонах на USB для фермы. Серийник читается один раз на порт (для этого телефон
+/// приходится открыть; на macOS это может мешать adb) и нужен, чтобы узнать тот же телефон по ADB.
+pub struct UsbDiscovery {
+    ctx: rusb::Context,
+    vendor_ids: Vec<u16>,
+    /// Порт → (серийник, сколько раз пробовали читать). Неудачное чтение повторяется не больше трёх раз.
+    serials: std::collections::HashMap<crate::UsbPort, (Option<String>, u8)>,
+}
+
+impl UsbDiscovery {
+    pub fn new(vendor_ids: Vec<u16>) -> Result<Self, String> {
+        let ctx = rusb::Context::new().map_err(|e| e.to_string())?;
+        Ok(Self { ctx, vendor_ids, serials: Default::default() })
+    }
+}
+
+impl pcdock_core::link::Discovery for UsbDiscovery {
+    fn scan(&mut self) -> Vec<pcdock_core::link::Sighting> {
+        use pcdock_core::link::{Sighting, Transport};
+        let Ok(found) = crate::scan(&self.ctx, &self.vendor_ids) else { return Vec::new() };
+        // Порт, который исчез, забываем: в него может воткнуться другой телефон.
+        self.serials.retain(|port, _| found.iter().any(|(_, info)| &info.port == port));
+        let mut out = Vec::new();
+        for (device, info) in &found {
+            let entry = self.serials.entry(info.port.clone()).or_insert((None, 0));
+            if entry.0.is_none() && entry.1 < 3 {
+                entry.0 = crate::read_serial(device, std::time::Duration::from_millis(500));
+                entry.1 += 1;
+            }
+            out.push(Sighting {
+                transport: Transport::Usb,
+                address: info.port.to_string(),
+                serial: entry.0.clone(),
+            });
+        }
+        out
+    }
+}

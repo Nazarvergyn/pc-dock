@@ -5,8 +5,9 @@
 //! и `--no-usb/--no-adb/--no-serial`; без `--auto` `--phone` это «только эти».
 
 use clap::Parser;
+use pcdock_core::link::{Discovery, LinkFactory, PhoneLink, Sighting, Transport};
 use pcdock_core::session::Config;
-use pcdock_farm::LiveFarm;
+use pcdock_farm::{DiscoveryConfig, LiveFarm};
 use pcdock_serve::Serve;
 use pcdock_usb::UsbLink;
 use pcdock_usb::{PhoneSelector, Settings, UsbPort, ANDROID_VIDS};
@@ -95,7 +96,8 @@ fn main() {
     let mut next_id: u32 = 1;
 
     if args.auto {
-        next_id = auto_add(&mut daemon, &args, next_id);
+        // Живая ферма стартует пустой: телефоны подхватываются по мере появления (plug&play).
+        enable_auto(&mut daemon, &args);
     } else {
         for spec in &args.phones {
             next_id = add_spec(&mut daemon, &args, spec, next_id);
@@ -103,7 +105,7 @@ fn main() {
     };
     let _ = next_id; // id выдан, дальше трубки живут в LiveFarm
 
-    if daemon.phones().is_empty() {
+    if !args.auto && daemon.phones().is_empty() {
         log::error!("нет трубок: демон слушать нечего");
         std::process::exit(1);
     }
@@ -144,40 +146,101 @@ fn main() {
     }
 }
 
-/// Автообнаружение всех семейств. Возвращает следующий свободный id.
-fn auto_add(daemon: &mut LiveFarm, args: &Args, mut next_id: u32) -> u32 {
+/// Автообнаружение: источники по семействам, исключения, фабрика каналов.
+fn enable_auto(daemon: &mut LiveFarm, args: &Args) {
+    let mut providers: Vec<Box<dyn Discovery>> = Vec::new();
     if !args.no_usb {
-        // Как раньше, авторежим берёт только первый телефон: переключение в аксессуар рвёт на нём adb,
-        // а --auto ещё и добавляет adb-трубки. Остальные — явно: `--phone usb:<порт>`.
-        // Отличие от прежнего: трубка привязана к порту, `Dock` трогает только свой телефон.
-        for port in usb_scan() {
-            let spec = format!("usb:{port}");
-            if args.except.iter().any(|e| e == "usb" || e == &spec) {
-                continue;
-            }
-            next_id = add_usb(daemon, args, next_id, Some(PhoneSelector::port(port)));
-            break;
+        match pcdock_usb::UsbDiscovery::new(ANDROID_VIDS.to_vec()) {
+            Ok(d) => providers.push(Box::new(Filtered { inner: Box::new(d), except: args.except.clone() })),
+            Err(e) => log::error!("USB-обнаружение не встало: {e}"),
         }
     }
     if !args.no_adb {
-        for serial in adb_scan() {
-            let spec = format!("adb:{serial}");
-            if args.except.iter().any(|e| e == &spec || e == "adb") {
-                continue;
-            }
-            next_id = add_adb(daemon, args, &serial, next_id);
-        }
+        let d = pcdock_adb::AdbDiscovery::new(pcdock_adb::Adb::local());
+        providers.push(Box::new(Filtered { inner: Box::new(d), except: args.except.clone() }));
     }
     if !args.no_serial {
-        for port in serial_scan() {
-            let spec = format!("serial:{port}");
-            if args.except.iter().any(|e| e == &spec || e == "serial") {
-                continue;
-            }
-            log::warn!("serial {port}: транспорт не готов, пропускаю");
+        log::warn!("serial-трубы: транспорт не готов, пропускаю");
+    }
+    let factory = Factory { args: FactoryArgs::from(args), next_adb_port: 47000 };
+    daemon.enable_discovery(providers, Box::new(factory), DiscoveryConfig::default());
+    log::info!("автообнаружение включено");
+}
+
+/// Отбрасывает факты, подпавшие под `--except`: семейство (`usb`), `usb:1-2.3`, `adb:СЕРИЙНИК`, серийник.
+struct Filtered {
+    inner: Box<dyn Discovery>,
+    except: Vec<String>,
+}
+
+impl Discovery for Filtered {
+    fn scan(&mut self) -> Vec<Sighting> {
+        let except = &self.except;
+        self.inner
+            .scan()
+            .into_iter()
+            .filter(|s| {
+                let by_address = format!("{}:{}", s.transport, s.address);
+                !except.iter().any(|e| {
+                    *e == s.transport.to_string()
+                        || *e == by_address
+                        || s.serial.as_deref() == Some(e.as_str())
+                })
+            })
+            .collect()
+    }
+}
+
+struct FactoryArgs {
+    name: String,
+    video: bool,
+    audio: bool,
+}
+
+impl FactoryArgs {
+    fn from(a: &Args) -> Self {
+        Self { name: a.name.clone(), video: a.video, audio: a.audio }
+    }
+
+    fn config(&self) -> Config {
+        Config {
+            name: self.name.clone(),
+            stream: Some(pcdock_core::packet::SetStream {
+                video: self.video,
+                audio: self.audio,
+                ..Default::default()
+            }),
+            ..Default::default()
         }
     }
-    next_id
+}
+
+/// Создаёт канал по факту обнаружения.
+struct Factory {
+    args: FactoryArgs,
+    next_adb_port: u16,
+}
+
+impl LinkFactory for Factory {
+    fn make(&mut self, s: &Sighting) -> Result<Box<dyn PhoneLink>, String> {
+        match s.transport {
+            Transport::Usb => {
+                let port: UsbPort = s.address.parse()?;
+                let target = PhoneSelector { port: Some(port), serial: s.serial.clone() };
+                let link = UsbLink::new(
+                    self.args.config(),
+                    Settings { target: Some(target), ..Settings::default() },
+                )?;
+                Ok(Box::new(link))
+            }
+            Transport::Adb => {
+                let local = self.next_adb_port;
+                self.next_adb_port = self.next_adb_port.wrapping_add(1).max(47000);
+                Ok(Box::new(pcdock_adb::AdbLink::new(self.args.config(), s.address.clone(), local)))
+            }
+            Transport::Serial => Err("serial-транспорт не готов".into()),
+        }
+    }
 }
 
 /// Явный список «только эти».
@@ -275,49 +338,4 @@ fn add_adb(daemon: &mut LiveFarm, args: &Args, serial: &str, id: u32) -> u32 {
             id
         }
     }
-}
-
-/// Порты, на которых видны телефоны (в любом режиме). Устройства не открываются:
-/// на macOS это мешало бы adb.
-fn usb_scan() -> Vec<UsbPort> {
-    match pcdock_usb::list_phones(&ANDROID_VIDS, false) {
-        Ok(phones) => phones.into_iter().map(|p| p.port).collect(),
-        Err(e) => {
-            log::error!("USB-скан не удался: {e}");
-            Vec::new()
-        }
-    }
-}
-
-/// Серийники через ADB-сервер (без шелл-аутов). Нет сервера — пусто.
-fn adb_scan() -> Vec<String> {
-    match pcdock_adb::Adb::local().devices() {
-        Ok(devs) => devs,
-        Err(e) => {
-            log::debug!("ADB-скан: {e}");
-            Vec::new()
-        }
-    }
-}
-
-/// Кандидаты serial-труб: USB-COM порты.
-fn serial_scan() -> Vec<String> {
-    let mut out = Vec::new();
-    #[cfg(unix)]
-    {
-        if let Ok(dir) = std::fs::read_dir("/dev") {
-            for e in dir.flatten() {
-                let n = e.file_name().to_string_lossy().into_owned();
-                if n.starts_with("ttyUSB") || n.starts_with("ttyACM") {
-                    out.push(format!("/dev/{n}"));
-                }
-            }
-        }
-    }
-    #[cfg(windows)]
-    {
-        // Перечисление COM-портов — следующим шагом вместе с транспортом.
-        let _ = &mut out;
-    }
-    out
 }

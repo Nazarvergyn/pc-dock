@@ -105,3 +105,69 @@ pub trait PhoneLink: Send {
     /// Аккуратно отпустить устройство.
     fn shutdown(&mut self);
 }
+
+/// Каким путём телефон подключён.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Transport {
+    /// USB-аксессуар (AOA).
+    Usb,
+    /// ADB-сервер на телефоне.
+    Adb,
+    /// Последовательная труба от микроконтроллера.
+    Serial,
+}
+
+impl std::fmt::Display for Transport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Usb => "usb",
+            Self::Adb => "adb",
+            Self::Serial => "serial",
+        })
+    }
+}
+
+/// Факт «этот телефон сейчас виден таким путём». Обнаружение выдаёт факты, решения принимает ферма.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sighting {
+    pub transport: Transport,
+    /// Адрес в пределах транспорта: порт USB (`1-2.3`), серийник ADB, путь serial.
+    pub address: String,
+    /// Серийник телефона, если известен: по нему ферма узнаёт один и тот же телефон на разных транспортах.
+    pub serial: Option<String>,
+}
+
+impl Sighting {
+    /// Ключ телефона: серийник, а без него — путь транспорта.
+    pub fn key(&self) -> String {
+        match &self.serial {
+            Some(s) => format!("serial:{s}"),
+            None => format!("{}:{}", self.transport, self.address),
+        }
+    }
+}
+
+/// Источник фактов о телефонах (скан USB, опрос ADB…). Вызывается из потока владельца фермы.
+pub trait Discovery: Send {
+    fn scan(&mut self) -> Vec<Sighting>;
+}
+
+/// Создаёт канал к телефону по факту обнаружения.
+pub trait LinkFactory: Send {
+    fn make(&mut self, sighting: &Sighting) -> Result<Box<dyn PhoneLink>, String>;
+}
+
+/// Состояние телефона для потребителя.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PhoneState {
+    /// Только что замечен.
+    Appeared,
+    /// Идёт подключение или переподключение.
+    Connecting,
+    /// Рукопожатие прошло.
+    Ready,
+    /// Приложение запущено, но захвата экрана нет (нужно разрешение на телефоне).
+    NeedsPermission,
+    /// Пропал с обнаружения.
+    Lost,
+}

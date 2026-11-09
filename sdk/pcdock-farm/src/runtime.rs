@@ -7,10 +7,15 @@
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use pcdock_core::link::{InputCmd, LinkError, PhoneId, PhoneLink};
+use pcdock_core::link::{
+    Discovery, InputCmd, LinkError, LinkFactory, PhoneId, PhoneLink, PhoneState, Sighting, Transport,
+};
 use pcdock_core::session::Event;
+
+/// Код STATUS «проекция остановлена» (PROTOCOL.md): приложение живо, захвата экрана нет.
+const STATUS_PROJECTION_STOPPED: u16 = 1;
 
 /// Кадр с номером. Номер растёт на каждый кадр трубки: клиент сокетов
 /// видит пропуск при заторе.
@@ -82,6 +87,22 @@ pub enum FarmEvent {
         phone: PhoneId,
         detail: String,
     },
+    /// Обнаружение заметило новый телефон (или вернувшийся).
+    Appeared {
+        phone: PhoneId,
+        transport: Transport,
+        address: String,
+        serial: Option<String>,
+    },
+    /// Состояние телефона изменилось.
+    State {
+        phone: PhoneId,
+        state: PhoneState,
+    },
+    /// Телефон пропал надолго.
+    Lost {
+        phone: PhoneId,
+    },
 }
 
 enum WorkerCmd {
@@ -96,6 +117,7 @@ struct Worker {
 
 struct Slot {
     worker: Worker,
+    state: PhoneState,
     watching: bool,
     last_frame: Option<CachedFrame>,
     frame_seq: u64,
@@ -106,12 +128,54 @@ pub struct LiveFarm {
     slots: HashMap<PhoneId, Slot>,
     ev_tx: Sender<FarmEvent>,
     ev_rx: Receiver<FarmEvent>,
+    auto: Option<Auto>,
+}
+
+/// Настройки автообнаружения.
+#[derive(Clone, Debug)]
+pub struct DiscoveryConfig {
+    /// Как часто опрашивать источники (проверяется при каждом `drain`).
+    pub every: Duration,
+    /// Сколько телефон может не показываться, прежде чем считаться потерянным. Больше времени,
+    /// которое телефон отсутствует при переходе в режим аксессуара и обратно (несколько секунд).
+    pub lost_after: Duration,
+    /// Предпочтение транспортов, когда один телефон виден по нескольким: раньше в списке — важнее.
+    pub order: Vec<Transport>,
+}
+
+impl Default for DiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            every: Duration::from_secs(2),
+            lost_after: Duration::from_secs(15),
+            order: vec![Transport::Usb, Transport::Adb, Transport::Serial],
+        }
+    }
+}
+
+struct Tracked {
+    id: PhoneId,
+    transport: Transport,
+    last_seen: Instant,
+}
+
+struct Auto {
+    providers: Vec<Box<dyn Discovery>>,
+    factory: Box<dyn LinkFactory>,
+    cfg: DiscoveryConfig,
+    last_scan: Option<Instant>,
+    /// Ключ телефона → слот, который ведёт обнаружение.
+    tracked: HashMap<String, Tracked>,
+    /// Ключ → выданный идентификатор: вернувшийся телефон получает прежний номер.
+    ids: HashMap<String, PhoneId>,
+    /// Ключи, на которых фабрика уже ошиблась: предупреждаем один раз.
+    failed: std::collections::HashSet<String>,
 }
 
 impl LiveFarm {
     pub fn new() -> Self {
         let (ev_tx, ev_rx) = mpsc::channel();
-        Self { slots: HashMap::new(), ev_tx, ev_rx }
+        Self { slots: HashMap::new(), ev_tx, ev_rx, auto: None }
     }
 
     /// Канал событий наружу. Неблокирующий опрос — через `try_recv`.
@@ -140,6 +204,7 @@ impl LiveFarm {
             id,
             Slot {
                 worker: Worker { cmd_tx, handle: Some(handle) },
+                state: PhoneState::Connecting,
                 watching: false,
                 last_frame: None,
                 frame_seq: 0,
@@ -179,10 +244,148 @@ impl LiveFarm {
         self.slots.get(&id).ok_or_else(|| format!("нет трубки {id}")).map(|s| s.last_frame.clone())
     }
 
-    /// Разобрать входящие события воркеров: кэш кадров, фильтр просмотра.
+    /// Включает автообнаружение: источники опрашиваются при `drain`, найденные телефоны
+    /// получают канал от фабрики. Явно добавленные телефоны (`add_phone`) обнаружение не трогает.
+    pub fn enable_discovery(
+        &mut self,
+        providers: Vec<Box<dyn Discovery>>,
+        factory: Box<dyn LinkFactory>,
+        cfg: DiscoveryConfig,
+    ) {
+        self.auto = Some(Auto {
+            providers,
+            factory,
+            cfg,
+            last_scan: None,
+            tracked: HashMap::new(),
+            ids: HashMap::new(),
+            failed: Default::default(),
+        });
+    }
+
+    /// Состояние телефона.
+    pub fn state(&self, id: PhoneId) -> Result<PhoneState, String> {
+        self.slots.get(&id).ok_or_else(|| format!("нет трубки {id}")).map(|s| s.state)
+    }
+
+    /// Один проход обнаружения прямо сейчас (в `drain` он идёт по таймеру). События — в возврате.
+    pub fn discover_now(&mut self) -> Vec<FarmEvent> {
+        let mut out = Vec::new();
+        self.run_discovery(true, &mut out);
+        out
+    }
+
+    fn set_state(&mut self, phone: PhoneId, state: PhoneState, out: &mut Vec<FarmEvent>) {
+        if let Some(slot) = self.slots.get_mut(&phone) {
+            if slot.state != state {
+                slot.state = state;
+                out.push(FarmEvent::State { phone, state });
+            }
+        }
+    }
+
+    fn run_discovery(&mut self, force: bool, out: &mut Vec<FarmEvent>) {
+        let Some(mut auto) = self.auto.take() else { return };
+        let now = Instant::now();
+        if !force && auto.last_scan.is_some_and(|t| now.duration_since(t) < auto.cfg.every) {
+            self.auto = Some(auto);
+            return;
+        }
+        auto.last_scan = Some(now);
+
+        // Факты, сгруппированные по телефону: один телефон может быть виден несколькими путями.
+        let mut seen: HashMap<String, Vec<Sighting>> = HashMap::new();
+        for p in auto.providers.iter_mut() {
+            for s in p.scan() {
+                seen.entry(s.key()).or_default().push(s);
+            }
+        }
+        let rank = |t: Transport| auto.cfg.order.iter().position(|o| *o == t).unwrap_or(usize::MAX);
+
+        for (key, group) in &seen {
+            let best = group.iter().min_by_key(|s| rank(s.transport)).expect("группа не пуста").clone();
+            match auto.tracked.get_mut(key) {
+                Some(t) => {
+                    t.last_seen = now;
+                    let still_there = group.iter().any(|s| s.transport == t.transport);
+                    if still_there {
+                        continue;
+                    }
+                    // Прежний путь пропал, а другой есть: переводим телефон на него под тем же номером.
+                    let id = t.id;
+                    match auto.factory.make(&best) {
+                        Ok(link) => {
+                            let _ = self.remove_phone(id);
+                            if self.add_phone(id, link).is_ok() {
+                                t.transport = best.transport;
+                                out.push(FarmEvent::Appeared {
+                                    phone: id,
+                                    transport: best.transport,
+                                    address: best.address.clone(),
+                                    serial: best.serial.clone(),
+                                });
+                            }
+                        }
+                        Err(e) => out.push(FarmEvent::Warning { phone: id, detail: e }),
+                    }
+                }
+                None => {
+                    let remembered = auto.ids.get(key).copied();
+                    let id = match remembered {
+                        Some(id) if !self.slots.contains_key(&id) => id,
+                        _ => (1..)
+                            .find(|n| !self.slots.contains_key(n) && !auto.ids.values().any(|v| v == n))
+                            .expect("кончились номера"),
+                    };
+                    match auto.factory.make(&best) {
+                        Ok(link) => {
+                            if self.add_phone(id, link).is_ok() {
+                                auto.ids.insert(key.clone(), id);
+                                auto.failed.remove(key);
+                                auto.tracked.insert(
+                                    key.clone(),
+                                    Tracked { id, transport: best.transport, last_seen: now },
+                                );
+                                out.push(FarmEvent::Appeared {
+                                    phone: id,
+                                    transport: best.transport,
+                                    address: best.address.clone(),
+                                    serial: best.serial.clone(),
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            if auto.failed.insert(key.clone()) {
+                                out.push(FarmEvent::Warning { phone: 0, detail: format!("{key}: {e}") });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Давно не виденные телефоны считаем потерянными; номер запоминаем.
+        let gone: Vec<String> = auto
+            .tracked
+            .iter()
+            .filter(|(k, t)| !seen.contains_key(*k) && now.duration_since(t.last_seen) >= auto.cfg.lost_after)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in gone {
+            if let Some(t) = auto.tracked.remove(&key) {
+                self.set_state(t.id, PhoneState::Lost, out);
+                let _ = self.remove_phone(t.id);
+                out.push(FarmEvent::Lost { phone: t.id });
+            }
+        }
+        self.auto = Some(auto);
+    }
+
+    /// Разобрать входящие события воркеров: кэш кадров, фильтр просмотра, состояния, обнаружение.
     /// Возвращает события для фронтенда (сокеты, окно, скрипты).
     pub fn drain(&mut self) -> Vec<FarmEvent> {
         let mut out = Vec::new();
+        self.run_discovery(false, &mut out);
         while let Ok(ev) = self.ev_rx.try_recv() {
             let phone = match &ev {
                 FarmEvent::Connected { phone, .. }
@@ -195,9 +398,31 @@ impl LiveFarm {
                 | FarmEvent::Malformed { phone, .. }
                 | FarmEvent::Disconnected { phone, .. }
                 | FarmEvent::LinkDown { phone, .. }
-                | FarmEvent::Warning { phone, .. } => *phone,
+                | FarmEvent::Warning { phone, .. }
+                | FarmEvent::Appeared { phone, .. }
+                | FarmEvent::State { phone, .. }
+                | FarmEvent::Lost { phone } => *phone,
             };
+            // События воркера про телефон, которого уже убрали (потеря, смена пути), отбрасываем.
+            if !self.slots.contains_key(&phone) && !matches!(ev, FarmEvent::Lost { .. }) {
+                continue;
+            }
             let watching = self.slots.get(&phone).map(|s| s.watching).unwrap_or(false);
+            match &ev {
+                FarmEvent::Connected { .. } => self.set_state(phone, PhoneState::Ready, &mut out),
+                FarmEvent::Status { code, .. } if *code == STATUS_PROJECTION_STOPPED => {
+                    self.set_state(phone, PhoneState::NeedsPermission, &mut out)
+                }
+                FarmEvent::Video { .. }
+                    if self.slots.get(&phone).is_some_and(|s| s.state == PhoneState::NeedsPermission) =>
+                {
+                    self.set_state(phone, PhoneState::Ready, &mut out)
+                }
+                FarmEvent::LinkDown { .. } | FarmEvent::Disconnected { .. } => {
+                    self.set_state(phone, PhoneState::Connecting, &mut out)
+                }
+                _ => {}
+            }
             match ev {
                 FarmEvent::Video { frame, .. } => {
                     if let Some(slot) = self.slots.get_mut(&phone) {
@@ -469,6 +694,143 @@ mod tests {
         assert!(!got.iter().any(|e| matches!(e, FarmEvent::Video { .. })));
         let last = d.last_frame(7).unwrap().expect("кэш без просмотра");
         assert_eq!(last.pts_us, 5);
+    }
+
+    /// Источник с переключаемым списком фактов.
+    struct FakeScan(Arc<Mutex<Vec<Sighting>>>);
+
+    impl Discovery for FakeScan {
+        fn scan(&mut self) -> Vec<Sighting> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    struct FakeFactory;
+
+    impl LinkFactory for FakeFactory {
+        fn make(&mut self, _: &Sighting) -> Result<Box<dyn PhoneLink>, String> {
+            Ok(Box::new(FakeLink::with_events(vec![hello()]).0))
+        }
+    }
+
+    fn sight(transport: Transport, address: &str, serial: Option<&str>) -> Sighting {
+        Sighting { transport, address: address.into(), serial: serial.map(String::from) }
+    }
+
+    fn auto_farm(lost_after: Duration) -> (LiveFarm, Arc<Mutex<Vec<Sighting>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut f = LiveFarm::new();
+        let cfg = DiscoveryConfig { every: Duration::ZERO, lost_after, ..Default::default() };
+        f.enable_discovery(vec![Box::new(FakeScan(seen.clone()))], Box::new(FakeFactory), cfg);
+        (f, seen)
+    }
+
+    fn appeared(evs: &[FarmEvent]) -> Vec<(PhoneId, Transport)> {
+        evs.iter()
+            .filter_map(|e| match e {
+                FarmEvent::Appeared { phone, transport, .. } => Some((*phone, *transport)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn empty_farm_picks_up_phone_that_appears_later() {
+        let (mut f, seen) = auto_farm(Duration::from_secs(3600));
+        assert!(f.discover_now().is_empty());
+        assert!(f.phones().is_empty());
+        seen.lock().unwrap().push(sight(Transport::Usb, "1-2", Some("AAA")));
+        let evs = f.discover_now();
+        assert_eq!(appeared(&evs), vec![(1, Transport::Usb)]);
+        assert_eq!(f.phones(), vec![1]);
+        // Повторный скан того же телефона ничего не меняет.
+        assert!(appeared(&f.discover_now()).is_empty());
+        assert_eq!(f.phones(), vec![1]);
+    }
+
+    #[test]
+    fn one_phone_on_two_transports_is_one_slot_and_prefers_usb() {
+        let (mut f, seen) = auto_farm(Duration::from_secs(3600));
+        *seen.lock().unwrap() =
+            vec![sight(Transport::Adb, "AAA", Some("AAA")), sight(Transport::Usb, "1-2", Some("AAA"))];
+        let evs = f.discover_now();
+        assert_eq!(appeared(&evs), vec![(1, Transport::Usb)]);
+        assert_eq!(f.phones().len(), 1);
+    }
+
+    #[test]
+    fn switches_transport_when_current_path_disappears() {
+        let (mut f, seen) = auto_farm(Duration::from_secs(3600));
+        *seen.lock().unwrap() =
+            vec![sight(Transport::Usb, "1-2", Some("AAA")), sight(Transport::Adb, "AAA", Some("AAA"))];
+        f.discover_now();
+        // USB-путь пропал (кабель переключили), ADB остался: тот же номер, другой путь.
+        *seen.lock().unwrap() = vec![sight(Transport::Adb, "AAA", Some("AAA"))];
+        let evs = f.discover_now();
+        assert_eq!(appeared(&evs), vec![(1, Transport::Adb)]);
+        assert_eq!(f.phones(), vec![1]);
+    }
+
+    #[test]
+    fn short_absence_is_not_loss_and_long_one_is() {
+        let (mut f, seen) = auto_farm(Duration::from_secs(3600));
+        *seen.lock().unwrap() = vec![sight(Transport::Usb, "1-2", Some("AAA"))];
+        f.discover_now();
+        // Переход в режим аксессуара: телефон на секунды пропадает.
+        seen.lock().unwrap().clear();
+        let evs = f.discover_now();
+        assert!(!evs.iter().any(|e| matches!(e, FarmEvent::Lost { .. })));
+        assert_eq!(f.phones(), vec![1]);
+
+        let (mut f, seen) = auto_farm(Duration::ZERO);
+        *seen.lock().unwrap() = vec![sight(Transport::Usb, "1-2", Some("AAA"))];
+        f.discover_now();
+        seen.lock().unwrap().clear();
+        let evs = f.discover_now();
+        assert!(evs.iter().any(|e| matches!(e, FarmEvent::Lost { phone: 1 })));
+        assert!(f.phones().is_empty());
+        // Вернулся тот же телефон: прежний номер.
+        *seen.lock().unwrap() = vec![sight(Transport::Usb, "1-3", Some("AAA"))];
+        assert_eq!(appeared(&f.discover_now()), vec![(1, Transport::Usb)]);
+    }
+
+    #[test]
+    fn two_phones_get_two_numbers_and_manual_ones_are_left_alone() {
+        let (mut f, seen) = auto_farm(Duration::ZERO);
+        f.add_phone(1, Box::new(FakeLink::with_events(vec![]).0)).unwrap();
+        *seen.lock().unwrap() =
+            vec![sight(Transport::Usb, "1-2", Some("AAA")), sight(Transport::Usb, "1-3", Some("BBB"))];
+        let evs = f.discover_now();
+        let mut got = appeared(&evs);
+        got.sort();
+        assert_eq!(got, vec![(2, Transport::Usb), (3, Transport::Usb)]);
+        // Телефон 1 добавлен руками: обнаружение его не теряет.
+        seen.lock().unwrap().clear();
+        f.discover_now();
+        assert_eq!(f.phones(), vec![1]);
+    }
+
+    #[test]
+    fn state_follows_session_events() {
+        let mut d = LiveFarm::new();
+        let (l, _) = FakeLink::with_events(vec![
+            hello(),
+            Event::Status(pcdock_core::packet::Status { code: 1, detail: "projection stopped".into() }),
+            video(3),
+        ]);
+        d.add_phone(5, Box::new(l)).unwrap();
+        assert_eq!(d.state(5).unwrap(), PhoneState::Connecting);
+        let mut states = Vec::new();
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(2) && states.len() < 3 {
+            for e in d.drain() {
+                if let FarmEvent::State { state, .. } = e {
+                    states.push(state);
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(states, vec![PhoneState::Ready, PhoneState::NeedsPermission, PhoneState::Ready]);
     }
 
     #[test]

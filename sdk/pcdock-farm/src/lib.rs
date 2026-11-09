@@ -10,7 +10,7 @@
 //! видит пропуск при заторе.
 
 pub mod runtime;
-pub use runtime::{CachedFrame, FarmEvent, LiveFarm};
+pub use runtime::{CachedFrame, DiscoveryConfig, FarmEvent, LiveFarm};
 
 use std::collections::HashMap;
 
