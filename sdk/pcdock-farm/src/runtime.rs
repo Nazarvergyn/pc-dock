@@ -124,16 +124,106 @@ struct Slot {
 }
 
 /// Демон. Не потокобезопасен сам: держите в одном потоке-владельце.
-pub struct LiveFarm {
+pub struct Farm {
     slots: HashMap<PhoneId, Slot>,
     ev_tx: Sender<FarmEvent>,
     ev_rx: Receiver<FarmEvent>,
     auto: Option<Auto>,
 }
 
+/// Закреплённый телефон: правило «этот телефон должен быть». Частный случай обнаружения: подходящие
+/// факты принимаются даже при выключенном автообнаружении, а транспорт задан правилом.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PhoneSpec {
+    /// `None` — любой транспорт.
+    pub transport: Option<Transport>,
+    /// Порт USB, серийник ADB или путь serial.
+    pub address: Option<String>,
+    /// Серийник телефона.
+    pub serial: Option<String>,
+}
+
+impl PhoneSpec {
+    /// Разбирает `usb` (любой USB-телефон), `usb:1-2.3` (порт), `usb:СЕРИЙНИК`, `adb:СЕРИЙНИК`, `serial:ПУТЬ`.
+    pub fn parse(spec: &str) -> Result<Self, String> {
+        let (family, what) = match spec.split_once(':') {
+            Some((f, w)) => (f, Some(w)),
+            None => (spec, None),
+        };
+        let transport = match family {
+            "usb" => Transport::Usb,
+            "adb" => Transport::Adb,
+            "serial" => Transport::Serial,
+            _ => {
+                return Err(format!(
+                "неизвестный формат телефона {spec:?} (usb, usb:ПОРТ|СЕРИЙНИК, adb:СЕРИЙНИК, serial:ПУТЬ)"
+            ))
+            }
+        };
+        let mut out = Self { transport: Some(transport), address: None, serial: None };
+        match what {
+            None => {}
+            Some("") => return Err(format!("пусто после двоеточия в {spec:?}")),
+            Some(w) if transport == Transport::Usb && !looks_like_port(w) => out.serial = Some(w.into()),
+            Some(w) => out.address = Some(w.into()),
+        }
+        if transport == Transport::Adb && out.address.is_none() {
+            return Err("для adb нужен серийник: adb:СЕРИЙНИК".into());
+        }
+        Ok(out)
+    }
+
+    pub fn matches(&self, s: &Sighting) -> bool {
+        self.transport.is_none_or(|t| t == s.transport)
+            && self.address.as_ref().is_none_or(|a| *a == s.address)
+            && self.serial.as_ref().is_none_or(|v| s.serial.as_ref() == Some(v))
+    }
+}
+
+/// Порт USB выглядит как `1-2` или `1-2.3`; всё остальное считаем серийником.
+fn looks_like_port(s: &str) -> bool {
+    let Some((bus, ports)) = s.split_once('-') else { return false };
+    !bus.is_empty()
+        && bus.chars().all(|c| c.is_ascii_digit())
+        && !ports.is_empty()
+        && ports.split('.').all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Какие факты обнаружения принимает ферма.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rules {
+    /// Брать всё, что найдено (кроме `except`).
+    pub auto: bool,
+    /// Исключения для `auto`: семейство (`usb`), `usb:1-2.3`, `adb:СЕРИЙНИК` или просто серийник.
+    pub except: Vec<String>,
+    /// Закреплённые телефоны принимаются всегда.
+    pub pinned: Vec<PhoneSpec>,
+}
+
+impl Default for Rules {
+    fn default() -> Self {
+        Self { auto: true, except: Vec::new(), pinned: Vec::new() }
+    }
+}
+
+impl Rules {
+    pub fn accepts(&self, s: &Sighting) -> bool {
+        if self.pinned.iter().any(|p| p.matches(s)) {
+            return true;
+        }
+        let by_address = format!("{}:{}", s.transport, s.address);
+        self.auto
+            && !self.except.iter().any(|e| {
+                *e == s.transport.to_string() || *e == by_address || s.serial.as_deref() == Some(e.as_str())
+            })
+    }
+}
+
 /// Настройки автообнаружения.
 #[derive(Clone, Debug)]
 pub struct DiscoveryConfig {
+    /// Что принимать.
+    pub rules: Rules,
     /// Как часто опрашивать источники (проверяется при каждом `drain`).
     pub every: Duration,
     /// Сколько телефон может не показываться, прежде чем считаться потерянным. Больше времени,
@@ -146,6 +236,7 @@ pub struct DiscoveryConfig {
 impl Default for DiscoveryConfig {
     fn default() -> Self {
         Self {
+            rules: Rules::default(),
             every: Duration::from_secs(2),
             lost_after: Duration::from_secs(15),
             order: vec![Transport::Usb, Transport::Adb, Transport::Serial],
@@ -172,7 +263,7 @@ struct Auto {
     failed: std::collections::HashSet<String>,
 }
 
-impl LiveFarm {
+impl Farm {
     pub fn new() -> Self {
         let (ev_tx, ev_rx) = mpsc::channel();
         Self { slots: HashMap::new(), ev_tx, ev_rx, auto: None }
@@ -297,7 +388,9 @@ impl LiveFarm {
         let mut seen: HashMap<String, Vec<Sighting>> = HashMap::new();
         for p in auto.providers.iter_mut() {
             for s in p.scan() {
-                seen.entry(s.key()).or_default().push(s);
+                if auto.cfg.rules.accepts(&s) {
+                    seen.entry(s.key()).or_default().push(s);
+                }
             }
         }
         let rank = |t: Transport| auto.cfg.order.iter().position(|o| *o == t).unwrap_or(usize::MAX);
@@ -442,13 +535,13 @@ impl LiveFarm {
     }
 }
 
-impl Default for LiveFarm {
+impl Default for Farm {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Drop for LiveFarm {
+impl Drop for Farm {
     fn drop(&mut self) {
         for (_, mut slot) in self.slots.drain() {
             let _ = slot.worker.cmd_tx.send(WorkerCmd::Stop);
@@ -624,7 +717,7 @@ mod tests {
         Event::Video(VideoFrame { codec: 1, key_frame: true, pts_us: pts, data: vec![1, 2, 3] })
     }
 
-    fn wait_for(d: &mut LiveFarm, want_video: usize, timeout_ms: u64) -> Vec<FarmEvent> {
+    fn wait_for(d: &mut Farm, want_video: usize, timeout_ms: u64) -> Vec<FarmEvent> {
         let mut got = Vec::new();
         let t0 = std::time::Instant::now();
         while t0.elapsed() < Duration::from_millis(timeout_ms) {
@@ -639,7 +732,7 @@ mod tests {
 
     #[test]
     fn routes_commands_and_caches_frames_per_phone() {
-        let mut d = LiveFarm::new();
+        let mut d = Farm::new();
         let (l1, inputs1) = FakeLink::with_events(vec![hello(), display(), video(10), video(11)]);
         let (l2, inputs2) = FakeLink::with_events(vec![hello()]);
         d.add_phone(1, Box::new(l1)).unwrap();
@@ -683,7 +776,7 @@ mod tests {
 
     #[test]
     fn unwatched_video_not_forwarded_but_cached() {
-        let mut d = LiveFarm::new();
+        let mut d = Farm::new();
         let (l, _) = FakeLink::with_events(vec![hello(), video(5)]);
         d.add_phone(7, Box::new(l)).unwrap();
         // watching выключен: видео в событиях нет, но кэш есть.
@@ -717,9 +810,9 @@ mod tests {
         Sighting { transport, address: address.into(), serial: serial.map(String::from) }
     }
 
-    fn auto_farm(lost_after: Duration) -> (LiveFarm, Arc<Mutex<Vec<Sighting>>>) {
+    fn auto_farm(lost_after: Duration) -> (Farm, Arc<Mutex<Vec<Sighting>>>) {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let mut f = LiveFarm::new();
+        let mut f = Farm::new();
         let cfg = DiscoveryConfig { every: Duration::ZERO, lost_after, ..Default::default() };
         f.enable_discovery(vec![Box::new(FakeScan(seen.clone()))], Box::new(FakeFactory), cfg);
         (f, seen)
@@ -812,7 +905,7 @@ mod tests {
 
     #[test]
     fn state_follows_session_events() {
-        let mut d = LiveFarm::new();
+        let mut d = Farm::new();
         let (l, _) = FakeLink::with_events(vec![
             hello(),
             Event::Status(pcdock_core::packet::Status { code: 1, detail: "projection stopped".into() }),
@@ -831,6 +924,68 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(states, vec![PhoneState::Ready, PhoneState::NeedsPermission, PhoneState::Ready]);
+    }
+
+    #[test]
+    fn phone_specs_parse_and_match() {
+        let usb_port = PhoneSpec::parse("usb:1-2.3").unwrap();
+        assert_eq!(usb_port.address.as_deref(), Some("1-2.3"));
+        let usb_serial = PhoneSpec::parse("usb:ABC123").unwrap();
+        assert_eq!(usb_serial.serial.as_deref(), Some("ABC123"));
+        assert_eq!(
+            PhoneSpec::parse("usb").unwrap(),
+            PhoneSpec { transport: Some(Transport::Usb), ..Default::default() }
+        );
+        assert!(PhoneSpec::parse("adb").is_err());
+        assert!(PhoneSpec::parse("usb:").is_err());
+        assert!(PhoneSpec::parse("bt:1").is_err());
+
+        assert!(usb_port.matches(&sight(Transport::Usb, "1-2.3", None)));
+        assert!(!usb_port.matches(&sight(Transport::Usb, "1-4", None)));
+        assert!(!usb_port.matches(&sight(Transport::Adb, "1-2.3", None)));
+        assert!(usb_serial.matches(&sight(Transport::Usb, "1-9", Some("ABC123"))));
+        assert!(!usb_serial.matches(&sight(Transport::Adb, "ABC123", Some("ABC123"))));
+        assert!(PhoneSpec::parse("adb:ABC123").unwrap().matches(&sight(
+            Transport::Adb,
+            "ABC123",
+            Some("ABC123")
+        )));
+    }
+
+    #[test]
+    fn rules_combine_auto_except_and_pinned() {
+        let usb = sight(Transport::Usb, "1-2", Some("AAA"));
+        let adb = sight(Transport::Adb, "BBB", Some("BBB"));
+        let only_pinned =
+            Rules { auto: false, pinned: vec![PhoneSpec::parse("adb:BBB").unwrap()], ..Rules::default() };
+        assert!(!only_pinned.accepts(&usb));
+        assert!(only_pinned.accepts(&adb));
+
+        let auto_except = Rules { auto: true, except: vec!["usb".into(), "BBB".into()], pinned: vec![] };
+        assert!(!auto_except.accepts(&usb) && !auto_except.accepts(&adb));
+
+        // Закреплённый телефон принимается, даже если автообнаружение его исключило.
+        let both = Rules {
+            auto: true,
+            except: vec!["usb".into()],
+            pinned: vec![PhoneSpec::parse("usb:1-2").unwrap()],
+        };
+        assert!(both.accepts(&usb));
+        assert!(Rules::default().accepts(&usb));
+    }
+
+    #[test]
+    fn pinned_only_farm_ignores_other_phones() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut f = Farm::new();
+        let rules =
+            Rules { auto: false, pinned: vec![PhoneSpec::parse("usb:1-3").unwrap()], ..Rules::default() };
+        let cfg = DiscoveryConfig { rules, every: Duration::ZERO, ..Default::default() };
+        f.enable_discovery(vec![Box::new(FakeScan(seen.clone()))], Box::new(FakeFactory), cfg);
+        *seen.lock().unwrap() =
+            vec![sight(Transport::Usb, "1-2", Some("AAA")), sight(Transport::Usb, "1-3", Some("BBB"))];
+        assert_eq!(appeared(&f.discover_now()), vec![(1, Transport::Usb)]);
+        assert_eq!(f.phones(), vec![1]);
     }
 
     #[test]

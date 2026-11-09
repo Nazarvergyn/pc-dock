@@ -5,3 +5,10 @@ edition = "2021"
 
 [dependencies]
 pcdock-core = { path = "../pcdock-core" }
+pcdock-usb = { path = "../pcdock-usb", optional = true }
+pcdock-adb = { path = "../pcdock-adb", optional = true }
+
+[features]
+# Готовая настройка с USB и ADB (`FarmConfig`, фабрика каналов). Без неё ферма — только ядро и интерфейсы.
+default = ["transports"]
+transports = ["dep:pcdock-usb", "dep:pcdock-adb"]

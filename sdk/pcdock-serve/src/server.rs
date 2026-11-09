@@ -17,7 +17,7 @@ use interprocess::local_socket::{self, traits::ListenerExt, ListenerOptions, ToN
 use interprocess::TryClone;
 use pcdock_core::input::{DeviceKind, MouseButton, TouchPhase};
 use pcdock_core::link::{InputCmd, PhoneId, PhoneState};
-use pcdock_farm::{FarmEvent, LiveFarm};
+use pcdock_farm::{Farm, FarmEvent};
 use tungstenite::Message;
 
 use super::protocol::{
@@ -43,13 +43,13 @@ type Clients = Arc<Mutex<HashMap<u64, Client>>>;
 /// живут в своих потоках, демон дёргается под мьютексом.
 #[derive(Clone)]
 pub struct Serve {
-    daemon: Arc<Mutex<LiveFarm>>,
+    daemon: Arc<Mutex<Farm>>,
     clients: Clients,
     next_id: Arc<Mutex<u64>>,
 }
 
 impl Serve {
-    pub fn new(daemon: LiveFarm) -> Self {
+    pub fn new(daemon: Farm) -> Self {
         let serve = Self {
             daemon: Arc::new(Mutex::new(daemon)),
             clients: Arc::new(Mutex::new(HashMap::new())),
@@ -60,7 +60,7 @@ impl Serve {
     }
 
     /// Доступ к демону (добавить трубку, положить команду напрямую).
-    pub fn daemon(&self) -> &Arc<Mutex<LiveFarm>> {
+    pub fn daemon(&self) -> &Arc<Mutex<Farm>> {
         &self.daemon
     }
 

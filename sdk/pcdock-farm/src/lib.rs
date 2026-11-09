@@ -5,12 +5,17 @@
 //! в каких потоках дёргать методы. Ядро при этом не меняется.
 //!
 //! Видео кэшируется: последнее событие `Video` каждого телефона хранится
-//! в слоте и доступно через [`Farm::last_frame`] не потребляя очередь событий.
+//! в слоте и доступно через [`Registry::last_frame`] не потребляя очередь событий.
 //! Счётчик `frame_seq` растёт на каждый новый кадр — по нему клиент сокетов
 //! видит пропуск при заторе.
 
 pub mod runtime;
-pub use runtime::{CachedFrame, DiscoveryConfig, FarmEvent, LiveFarm};
+pub use runtime::{CachedFrame, DiscoveryConfig, Farm, FarmEvent, PhoneSpec, Rules};
+
+#[cfg(feature = "transports")]
+mod config;
+#[cfg(feature = "transports")]
+pub use config::FarmConfig;
 
 use std::collections::HashMap;
 
@@ -67,11 +72,11 @@ impl From<InputError> for FarmError {
 
 /// Реестр сессий. Не потокобезопасна: синхронизация на вызывающем/демоне.
 #[derive(Debug, Default)]
-pub struct Farm {
+pub struct Registry {
     phones: HashMap<PhoneId, Slot>,
 }
 
-impl Farm {
+impl Registry {
     pub fn new() -> Self {
         Self { phones: HashMap::new() }
     }
@@ -307,7 +312,7 @@ mod tests {
 
     #[test]
     fn add_remove_and_unknown_phone() {
-        let mut farm = Farm::new();
+        let mut farm = Registry::new();
         assert!(farm.is_empty());
         farm.add_phone(7).unwrap();
         assert_eq!(farm.add_phone(7), Err(FarmError::AlreadyExists(7)));
@@ -318,7 +323,7 @@ mod tests {
 
     #[test]
     fn phones_are_isolated() {
-        let mut farm = Farm::new();
+        let mut farm = Registry::new();
         farm.add_phone(1).unwrap();
         farm.add_phone(2).unwrap();
         farm.start(1, 1000).unwrap();
@@ -338,7 +343,7 @@ mod tests {
 
     #[test]
     fn video_is_cached_per_phone_with_seq() {
-        let mut farm = Farm::new();
+        let mut farm = Registry::new();
         farm.add_phone(1).unwrap();
         farm.add_phone(2).unwrap();
         farm.start(1, 0).unwrap();
@@ -365,7 +370,7 @@ mod tests {
 
     #[test]
     fn watching_flag_and_touch_params() {
-        let mut farm = Farm::new();
+        let mut farm = Registry::new();
         farm.add_phone(3).unwrap();
         assert_eq!(farm.is_watching(3), Ok(false));
         farm.set_watching(3, true).unwrap();

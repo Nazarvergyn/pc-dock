@@ -9,7 +9,7 @@ use std::panic::catch_unwind;
 use pcdock_core::hid::Direction;
 use pcdock_core::input::{DeviceKind, MouseButton, TouchPhase};
 use pcdock_core::session::{Event, State, Transmit};
-use pcdock_farm::{Farm, FarmError, PhoneId};
+use pcdock_farm::{FarmError, PhoneId, Registry};
 
 use super::{check_slice, copy_out, guard, transmit_rc};
 use super::{
@@ -24,7 +24,7 @@ use super::{
 
 /// Непрозрачный дескриптор фермы.
 pub struct PcdockFarm {
-    farm: Farm,
+    farm: Registry,
     last_tx: HashMap<PhoneId, Transmit>,
     last_ev: HashMap<PhoneId, Event>,
 }
@@ -83,7 +83,7 @@ fn last_event(h: &PcdockFarm, id: PhoneId) -> Result<Event, i32> {
 pub extern "C" fn pcdock_farm_new() -> *mut PcdockFarm {
     match catch_unwind(|| {
         Box::into_raw(Box::new(PcdockFarm {
-            farm: Farm::new(),
+            farm: Registry::new(),
             last_tx: HashMap::new(),
             last_ev: HashMap::new(),
         }))

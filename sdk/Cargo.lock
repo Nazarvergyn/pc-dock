@@ -358,7 +358,6 @@ name = "pcdock-adb"
 version = "0.1.0"
 dependencies = [
  "pcdock-core",
- "pcdock-farm",
 ]
 
 [[package]]
@@ -369,7 +368,9 @@ version = "0.1.0"
 name = "pcdock-farm"
 version = "0.1.0"
 dependencies = [
+ "pcdock-adb",
  "pcdock-core",
+ "pcdock-usb",
 ]
 
 [[package]]
@@ -407,11 +408,8 @@ dependencies = [
  "clap",
  "env_logger",
  "log",
- "pcdock-adb",
- "pcdock-core",
  "pcdock-farm",
  "pcdock-serve",
- "pcdock-usb",
 ]
 
 [[package]]

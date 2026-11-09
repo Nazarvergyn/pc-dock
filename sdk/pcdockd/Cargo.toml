@@ -10,11 +10,8 @@ name = "pcdockd"
 path = "src/main.rs"
 
 [dependencies]
-pcdock-core = { path = "../pcdock-core" }
-pcdock-usb = { path = "../pcdock-usb" }
 pcdock-farm = { path = "../pcdock-farm" }
 pcdock-serve = { path = "../pcdock-serve" }
-pcdock-adb = { path = "../pcdock-adb" }
 clap = { version = "4", features = ["derive"] }
 log = "0.4"
 env_logger = "0.11"

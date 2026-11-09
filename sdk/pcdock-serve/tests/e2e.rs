@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use pcdock_core::link::{InputCmd, LinkError, PhoneLink};
 use pcdock_core::session::Event;
-use pcdock_farm::LiveFarm;
+use pcdock_farm::Farm;
 use pcdock_serve::protocol::{ClientMsg, ServerMsg, PKG_JSON, PKG_VIDEO};
 use pcdock_serve::Serve;
 
@@ -70,7 +70,7 @@ fn send_json(wr: &mut TcpStream, msg: &ClientMsg) {
 
 #[test]
 fn tcp_watch_input_and_frame() {
-    let mut daemon = LiveFarm::new();
+    let mut daemon = Farm::new();
     let inputs = Arc::new(Mutex::new(Vec::new()));
     let shared: Arc<Mutex<VecDeque<Event>>> = Arc::new(Mutex::new(VecDeque::new()));
     let link = FakeLink { connected: false, events: shared.clone(), inputs: inputs.clone() };
@@ -152,7 +152,7 @@ where
 
 #[test]
 fn ws_watch_and_frame() {
-    let mut daemon = LiveFarm::new();
+    let mut daemon = Farm::new();
     let shared: Arc<Mutex<VecDeque<Event>>> = Arc::new(Mutex::new(VecDeque::new()));
     let inputs = Arc::new(Mutex::new(Vec::new()));
     daemon
@@ -189,7 +189,7 @@ fn local_watch_and_frame() {
     };
     use std::io::{Read, Write};
 
-    let mut daemon = LiveFarm::new();
+    let mut daemon = Farm::new();
     let shared: Arc<Mutex<VecDeque<Event>>> = Arc::new(Mutex::new(VecDeque::new()));
     daemon
         .add_phone(

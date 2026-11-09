@@ -5,12 +5,8 @@
 //! и `--no-usb/--no-adb/--no-serial`; без `--auto` `--phone` это «только эти».
 
 use clap::Parser;
-use pcdock_core::link::{Discovery, LinkFactory, PhoneLink, Sighting, Transport};
-use pcdock_core::session::Config;
-use pcdock_farm::{DiscoveryConfig, LiveFarm};
+use pcdock_farm::{Farm, FarmConfig, PhoneSpec};
 use pcdock_serve::Serve;
-use pcdock_usb::UsbLink;
-use pcdock_usb::{PhoneSelector, Settings, UsbPort, ANDROID_VIDS};
 
 /// Демон PC Dock: трубки на любых транспортах, один протокол наружу.
 #[derive(Debug, Parser)]
@@ -20,13 +16,13 @@ struct Args {
     #[arg(long, short = 'a')]
     auto: bool,
 
-    /// Явная трубка (без --auto: «только эти»). Формат: `usb` (первый телефон),
-    /// `usb:1-2.3` (телефон на этом USB-порту), `usb:СЕРИЙНИК`, `adb:СЕРИЙНИК`,
-    /// `serial:ПУТЬ`. Можно несколько раз.
+    /// Закреплённый телефон: принимается всегда. Формат: `usb` (любой USB-телефон),
+    /// `usb:1-2.3` (на этом USB-порту), `usb:СЕРИЙНИК`, `adb:СЕРИЙНИК`, `serial:ПУТЬ`.
+    /// Без --auto это «только эти». Можно несколько раз.
     #[arg(long = "phone")]
     phones: Vec<String>,
 
-    /// Пропустить при --auto. Формат тот же, что у --phone (USB — по порту: `usb:1-2.3`).
+    /// Пропустить при --auto: семейство (`usb`), `usb:1-2.3`, `adb:СЕРИЙНИК` или серийник.
     #[arg(long = "except")]
     except: Vec<String>,
 
@@ -83,32 +79,45 @@ fn main() {
         unsafe { std::env::set_var("RUST_LOG", level) };
     }
     env_logger::init();
-    if !args.auto && args.phones.is_empty() {
+    let mut pinned = Vec::new();
+    for spec in &args.phones {
+        match PhoneSpec::parse(spec) {
+            Ok(p) => pinned.push(p),
+            Err(e) => {
+                log::error!("--phone {spec}: {e}");
+                std::process::exit(2);
+            }
+        }
+    }
+    if !args.auto && pinned.is_empty() {
         log::error!("нужен --auto или хотя бы один --phone (см. --help)");
         std::process::exit(2);
     }
-    if args.auto && !args.phones.is_empty() {
-        log::error!("--phone без --auto это «только эти»; с --auto используй --except");
-        std::process::exit(2);
-    }
-
-    let mut daemon = LiveFarm::new();
-    let mut next_id: u32 = 1;
-
-    if args.auto {
-        // Живая ферма стартует пустой: телефоны подхватываются по мере появления (plug&play).
-        enable_auto(&mut daemon, &args);
-    } else {
-        for spec in &args.phones {
-            next_id = add_spec(&mut daemon, &args, spec, next_id);
+    let cfg = FarmConfig {
+        name: args.name.clone(),
+        video: args.video,
+        audio: args.audio,
+        auto: args.auto,
+        except: args.except.clone(),
+        pinned,
+        usb: !args.no_usb,
+        adb: !args.no_adb,
+        serial: !args.no_serial,
+        ..FarmConfig::default()
+    };
+    // Ферма стартует пустой: телефоны подхватываются по мере появления (plug&play).
+    let daemon = match Farm::from_config(cfg) {
+        Ok((farm, warnings)) => {
+            for w in warnings {
+                log::warn!("{w}");
+            }
+            farm
+        }
+        Err(e) => {
+            log::error!("{e}");
+            std::process::exit(2);
         }
     };
-    let _ = next_id; // id выдан, дальше трубки живут в LiveFarm
-
-    if !args.auto && daemon.phones().is_empty() {
-        log::error!("нет трубок: демон слушать нечего");
-        std::process::exit(1);
-    }
 
     let serve = Serve::new(daemon);
     if !args.no_tcp {
@@ -143,199 +152,5 @@ fn main() {
     // Воркеры и слушатели живут в своих потоках; главный ждёт вечно.
     loop {
         std::thread::sleep(std::time::Duration::from_secs(3600));
-    }
-}
-
-/// Автообнаружение: источники по семействам, исключения, фабрика каналов.
-fn enable_auto(daemon: &mut LiveFarm, args: &Args) {
-    let mut providers: Vec<Box<dyn Discovery>> = Vec::new();
-    if !args.no_usb {
-        match pcdock_usb::UsbDiscovery::new(ANDROID_VIDS.to_vec()) {
-            Ok(d) => providers.push(Box::new(Filtered { inner: Box::new(d), except: args.except.clone() })),
-            Err(e) => log::error!("USB-обнаружение не встало: {e}"),
-        }
-    }
-    if !args.no_adb {
-        let d = pcdock_adb::AdbDiscovery::new(pcdock_adb::Adb::local());
-        providers.push(Box::new(Filtered { inner: Box::new(d), except: args.except.clone() }));
-    }
-    if !args.no_serial {
-        log::warn!("serial-трубы: транспорт не готов, пропускаю");
-    }
-    let factory = Factory { args: FactoryArgs::from(args), next_adb_port: 47000 };
-    daemon.enable_discovery(providers, Box::new(factory), DiscoveryConfig::default());
-    log::info!("автообнаружение включено");
-}
-
-/// Отбрасывает факты, подпавшие под `--except`: семейство (`usb`), `usb:1-2.3`, `adb:СЕРИЙНИК`, серийник.
-struct Filtered {
-    inner: Box<dyn Discovery>,
-    except: Vec<String>,
-}
-
-impl Discovery for Filtered {
-    fn scan(&mut self) -> Vec<Sighting> {
-        let except = &self.except;
-        self.inner
-            .scan()
-            .into_iter()
-            .filter(|s| {
-                let by_address = format!("{}:{}", s.transport, s.address);
-                !except.iter().any(|e| {
-                    *e == s.transport.to_string()
-                        || *e == by_address
-                        || s.serial.as_deref() == Some(e.as_str())
-                })
-            })
-            .collect()
-    }
-}
-
-struct FactoryArgs {
-    name: String,
-    video: bool,
-    audio: bool,
-}
-
-impl FactoryArgs {
-    fn from(a: &Args) -> Self {
-        Self { name: a.name.clone(), video: a.video, audio: a.audio }
-    }
-
-    fn config(&self) -> Config {
-        Config {
-            name: self.name.clone(),
-            stream: Some(pcdock_core::packet::SetStream {
-                video: self.video,
-                audio: self.audio,
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
-    }
-}
-
-/// Создаёт канал по факту обнаружения.
-struct Factory {
-    args: FactoryArgs,
-    next_adb_port: u16,
-}
-
-impl LinkFactory for Factory {
-    fn make(&mut self, s: &Sighting) -> Result<Box<dyn PhoneLink>, String> {
-        match s.transport {
-            Transport::Usb => {
-                let port: UsbPort = s.address.parse()?;
-                let target = PhoneSelector { port: Some(port), serial: s.serial.clone() };
-                let link = UsbLink::new(
-                    self.args.config(),
-                    Settings { target: Some(target), ..Settings::default() },
-                )?;
-                Ok(Box::new(link))
-            }
-            Transport::Adb => {
-                let local = self.next_adb_port;
-                self.next_adb_port = self.next_adb_port.wrapping_add(1).max(47000);
-                Ok(Box::new(pcdock_adb::AdbLink::new(self.args.config(), s.address.clone(), local)))
-            }
-            Transport::Serial => Err("serial-транспорт не готов".into()),
-        }
-    }
-}
-
-/// Явный список «только эти».
-fn add_spec(daemon: &mut LiveFarm, args: &Args, spec: &str, next_id: u32) -> u32 {
-    if spec == "usb" {
-        return add_usb(daemon, args, next_id, None);
-    }
-    if let Some(what) = spec.strip_prefix("usb:") {
-        if what.is_empty() {
-            log::error!("пустой порт/серийник в --phone {spec}");
-            return next_id;
-        }
-        let target = match what.parse::<UsbPort>() {
-            Ok(port) => PhoneSelector::port(port),
-            Err(_) => PhoneSelector::serial(what),
-        };
-        return add_usb(daemon, args, next_id, Some(target));
-    }
-    if let Some(serial) = spec.strip_prefix("adb:") {
-        if serial.is_empty() {
-            log::error!("пустой серийник в --phone {spec}");
-            return next_id;
-        }
-        return add_adb(daemon, args, serial, next_id);
-    }
-    if let Some(path) = spec.strip_prefix("serial:") {
-        if path.is_empty() {
-            log::error!("пустой путь в --phone {spec}");
-            return next_id;
-        }
-        log::warn!("serial {path}: транспорт не готов, пропускаю");
-        return next_id;
-    }
-    log::error!("неизвестный формат --phone {spec}");
-    next_id
-}
-
-fn add_usb(daemon: &mut LiveFarm, args: &Args, id: u32, target: Option<PhoneSelector>) -> u32 {
-    let label = match &target {
-        None => "первый телефон".to_string(),
-        Some(PhoneSelector { port: Some(port), .. }) => format!("порт {port}"),
-        Some(PhoneSelector { serial: Some(serial), .. }) => format!("серийник {serial}"),
-        Some(_) => "первый телефон".to_string(),
-    };
-    let cfg = Config {
-        name: args.name.clone(),
-        stream: Some(pcdock_core::packet::SetStream {
-            video: args.video,
-            audio: args.audio,
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let link = match UsbLink::new(cfg, Settings { target, ..Settings::default() }) {
-        Ok(l) => l,
-        Err(e) => {
-            log::error!("USB-трубка не создалась: {e}");
-            return id;
-        }
-    };
-    match daemon.add_phone(id, Box::new(link)) {
-        Ok(()) => {
-            // Поток поднимет сессию сам; video/audio по умолчанию из Config.
-            // Живое переключение — командой SetStream по сокету.
-            log::info!("трубка {id}: USB ({label})");
-            id + 1
-        }
-        Err(e) => {
-            log::error!("трубка {id} не добавилась: {e}");
-            id
-        }
-    }
-}
-
-/// ADB-трубка: локальный порт проброса выбираем рядом с телефонным.
-fn add_adb(daemon: &mut LiveFarm, args: &Args, serial: &str, id: u32) -> u32 {
-    let cfg = Config {
-        name: args.name.clone(),
-        stream: Some(pcdock_core::packet::SetStream {
-            video: args.video,
-            audio: args.audio,
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let local_port = 47000 + (id as u16 % 1000);
-    let link = pcdock_adb::AdbLink::new(cfg, serial, local_port);
-    match daemon.add_phone(id, Box::new(link)) {
-        Ok(()) => {
-            log::info!("трубка {id}: ADB {serial} (проброс {local_port})");
-            id + 1
-        }
-        Err(e) => {
-            log::error!("трубка {id} не добавилась: {e}");
-            id
-        }
     }
 }
