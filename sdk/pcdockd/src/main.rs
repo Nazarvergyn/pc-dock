@@ -146,13 +146,16 @@ fn main() {
 /// Автообнаружение всех семейств. Возвращает следующий свободный id.
 fn auto_add(daemon: &mut Daemon, args: &Args, mut next_id: u32) -> u32 {
     if !args.no_usb {
-        // Каждому телефону своя трубка, привязанная к порту: `Dock` трогает только свой телефон.
+        // Как раньше, авторежим берёт только первый телефон: переключение в аксессуар рвёт на нём adb,
+        // а --auto ещё и добавляет adb-трубки. Остальные — явно: `--phone usb:<порт>`.
+        // Отличие от прежнего: трубка привязана к порту, `Dock` трогает только свой телефон.
         for port in usb_scan() {
             let spec = format!("usb:{port}");
             if args.except.iter().any(|e| e == "usb" || e == &spec) {
                 continue;
             }
             next_id = add_usb(daemon, args, next_id, Some(PhoneSelector::port(port)));
+            break;
         }
     }
     if !args.no_adb {
