@@ -2,10 +2,15 @@
 //!
 //!   pcdock-probe [--seconds N] [--tap] [--no-touch] [--no-mouse] [--no-keyboard]
 //!                [--max-size 720x1280] [--quality 80] [--fps 10]
+//!                [--port 1-2.3] [--serial СЕРИЙНИК]
+//!   pcdock-probe --list [--serials]
+//!
+//! `--list` печатает телефоны на USB (порт, VID:PID, режим); `--serials` ещё и читает серийники
+//! (открывает устройства). `--port`/`--serial` выбирают телефон, если их несколько.
 
 use pcdock_core::input::{DeviceKind, TouchPhase, TouchPoint};
 use pcdock_core::session::{Config, Event};
-use pcdock_usb::{Dock, Settings};
+use pcdock_usb::{list_phones, Dock, PhoneSelector, Settings, ANDROID_VIDS};
 use std::time::{Duration, Instant};
 
 /// Размер JPEG из заголовка (маркеры SOF0..SOF3, SOF5..SOF7, SOF9..SOF11 ...).
@@ -39,6 +44,25 @@ fn main() {
         .unwrap_or(20);
 
     let value_of = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    if has("--list") {
+        match list_phones(&ANDROID_VIDS, has("--serials")) {
+            Ok(phones) if phones.is_empty() => println!("телефонов не видно"),
+            Ok(phones) => {
+                for p in phones {
+                    let serial = p.serial.as_deref().unwrap_or("-");
+                    println!("{}\t{:04x}:{:04x}\t{:?}\t{serial}", p.port, p.vid, p.pid, p.mode);
+                }
+            }
+            Err(e) => eprintln!("не удалось перечислить USB: {e}"),
+        }
+        return;
+    }
+    let port = match value_of("--port").map(|p| p.parse()).transpose() {
+        Ok(p) => p,
+        Err(e) => return eprintln!("--port: {e}"),
+    };
+    let serial = value_of("--serial");
+    let target = (port.is_some() || serial.is_some()).then_some(PhoneSelector { port, serial });
     let mut config = Config::default();
     if let Some(size) = value_of("--max-size") {
         // формат: 1280x720
@@ -56,7 +80,7 @@ fn main() {
     let t0 = Instant::now();
     let log = |msg: String| println!("[{:6.2}s] {msg}", t0.elapsed().as_secs_f32());
 
-    let mut dock = match Dock::new(config, Settings::default()) {
+    let mut dock = match Dock::new(config, Settings { target, ..Settings::default() }) {
         Ok(d) => d,
         Err(e) => return eprintln!("не удалось запустить USB: {e}"),
     };
