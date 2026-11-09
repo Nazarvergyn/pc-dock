@@ -23,6 +23,8 @@ object Proto {
     const val T_REQUEST_FRAME = 0x40
     const val T_SET_STREAM = 0x41
     const val T_WAKE = 0x42
+    /** Открыть приложение (хост → телефон): u32 request_id, имя пакета UTF-8. Ответ — STATUS 18. */
+    const val T_LAUNCH_APP = 0x43
     const val T_STATUS = 0x50
     const val T_ERROR = 0x7F
 
@@ -31,6 +33,8 @@ object Proto {
     const val CAP_ROTATION = 1 shl 4
     /** Телефон сообщает пакет приложения на переднем плане (STATUS 16/17), если хост попросил тем же битом в HELLO. */
     const val CAP_FOREGROUND = 1 shl 6
+    /** Телефон открывает приложение по команде хоста (LAUNCH_APP, ответ STATUS 18), если хост поставил тот же бит. */
+    const val CAP_LAUNCH_APP = 1 shl 7
 
     const val CODEC_VIDEO_JPEG = 1
     const val CODEC_AUDIO_PCM_S16LE = 1
@@ -45,6 +49,8 @@ object Proto {
     const val STATUS_FOREGROUND = 16
     /** Передний план узнать нельзя, detail = причина ("usage_access" — нет «Доступа к истории использования»). */
     const val STATUS_FOREGROUND_UNAVAILABLE = 17
+    /** Ответ на LAUNCH_APP: detail = "<request_id> <результат>" (ok, not_installed, no_launcher_activity, blocked_bal, invalid_package, error). */
+    const val STATUS_LAUNCH_RESULT = 18
 }
 
 class Packet(val type: Int, val flags: Int, val payload: ByteArray) {
@@ -144,7 +150,19 @@ class SetStream(
     val maxFps: Int,
 )
 
+class LaunchApp(val requestId: Long, val packageName: String)
+
 object Messages {
+    /** LAUNCH_APP: u32 request_id, затем имя пакета UTF-8 до конца. null — пакет повреждён. */
+    fun parseLaunchApp(payload: ByteArray): LaunchApp? = try {
+        val b = ByteBuffer.wrap(payload)
+        val id = b.int.toLong() and 0xFFFFFFFFL
+        val name = ByteArray(b.remaining()).also { b.get(it) }.toString(Charsets.UTF_8)
+        LaunchApp(id, name)
+    } catch (e: Exception) {
+        null
+    }
+
     fun hello(capabilities: Int, name: String): Packet {
         val nameBytes = name.toByteArray(Charsets.UTF_8).let { if (it.size > 255) it.copyOf(255) else it }
         val b = ByteBuffer.allocate(10 + nameBytes.size)

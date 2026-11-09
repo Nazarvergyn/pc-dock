@@ -12,7 +12,19 @@
         android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
 
+    <!-- Открыть приложение по команде хоста (PROTOCOL.md, LAUNCH_APP): с Android 10 запуск из фона разрешён только
+         с «Поверх других окон». Даёт пользователь в настройках (или pynelo через adb: appops SYSTEM_ALERT_WINDOW) -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <uses-feature android:name="android.hardware.usb.accessory" android:required="true" />
+
+    <!-- Android 11+: видеть приложения с главным экраном (getLaunchIntentForPackage для LAUNCH_APP) -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
 
     <application
         android:label="Device Media"

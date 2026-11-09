@@ -100,6 +100,17 @@ pub enum State {
     Active,
 }
 
+/// Почему `Session::launch_app` не отправил команду.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaunchError {
+    /// Сессия не активна.
+    NotActive,
+    /// Телефон не умеет (`caps::LAUNCH_APP` не согласован).
+    Unsupported,
+    /// Некорректное имя пакета.
+    BadPackage,
+}
+
 #[derive(Debug)]
 pub struct Session {
     cfg: Config,
@@ -402,6 +413,24 @@ impl Session {
         if self.state == State::Active {
             self.send_packet(wake_packet());
         }
+    }
+
+    /// Просит телефон открыть приложение (`LAUNCH_APP`, PROTOCOL.md §5 «Запуск приложения»). Ответ придёт
+    /// событием `Status` с кодом 18 и `detail` = `"<request_id> <результат>"`.
+    /// Ошибка — сессия не активна, телефон не согласовал `caps::LAUNCH_APP` или имя пакета некорректно.
+    pub fn launch_app(&mut self, request_id: u32, package: &str) -> Result<(), LaunchError> {
+        if self.state != State::Active {
+            return Err(LaunchError::NotActive);
+        }
+        if self.negotiated_caps & caps::LAUNCH_APP == 0 {
+            return Err(LaunchError::Unsupported);
+        }
+        if !valid_package(package) {
+            return Err(LaunchError::BadPackage);
+        }
+        let p = LaunchApp { request_id, package: package.to_string() }.to_packet();
+        self.send_packet(p);
+        Ok(())
     }
 
     // ----- команды ввода (PROTOCOL.md §8) -----

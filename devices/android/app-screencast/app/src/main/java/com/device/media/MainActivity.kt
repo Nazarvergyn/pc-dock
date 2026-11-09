@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -23,9 +24,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var projectionManager: MediaProjectionManager
     private val TAG = "DeviceMedia"
 
-    /** Ушли в настройки «Доступа к истории использования» — по возвращении продолжить запуск */
-    private var backFromUsageSettings = false
-    private var usageAsked = false
+    /** Ушли в системные настройки разрешений — по возвращении показать их состояние снова или продолжить запуск */
+    private var backFromSettings = false
+    /** Окно разрешений уже показано при этом запуске с иконки */
+    private var permsShown = false
 
     private val requestNotificationPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -68,41 +70,65 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleLaunch() {
-        // Открыли с иконки, а «Доступа к истории использования» нет — объяснить и предложить открыть настройки
-        // (нужен хосту, чтобы знать приложение на переднем плане; при подключении по USB не спрашиваем)
-        if (intent?.action == Intent.ACTION_MAIN && !usageAsked && !ForegroundWatch.hasUsageAccess(this)) {
-            usageAsked = true
-            AlertDialog.Builder(this)
-                .setTitle("Доступ к истории использования")
-                .setMessage(
-                    "Компьютер (например, pynelo) запускает сценарии только в разрешённых приложениях и должен " +
-                        "видеть, какое приложение открыто на экране. Для этого разрешите «Device Media» доступ к " +
-                        "истории использования: в открывшемся списке выберите «Device Media» → «Разрешить». " +
-                        "Приложение узнаёт только имя открытого приложения и ничего не сохраняет."
-                )
-                .setPositiveButton("Открыть настройки") { _, _ ->
-                    backFromUsageSettings = true
-                    try {
-                        startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Нет экрана доступа к истории использования: $e")
-                        backFromUsageSettings = false
-                        continueLaunch()
-                    }
-                }
-                .setNegativeButton("Позже") { _, _ -> continueLaunch() }
-                .setCancelable(false)
-                .show()
+        // Открыли с иконки — показать разрешения для компьютера, если чего-то не хватает (при подключении по USB не спрашиваем)
+        if (intent?.action == Intent.ACTION_MAIN && !permsShown && !allPermsGranted()) {
+            permsShown = true
+            showPermissions()
             return
         }
         continueLaunch()
     }
 
+    private fun usageGranted() = ForegroundWatch.hasUsageAccess(this)
+    private fun overlayGranted() = AppLauncher.canStartFromBackground(this)
+    private fun allPermsGranted() = usageGranted() && overlayGranted()
+
+    /**
+     * Разрешения для компьютера (например, pynelo) — с состоянием и кнопками в системные настройки:
+     *  • «Доступ к истории использования» — видеть, какое приложение на экране (сценарии только в разрешённых приложениях);
+     *  • «Поверх других окон» — открывать приложение по команде компьютера (шаг «Открыть приложение»).
+     */
+    private fun showPermissions() {
+        val mark = { ok: Boolean -> if (ok) "✓ разрешено" else "✗ не разрешено" }
+        val usage = usageGranted()
+        val overlay = overlayGranted()
+        val b = AlertDialog.Builder(this)
+            .setTitle("Разрешения для компьютера")
+            .setMessage(
+                "Компьютер (например, pynelo) запускает сценарии только в разрешённых приложениях.\n\n" +
+                    "• Доступ к истории использования — ${mark(usage)}\n" +
+                    "  чтобы видеть, какое приложение открыто на экране (узнаётся только его имя, ничего не сохраняется).\n\n" +
+                    "• Поверх других окон — ${mark(overlay)}\n" +
+                    "  чтобы открывать приложение по команде компьютера (шаг «Открыть приложение»).\n\n" +
+                    "В открывшемся списке выберите «Device Media» → «Разрешить»."
+            )
+            .setCancelable(false)
+            .setNegativeButton(if (usage && overlay) "Готово" else "Позже") { _, _ -> continueLaunch() }
+        if (!usage) b.setPositiveButton("История использования") { _, _ -> openSettings(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
+        if (!overlay) {
+            val i = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+            b.setNeutralButton("Поверх других окон") { _, _ -> openSettings(i) }
+        }
+        b.show()
+    }
+
+    private fun openSettings(i: Intent) {
+        backFromSettings = true
+        try {
+            startActivity(i)
+        } catch (e: Exception) {
+            Log.w(TAG, "Нет экрана настроек ${i.action}: $e")
+            backFromSettings = false
+            continueLaunch()
+        }
+    }
+
     override fun onRestart() {
         super.onRestart()
-        if (backFromUsageSettings) {
-            backFromUsageSettings = false
-            continueLaunch()
+        if (backFromSettings) {
+            backFromSettings = false
+            // Вернулись из настроек: показать, что изменилось (если всё разрешено — сразу дальше)
+            if (allPermsGranted()) continueLaunch() else showPermissions()
         }
     }
 

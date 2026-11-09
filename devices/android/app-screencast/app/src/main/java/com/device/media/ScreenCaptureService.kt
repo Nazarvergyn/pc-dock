@@ -139,6 +139,8 @@ class ScreenCaptureService : Service(), HostLink.Listener {
     private var hostWantsForeground = false
     private var foregroundSent: String? = null
     private var foregroundSentAt = 0L
+    // Запуск приложений по команде хоста (CAP_LAUNCH_APP, LAUNCH_APP → STATUS 18) — только если хост поставил бит в HELLO
+    private var hostWantsLaunch = false
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -774,6 +776,7 @@ class ScreenCaptureService : Service(), HostLink.Listener {
         link = l
         sessionActive = false
         hostWantsForeground = false
+        hostWantsLaunch = false
         stream = StreamConfig()
         Log.d(TAG, "USB подключён (#$connects): ${accessory.manufacturer} ${accessory.model}, жду HELLO от ПК")
         l.start()
@@ -798,6 +801,7 @@ class ScreenCaptureService : Service(), HostLink.Listener {
                 link = null
                 sessionActive = false
                 hostWantsForeground = false
+                hostWantsLaunch = false
             }
         }
     }
@@ -859,6 +863,23 @@ class ScreenCaptureService : Service(), HostLink.Listener {
                 acquireTimedWakeLock()
             }
 
+            Proto.T_LAUNCH_APP -> {
+                reactivateIfPaused("LAUNCH_APP")
+                val cmd = Messages.parseLaunchApp(p.payload) ?: return
+                // Хост не просил эту возможность в HELLO — команду не выполняем (ответ всё равно даём)
+                val result = if (hostWantsLaunch) AppLauncher.launch(this, cmd.packageName) else AppLauncher.ERROR
+                Log.d(TAG, "LAUNCH_APP #${cmd.requestId}: ${cmd.packageName.take(255)} → $result")
+                l.sendControl(Messages.status(Proto.STATUS_LAUNCH_RESULT, "${cmd.requestId} $result").encode())
+                // Передний план — вскоре после запуска: хост ждёт смены приложения
+                if (result == AppLauncher.OK) handler?.postDelayed({
+                    try {
+                        if (running) reportForeground(false)
+                    } catch (e: Throwable) {
+                        Log.e(TAG, "Сбой отчёта переднего плана после LAUNCH_APP", e)
+                    }
+                }, 300)
+            }
+
             else -> {} // PONG и неизвестные типы пропускаем
         }
     }
@@ -879,9 +900,10 @@ class ScreenCaptureService : Service(), HostLink.Listener {
         sessionActive = true
         stream = StreamConfig()
         relayout("HELLO")
-        var caps = Proto.CAP_VIDEO_JPEG or Proto.CAP_ROTATION or Proto.CAP_FOREGROUND
+        var caps = Proto.CAP_VIDEO_JPEG or Proto.CAP_ROTATION or Proto.CAP_FOREGROUND or Proto.CAP_LAUNCH_APP
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) caps = caps or Proto.CAP_AUDIO_PCM
         hostWantsForeground = hello.capabilities and Proto.CAP_FOREGROUND != 0
+        hostWantsLaunch = hello.capabilities and Proto.CAP_LAUNCH_APP != 0
         l.sendControl(Messages.hello(caps, NAME).encode())
         val lay = layout
         if (lay != null) {

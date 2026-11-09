@@ -304,3 +304,38 @@ fn data_is_ignored_when_session_is_not_started() {
     feed(&mut s, 0, &[phone_hello()]);
     assert!(events(&mut s).is_empty());
 }
+
+#[test]
+fn launch_app_only_when_both_sides_agree() {
+    // Старый телефон (без бита LAUNCH_APP) — команда не уходит
+    let mut s = active_session();
+    assert_eq!(s.launch_app(1, "com.android.settings"), Err(LaunchError::Unsupported));
+    assert!(drain(&mut s).0.is_empty());
+
+    // Хост и телефон умеют — уходит LAUNCH_APP, ответ STATUS 18 доходит событием
+    let cfg = Config { capabilities: Config::default().capabilities | caps::LAUNCH_APP, ..Config::default() };
+    let mut s = Session::new(cfg);
+    assert_eq!(s.launch_app(1, "com.android.settings"), Err(LaunchError::NotActive));
+    s.start(0);
+    let hello = Hello {
+        version_max: 2,
+        version_min: 2,
+        capabilities: caps::VIDEO_JPEG | caps::LAUNCH_APP,
+        role: Role::Device,
+        name: "fake-phone/2".into(),
+    };
+    feed(&mut s, 10, &[hello.to_packet()]);
+    drain(&mut s);
+    events(&mut s);
+    assert_eq!(s.launch_app(7, "com.x;reboot"), Err(LaunchError::BadPackage));
+    assert_eq!(s.launch_app(7, "com.android.settings"), Ok(()));
+    let (streams, _) = drain(&mut s);
+    assert_eq!(streams.len(), 1);
+    let mut r = PacketReader::new();
+    r.push(&streams[0]);
+    let p = r.next_packet().unwrap();
+    assert_eq!(p.ptype, PacketType::LaunchApp);
+    assert_eq!(LaunchApp::from_payload(&p.payload).unwrap(), LaunchApp { request_id: 7, package: "com.android.settings".into() });
+    feed(&mut s, 20, &[Status { code: 18, detail: "7 ok".into() }.to_packet()]);
+    assert!(events(&mut s).contains(&Event::Status(Status { code: 18, detail: "7 ok".into() })));
+}

@@ -20,6 +20,10 @@ pub mod caps {
     pub const AUDIO_OPUS: u32 = 1 << 3;
     pub const ROTATION: u32 = 1 << 4;
     pub const INPUT_OVER_STREAM: u32 = 1 << 5;
+    /// Телефон сообщает пакет приложения на переднем плане (`STATUS` 16/17).
+    pub const FOREGROUND: u32 = 1 << 6;
+    /// Телефон открывает приложение по команде хоста (`LAUNCH_APP`, ответ — `STATUS` 18).
+    pub const LAUNCH_APP: u32 = 1 << 7;
 }
 
 /// Коды кодеков.
@@ -51,6 +55,8 @@ pub enum PacketType {
     SetStream,
     /// Разбудить экран (хост → телефон, пустой): включает экран на минуту.
     Wake,
+    /// Открыть приложение по имени пакета (хост → телефон, возможность `caps::LAUNCH_APP`).
+    LaunchApp,
     Status,
     Error,
     /// Тип, неизвестный этой версии ядра (такие пакеты пропускаются).
@@ -71,6 +77,7 @@ impl PacketType {
             0x40 => Self::RequestFrame,
             0x41 => Self::SetStream,
             0x42 => Self::Wake,
+            0x43 => Self::LaunchApp,
             0x50 => Self::Status,
             0x7F => Self::Error,
             other => Self::Unknown(other),
@@ -90,6 +97,7 @@ impl PacketType {
             Self::RequestFrame => 0x40,
             Self::SetStream => 0x41,
             Self::Wake => 0x42,
+            Self::LaunchApp => 0x43,
             Self::Status => 0x50,
             Self::Error => 0x7F,
             Self::Unknown(v) => v,
@@ -561,6 +569,36 @@ pub fn wake_packet() -> Packet {
     Packet::new(PacketType::Wake, Vec::new())
 }
 
+/// Имя пакета Android, которое можно передать в `LAUNCH_APP`: латинская буква, затем буквы, цифры, `_` и `.`,
+/// не длиннее 255 байт (те же правила проверяет телефон).
+pub fn valid_package(p: &str) -> bool {
+    let mut ch = p.chars();
+    matches!(ch.next(), Some(c) if c.is_ascii_alphabetic())
+        && p.len() <= 255
+        && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+}
+
+/// Команда «открыть приложение» (`LAUNCH_APP`, 0x43): `u32 request_id`, затем имя пакета UTF-8 до конца.
+/// Телефон отвечает `STATUS` 18 с `detail` = `"<request_id> <результат>"`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaunchApp {
+    pub request_id: u32,
+    pub package: String,
+}
+
+impl LaunchApp {
+    pub fn to_packet(&self) -> Packet {
+        let mut p = self.request_id.to_be_bytes().to_vec();
+        p.extend_from_slice(self.package.as_bytes());
+        Packet::new(PacketType::LaunchApp, p)
+    }
+
+    pub fn from_payload(data: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor::new(data);
+        Ok(Self { request_id: c.u32()?, package: utf8(c.rest()) })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -729,5 +767,22 @@ mod tests {
         assert_eq!(negotiate(&host, &phone), Ok((2, caps::VIDEO_JPEG)));
         let old_phone = Hello { version_max: 1, version_min: 1, ..sample_hello() };
         assert_eq!(negotiate(&host, &old_phone), Err(error_code::UNSUPPORTED_VERSION));
+    }
+
+    #[test]
+    fn launch_app_roundtrip() {
+        let l = LaunchApp { request_id: 0x0102_0304, package: "com.android.settings".into() };
+        let bytes = l.to_packet().encode();
+        assert_eq!(&bytes[..8], &[b'P', b'D', 0x43, 0, 0, 0, 0, 24]);
+        assert_eq!(&bytes[8..12], &[1, 2, 3, 4]);
+        let mut r = PacketReader::new();
+        r.push(&bytes);
+        let p = r.next_packet().unwrap();
+        assert_eq!(p.ptype, PacketType::LaunchApp);
+        assert_eq!(LaunchApp::from_payload(&p.payload).unwrap(), l);
+        assert!(LaunchApp::from_payload(&[0, 1]).is_err());
+        assert!(valid_package("com.example.shop_app2"));
+        assert!(!valid_package("1com.x") && !valid_package("") && !valid_package("com.x;reboot") && !valid_package("com x"));
+        assert!(!valid_package(&"a".repeat(256)));
     }
 }
