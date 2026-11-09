@@ -51,13 +51,18 @@ data class HidCommand(val request: Int, val hidId: Int, val payload: ByteArray)
  * и переводит во ввод через accessibility-мост).
  */
 class TcpLink(
-    private val socket: Socket,
+    inputStream: java.io.InputStream,
+    outputStream: java.io.OutputStream,
+    private val closeable: java.io.Closeable,
     private val listener: HostLink.Listener,
 ) : HostLink {
+    constructor(socket: Socket, listener: HostLink.Listener) :
+        this(socket.getInputStream(), socket.getOutputStream(), socket, listener)
+
     private val tag = "DeviceMedia"
 
-    private val input = DataInputStream(socket.getInputStream())
-    private val output = DataOutputStream(socket.getOutputStream())
+    private val input = DataInputStream(inputStream)
+    private val output = DataOutputStream(outputStream)
     private val lock = Object()
     private val control = ArrayDeque<ByteArray>()
     private var latestVideo: ByteArray? = null
@@ -126,7 +131,7 @@ class TcpLink(
         if (!closed.compareAndSet(false, true)) return
         Log.w(tag, "Канал TCP закрыт: $reason")
         try {
-            socket.close()
+            closeable.close()
         } catch (_: IOException) {
         }
         synchronized(lock) { lock.notifyAll() }
