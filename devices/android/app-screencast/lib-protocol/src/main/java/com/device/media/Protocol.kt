@@ -29,6 +29,8 @@ object Proto {
     const val CAP_VIDEO_JPEG = 1 shl 0
     const val CAP_AUDIO_PCM = 1 shl 2
     const val CAP_ROTATION = 1 shl 4
+    /** Телефон сообщает пакет приложения на переднем плане (STATUS 16/17), если хост попросил тем же битом в HELLO. */
+    const val CAP_FOREGROUND = 1 shl 6
 
     const val CODEC_VIDEO_JPEG = 1
     const val CODEC_AUDIO_PCM_S16LE = 1
@@ -39,6 +41,10 @@ object Proto {
     const val STATUS_PROJECTION_STOPPED = 1
     const val STATUS_AUDIO_UNAVAILABLE = 2
     const val STATUS_INPUT_UNSUPPORTED = 3
+    /** detail = пакет приложения на переднем плане ("" — пока неизвестно). Раз в секунду и сразу при смене. */
+    const val STATUS_FOREGROUND = 16
+    /** Передний план узнать нельзя, detail = причина ("usage_access" — нет «Доступа к истории использования»). */
+    const val STATUS_FOREGROUND_UNAVAILABLE = 17
 }
 
 class Packet(val type: Int, val flags: Int, val payload: ByteArray) {

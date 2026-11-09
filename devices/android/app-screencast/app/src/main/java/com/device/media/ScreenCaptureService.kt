@@ -60,6 +60,9 @@ class ScreenCaptureService : Service(), HostLink.Listener {
         private const val HOST_SILENT_MS = 6000L
         private const val IDLE_FRAME_INTERVAL_MS = 1000L
         private const val NAME = "pcdock-android/1.0"
+        /** Опрос переднего плана для хоста (STATUS 16): смена — сразу, иначе повтор раз в секунду */
+        private const val FOREGROUND_POLL_MS = 500L
+        private const val FOREGROUND_REPEAT_MS = 1000L
     }
 
     private class Layout(
@@ -130,6 +133,12 @@ class ScreenCaptureService : Service(), HostLink.Listener {
     private var framesSent = 0
     private var framesThrottled = 0
     private var connects = 0
+
+    // Передний план для хоста (PROTOCOL.md: CAP_FOREGROUND, STATUS 16/17) — только если хост попросил в HELLO
+    private var foregroundWatch: ForegroundWatch? = null
+    private var hostWantsForeground = false
+    private var foregroundSent: String? = null
+    private var foregroundSentAt = 0L
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -338,6 +347,18 @@ class ScreenCaptureService : Service(), HostLink.Listener {
                 }
             }
         }, 5000)
+        h.postDelayed(object : Runnable {
+            override fun run() {
+                try {
+                    if (!running) return
+                    reportForeground(false)
+                } catch (e: Throwable) {
+                    Log.e(TAG, "Сбой опроса переднего плана", e)
+                } finally {
+                    if (running) h.postDelayed(this, FOREGROUND_POLL_MS)
+                }
+            }
+        }, FOREGROUND_POLL_MS)
     }
 
     /** Проекция умерла (система/пользователь): сервис и USB живут, ждём нового разрешения. */
@@ -752,6 +773,7 @@ class ScreenCaptureService : Service(), HostLink.Listener {
         val l = Link(descriptor, this)
         link = l
         sessionActive = false
+        hostWantsForeground = false
         stream = StreamConfig()
         Log.d(TAG, "USB подключён (#$connects): ${accessory.manufacturer} ${accessory.model}, жду HELLO от ПК")
         l.start()
@@ -775,6 +797,7 @@ class ScreenCaptureService : Service(), HostLink.Listener {
                 releaseDockWakeLock()
                 link = null
                 sessionActive = false
+                hostWantsForeground = false
             }
         }
     }
@@ -856,8 +879,9 @@ class ScreenCaptureService : Service(), HostLink.Listener {
         sessionActive = true
         stream = StreamConfig()
         relayout("HELLO")
-        var caps = Proto.CAP_VIDEO_JPEG or Proto.CAP_ROTATION
+        var caps = Proto.CAP_VIDEO_JPEG or Proto.CAP_ROTATION or Proto.CAP_FOREGROUND
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) caps = caps or Proto.CAP_AUDIO_PCM
+        hostWantsForeground = hello.capabilities and Proto.CAP_FOREGROUND != 0
         l.sendControl(Messages.hello(caps, NAME).encode())
         val lay = layout
         if (lay != null) {
@@ -873,6 +897,33 @@ class ScreenCaptureService : Service(), HostLink.Listener {
             )
         }
         lastJpeg?.let { deliverFrame(it, lastPtsUs) }
+        reportForeground(true)
+    }
+
+    /**
+     * Пакет на переднем плане → хосту (STATUS 16), если хост попросил (CAP_FOREGROUND в его HELLO).
+     * Без «Доступа к истории использования» — STATUS 17 "usage_access": хост покажет, что разрешить.
+     * force — сразу (после HELLO), иначе при смене пакета и раз в секунду (хост по этому видит свежесть).
+     */
+    private fun reportForeground(force: Boolean) {
+        val l = link ?: return
+        if (!sessionActive || !hostWantsForeground) return
+        val watch = foregroundWatch ?: ForegroundWatch(this).also { foregroundWatch = it }
+        val now = SystemClock.elapsedRealtime()
+        if (!watch.granted()) {
+            if (force || foregroundSent != null || now - foregroundSentAt >= FOREGROUND_REPEAT_MS) {
+                l.sendControl(Messages.status(Proto.STATUS_FOREGROUND_UNAVAILABLE, "usage_access").encode())
+                foregroundSent = null
+                foregroundSentAt = now
+            }
+            return
+        }
+        val pkg = watch.poll() ?: ""
+        if (force || pkg != foregroundSent || now - foregroundSentAt >= FOREGROUND_REPEAT_MS) {
+            l.sendControl(Messages.status(Proto.STATUS_FOREGROUND, pkg).encode())
+            foregroundSent = pkg
+            foregroundSentAt = now
+        }
     }
 
     private fun logHeartbeat() {

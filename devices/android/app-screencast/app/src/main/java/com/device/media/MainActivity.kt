@@ -6,9 +6,11 @@ import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 
@@ -20,6 +22,10 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var projectionManager: MediaProjectionManager
     private val TAG = "DeviceMedia"
+
+    /** Ушли в настройки «Доступа к истории использования» — по возвращении продолжить запуск */
+    private var backFromUsageSettings = false
+    private var usageAsked = false
 
     private val requestNotificationPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -62,6 +68,45 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleLaunch() {
+        // Открыли с иконки, а «Доступа к истории использования» нет — объяснить и предложить открыть настройки
+        // (нужен хосту, чтобы знать приложение на переднем плане; при подключении по USB не спрашиваем)
+        if (intent?.action == Intent.ACTION_MAIN && !usageAsked && !ForegroundWatch.hasUsageAccess(this)) {
+            usageAsked = true
+            AlertDialog.Builder(this)
+                .setTitle("Доступ к истории использования")
+                .setMessage(
+                    "Компьютер (например, pynelo) запускает сценарии только в разрешённых приложениях и должен " +
+                        "видеть, какое приложение открыто на экране. Для этого разрешите «Device Media» доступ к " +
+                        "истории использования: в открывшемся списке выберите «Device Media» → «Разрешить». " +
+                        "Приложение узнаёт только имя открытого приложения и ничего не сохраняет."
+                )
+                .setPositiveButton("Открыть настройки") { _, _ ->
+                    backFromUsageSettings = true
+                    try {
+                        startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Нет экрана доступа к истории использования: $e")
+                        backFromUsageSettings = false
+                        continueLaunch()
+                    }
+                }
+                .setNegativeButton("Позже") { _, _ -> continueLaunch() }
+                .setCancelable(false)
+                .show()
+            return
+        }
+        continueLaunch()
+    }
+
+    override fun onRestart() {
+        super.onRestart()
+        if (backFromUsageSettings) {
+            backFromUsageSettings = false
+            continueLaunch()
+        }
+    }
+
+    private fun continueLaunch() {
         // Сервис жив и проекция жива — делать нечего. Если проекция умерла
         // (система её остановила), запрашиваем разрешение заново в живой сервис.
         if (ScreenCaptureService.isRunning && !ScreenCaptureService.needsProjection()) {
