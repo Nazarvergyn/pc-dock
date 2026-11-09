@@ -420,7 +420,6 @@ dependencies = [
  "pcdock-daemon",
  "pcdock-serve",
  "pcdock-usb",
- "rusb",
 ]
 
 [[package]]

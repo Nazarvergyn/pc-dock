@@ -8,8 +8,7 @@ use clap::Parser;
 use pcdock_core::session::Config;
 use pcdock_daemon::{Daemon, UsbLink};
 use pcdock_serve::Serve;
-use pcdock_usb::{Settings, ACCESSORY_PIDS, ANDROID_VIDS};
-use rusb::UsbContext;
+use pcdock_usb::{PhoneSelector, Settings, UsbPort, ANDROID_VIDS};
 
 /// Демон PC Dock: трубки на любых транспортах, один протокол наружу.
 #[derive(Debug, Parser)]
@@ -19,12 +18,13 @@ struct Args {
     #[arg(long, short = 'a')]
     auto: bool,
 
-    /// Явная трубка (без --auto: «только эти»). Формат: `usb`, `adb:СЕРИЙНИК`,
+    /// Явная трубка (без --auto: «только эти»). Формат: `usb` (первый телефон),
+    /// `usb:1-2.3` (телефон на этом USB-порту), `usb:СЕРИЙНИК`, `adb:СЕРИЙНИК`,
     /// `serial:ПУТЬ`. Можно несколько раз.
     #[arg(long = "phone")]
     phones: Vec<String>,
 
-    /// Пропустить при --auto. Формат тот же, что у --phone.
+    /// Пропустить при --auto. Формат тот же, что у --phone (USB — по порту: `usb:1-2.3`).
     #[arg(long = "except")]
     except: Vec<String>,
 
@@ -146,13 +146,15 @@ fn main() {
 /// Автообнаружение всех семейств. Возвращает следующий свободный id.
 fn auto_add(daemon: &mut Daemon, args: &Args, mut next_id: u32) -> u32 {
     if !args.no_usb {
-        for dev in usb_scan() {
-            if args.except.iter().any(|e| e == "usb" || e == &dev) {
+        // Как раньше, авторежим берёт только первый телефон: переключение в аксессуар рвёт на нём adb,
+        // а --auto ещё и добавляет adb-трубки. Остальные — явно: `--phone usb:<порт>`.
+        // Отличие от прежнего: трубка привязана к порту, `Dock` трогает только свой телефон.
+        for port in usb_scan() {
+            let spec = format!("usb:{port}");
+            if args.except.iter().any(|e| e == "usb" || e == &spec) {
                 continue;
             }
-            next_id = add_usb(daemon, args, next_id, &dev);
-            // Честное ограничение v1: транспорт открывает первое устройство,
-            // поэтому вторую USB-трубку осознанно не добавляем (см. ниже).
+            next_id = add_usb(daemon, args, next_id, Some(PhoneSelector::port(port)));
             break;
         }
     }
@@ -179,8 +181,19 @@ fn auto_add(daemon: &mut Daemon, args: &Args, mut next_id: u32) -> u32 {
 
 /// Явный список «только эти».
 fn add_spec(daemon: &mut Daemon, args: &Args, spec: &str, next_id: u32) -> u32 {
-    if spec == "usb" || spec.starts_with("usb:") {
-        return add_usb(daemon, args, next_id, spec);
+    if spec == "usb" {
+        return add_usb(daemon, args, next_id, None);
+    }
+    if let Some(what) = spec.strip_prefix("usb:") {
+        if what.is_empty() {
+            log::error!("пустой порт/серийник в --phone {spec}");
+            return next_id;
+        }
+        let target = match what.parse::<UsbPort>() {
+            Ok(port) => PhoneSelector::port(port),
+            Err(_) => PhoneSelector::serial(what),
+        };
+        return add_usb(daemon, args, next_id, Some(target));
     }
     if let Some(serial) = spec.strip_prefix("adb:") {
         if serial.is_empty() {
@@ -201,7 +214,13 @@ fn add_spec(daemon: &mut Daemon, args: &Args, spec: &str, next_id: u32) -> u32 {
     next_id
 }
 
-fn add_usb(daemon: &mut Daemon, args: &Args, id: u32, _label: &str) -> u32 {
+fn add_usb(daemon: &mut Daemon, args: &Args, id: u32, target: Option<PhoneSelector>) -> u32 {
+    let label = match &target {
+        None => "первый телефон".to_string(),
+        Some(PhoneSelector { port: Some(port), .. }) => format!("порт {port}"),
+        Some(PhoneSelector { serial: Some(serial), .. }) => format!("серийник {serial}"),
+        Some(_) => "первый телефон".to_string(),
+    };
     let cfg = Config {
         name: args.name.clone(),
         stream: Some(pcdock_core::packet::SetStream {
@@ -211,7 +230,7 @@ fn add_usb(daemon: &mut Daemon, args: &Args, id: u32, _label: &str) -> u32 {
         }),
         ..Default::default()
     };
-    let link = match UsbLink::new(cfg, Settings::default()) {
+    let link = match UsbLink::new(cfg, Settings { target, ..Settings::default() }) {
         Ok(l) => l,
         Err(e) => {
             log::error!("USB-трубка не создалась: {e}");
@@ -222,7 +241,7 @@ fn add_usb(daemon: &mut Daemon, args: &Args, id: u32, _label: &str) -> u32 {
         Ok(()) => {
             // Поток поднимет сессию сам; video/audio по умолчанию из Config.
             // Живое переключение — командой SetStream по сокету.
-            log::info!("трубка {id}: USB");
+            log::info!("трубка {id}: USB ({label})");
             id + 1
         }
         Err(e) => {
@@ -257,31 +276,16 @@ fn add_adb(daemon: &mut Daemon, args: &Args, serial: &str, id: u32) -> u32 {
     }
 }
 
-/// Видимые USB-устройства-телефоны: `usb:VID:PID` (+ серийник при наличии).
-/// Ограничение v1: транспорт открывает первое совпавшее устройство,
-/// поэтому авторежим берёт только первое (остальные — после прицельного открытия).
-fn usb_scan() -> Vec<String> {
-    let mut out = Vec::new();
-    let ctx = match rusb::Context::new() {
-        Ok(c) => c,
+/// Порты, на которых видны телефоны (в любом режиме). Устройства не открываются:
+/// на macOS это мешало бы adb.
+fn usb_scan() -> Vec<UsbPort> {
+    match pcdock_usb::list_phones(&ANDROID_VIDS, false) {
+        Ok(phones) => phones.into_iter().map(|p| p.port).collect(),
         Err(e) => {
             log::error!("USB-скан не удался: {e}");
-            return out;
+            Vec::new()
         }
-    };
-    for dev in ctx.devices().map(|d| d.iter().collect::<Vec<_>>()).unwrap_or_default() {
-        let desc = match dev.device_descriptor() {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        let (vid, pid) = (desc.vendor_id(), desc.product_id());
-        if !ANDROID_VIDS.contains(&vid) {
-            continue;
-        }
-        let mode = if ACCESSORY_PIDS.contains(&pid) { "accessory" } else { "normal" };
-        out.push(format!("usb:{vid:04x}:{pid:04x} ({mode})"));
     }
-    out
 }
 
 /// Серийники через ADB-сервер (без шелл-аутов). Нет сервера — пусто.
