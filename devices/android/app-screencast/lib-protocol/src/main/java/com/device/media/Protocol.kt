@@ -38,6 +38,7 @@ object Proto {
 
     const val STATUS_PROJECTION_STOPPED = 1
     const val STATUS_AUDIO_UNAVAILABLE = 2
+    const val STATUS_INPUT_UNSUPPORTED = 3
 }
 
 class Packet(val type: Int, val flags: Int, val payload: ByteArray) {
