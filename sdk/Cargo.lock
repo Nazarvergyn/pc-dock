@@ -358,20 +358,12 @@ name = "pcdock-adb"
 version = "0.1.0"
 dependencies = [
  "pcdock-core",
- "pcdock-daemon",
+ "pcdock-farm",
 ]
 
 [[package]]
 name = "pcdock-core"
 version = "0.1.0"
-
-[[package]]
-name = "pcdock-daemon"
-version = "0.1.0"
-dependencies = [
- "pcdock-core",
- "pcdock-usb",
-]
 
 [[package]]
 name = "pcdock-farm"
@@ -394,7 +386,7 @@ version = "0.1.0"
 dependencies = [
  "interprocess",
  "pcdock-core",
- "pcdock-daemon",
+ "pcdock-farm",
  "serde",
  "serde_json",
  "tungstenite",
@@ -417,7 +409,7 @@ dependencies = [
  "log",
  "pcdock-adb",
  "pcdock-core",
- "pcdock-daemon",
+ "pcdock-farm",
  "pcdock-serve",
  "pcdock-usb",
 ]

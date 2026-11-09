@@ -11,4 +11,4 @@ path = "src/lib.rs"
 
 [dependencies]
 pcdock-core = { path = "../pcdock-core" }
-pcdock-daemon = { path = "../pcdock-daemon" }
+pcdock-farm = { path = "../pcdock-farm" }

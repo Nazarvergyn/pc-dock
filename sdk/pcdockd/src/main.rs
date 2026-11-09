@@ -6,8 +6,9 @@
 
 use clap::Parser;
 use pcdock_core::session::Config;
-use pcdock_daemon::{Daemon, UsbLink};
+use pcdock_farm::LiveFarm;
 use pcdock_serve::Serve;
+use pcdock_usb::UsbLink;
 use pcdock_usb::{PhoneSelector, Settings, UsbPort, ANDROID_VIDS};
 
 /// Демон PC Dock: трубки на любых транспортах, один протокол наружу.
@@ -90,7 +91,7 @@ fn main() {
         std::process::exit(2);
     }
 
-    let mut daemon = Daemon::new();
+    let mut daemon = LiveFarm::new();
     let mut next_id: u32 = 1;
 
     if args.auto {
@@ -100,7 +101,7 @@ fn main() {
             next_id = add_spec(&mut daemon, &args, spec, next_id);
         }
     };
-    let _ = next_id; // id выдан, дальше трубки живут в Daemon
+    let _ = next_id; // id выдан, дальше трубки живут в LiveFarm
 
     if daemon.phones().is_empty() {
         log::error!("нет трубок: демон слушать нечего");
@@ -144,7 +145,7 @@ fn main() {
 }
 
 /// Автообнаружение всех семейств. Возвращает следующий свободный id.
-fn auto_add(daemon: &mut Daemon, args: &Args, mut next_id: u32) -> u32 {
+fn auto_add(daemon: &mut LiveFarm, args: &Args, mut next_id: u32) -> u32 {
     if !args.no_usb {
         // Как раньше, авторежим берёт только первый телефон: переключение в аксессуар рвёт на нём adb,
         // а --auto ещё и добавляет adb-трубки. Остальные — явно: `--phone usb:<порт>`.
@@ -180,7 +181,7 @@ fn auto_add(daemon: &mut Daemon, args: &Args, mut next_id: u32) -> u32 {
 }
 
 /// Явный список «только эти».
-fn add_spec(daemon: &mut Daemon, args: &Args, spec: &str, next_id: u32) -> u32 {
+fn add_spec(daemon: &mut LiveFarm, args: &Args, spec: &str, next_id: u32) -> u32 {
     if spec == "usb" {
         return add_usb(daemon, args, next_id, None);
     }
@@ -214,7 +215,7 @@ fn add_spec(daemon: &mut Daemon, args: &Args, spec: &str, next_id: u32) -> u32 {
     next_id
 }
 
-fn add_usb(daemon: &mut Daemon, args: &Args, id: u32, target: Option<PhoneSelector>) -> u32 {
+fn add_usb(daemon: &mut LiveFarm, args: &Args, id: u32, target: Option<PhoneSelector>) -> u32 {
     let label = match &target {
         None => "первый телефон".to_string(),
         Some(PhoneSelector { port: Some(port), .. }) => format!("порт {port}"),
@@ -252,7 +253,7 @@ fn add_usb(daemon: &mut Daemon, args: &Args, id: u32, target: Option<PhoneSelect
 }
 
 /// ADB-трубка: локальный порт проброса выбираем рядом с телефонным.
-fn add_adb(daemon: &mut Daemon, args: &Args, serial: &str, id: u32) -> u32 {
+fn add_adb(daemon: &mut LiveFarm, args: &Args, serial: &str, id: u32) -> u32 {
     let cfg = Config {
         name: args.name.clone(),
         stream: Some(pcdock_core::packet::SetStream {

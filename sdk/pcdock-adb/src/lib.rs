@@ -13,9 +13,9 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use pcdock_core::input::TouchPoint;
+use pcdock_core::link::{InputCmd, LinkError, PhoneLink};
 use pcdock_core::packet::SetStream;
 use pcdock_core::session::{Config, Event, Session, Transmit};
-use pcdock_daemon::{InputCmd, LinkError, PhoneLink};
 
 /// Порт приложения в телефоне (ServerSocket, localhost). Один на всех.
 pub const PHONE_PORT: u16 = 47631;

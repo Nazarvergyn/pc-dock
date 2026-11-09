@@ -16,7 +16,8 @@ use std::time::Duration;
 use interprocess::local_socket::{self, traits::ListenerExt, ListenerOptions, ToNsName};
 use interprocess::TryClone;
 use pcdock_core::input::{DeviceKind, MouseButton, TouchPhase};
-use pcdock_daemon::{Daemon, DaemonEvent, InputCmd, PhoneId};
+use pcdock_core::link::{InputCmd, PhoneId};
+use pcdock_farm::{FarmEvent, LiveFarm};
 use tungstenite::Message;
 
 use super::protocol::{
@@ -42,13 +43,13 @@ type Clients = Arc<Mutex<HashMap<u64, Client>>>;
 /// живут в своих потоках, демон дёргается под мьютексом.
 #[derive(Clone)]
 pub struct Serve {
-    daemon: Arc<Mutex<Daemon>>,
+    daemon: Arc<Mutex<LiveFarm>>,
     clients: Clients,
     next_id: Arc<Mutex<u64>>,
 }
 
 impl Serve {
-    pub fn new(daemon: Daemon) -> Self {
+    pub fn new(daemon: LiveFarm) -> Self {
         let serve = Self {
             daemon: Arc::new(Mutex::new(daemon)),
             clients: Arc::new(Mutex::new(HashMap::new())),
@@ -59,7 +60,7 @@ impl Serve {
     }
 
     /// Доступ к демону (добавить трубку, положить команду напрямую).
-    pub fn daemon(&self) -> &Arc<Mutex<Daemon>> {
+    pub fn daemon(&self) -> &Arc<Mutex<LiveFarm>> {
         &self.daemon
     }
 
@@ -343,10 +344,10 @@ impl Serve {
 
 /// Маршрутизация события демона по подпискам. Видео/звук — только подписанным
 /// (сброс при переполнении канала: пропуск виден по номеру кадра).
-fn route(clients: &Clients, ev: DaemonEvent) {
+fn route(clients: &Clients, ev: FarmEvent) {
     let map = clients.lock().unwrap();
     match ev {
-        DaemonEvent::Video { phone, frame } => {
+        FarmEvent::Video { phone, frame } => {
             let payload =
                 encode_video(phone, frame.seq, frame.codec, frame.key_frame, frame.pts_us, &frame.data);
             for c in map.values() {
@@ -355,7 +356,7 @@ fn route(clients: &Clients, ev: DaemonEvent) {
                 }
             }
         }
-        DaemonEvent::Audio { phone, pts_us, data } => {
+        FarmEvent::Audio { phone, pts_us, data } => {
             let payload = encode_audio(phone, pts_us, &data);
             for c in map.values() {
                 if c.watched.contains(&phone) {
@@ -376,24 +377,24 @@ fn route(clients: &Clients, ev: DaemonEvent) {
     }
 }
 
-fn map_daemon_event(ev: DaemonEvent) -> (PhoneId, ServerMsg) {
+fn map_daemon_event(ev: FarmEvent) -> (PhoneId, ServerMsg) {
     match ev {
-        DaemonEvent::Connected { phone, version, capabilities, name } => {
+        FarmEvent::Connected { phone, version, capabilities, name } => {
             (phone, ServerMsg::Connected { phone, version, caps: capabilities, name })
         }
-        DaemonEvent::Display { phone, stream_w, stream_h, screen_w, screen_h, dpi, rotation } => {
+        FarmEvent::Display { phone, stream_w, stream_h, screen_w, screen_h, dpi, rotation } => {
             (phone, ServerMsg::Display { phone, stream_w, stream_h, screen_w, screen_h, dpi, rotation })
         }
-        DaemonEvent::AudioConfig { phone, codec, rate, channels } => {
+        FarmEvent::AudioConfig { phone, codec, rate, channels } => {
             (phone, ServerMsg::AudioConfig { phone, codec, rate, channels })
         }
-        DaemonEvent::Status { phone, code, detail } => (phone, ServerMsg::Status { phone, code, detail }),
-        DaemonEvent::PeerSilent { phone } => (phone, ServerMsg::PeerSilent { phone }),
-        DaemonEvent::Malformed { phone, detail } => (phone, ServerMsg::Malformed { phone, detail }),
-        DaemonEvent::Disconnected { phone, reason } => (phone, ServerMsg::Disconnected { phone, reason }),
-        DaemonEvent::LinkDown { phone, detail } => (phone, ServerMsg::LinkDown { phone, detail }),
-        DaemonEvent::Warning { phone, detail } => (phone, ServerMsg::Warning { phone, detail }),
-        DaemonEvent::Video { .. } | DaemonEvent::Audio { .. } => {
+        FarmEvent::Status { phone, code, detail } => (phone, ServerMsg::Status { phone, code, detail }),
+        FarmEvent::PeerSilent { phone } => (phone, ServerMsg::PeerSilent { phone }),
+        FarmEvent::Malformed { phone, detail } => (phone, ServerMsg::Malformed { phone, detail }),
+        FarmEvent::Disconnected { phone, reason } => (phone, ServerMsg::Disconnected { phone, reason }),
+        FarmEvent::LinkDown { phone, detail } => (phone, ServerMsg::LinkDown { phone, detail }),
+        FarmEvent::Warning { phone, detail } => (phone, ServerMsg::Warning { phone, detail }),
+        FarmEvent::Video { .. } | FarmEvent::Audio { .. } => {
             unreachable!("видео и звук идут бинарными пакетами")
         }
     }

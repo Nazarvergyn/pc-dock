@@ -7,8 +7,9 @@ use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use pcdock_core::link::{InputCmd, LinkError, PhoneLink};
 use pcdock_core::session::Event;
-use pcdock_daemon::{Daemon, InputCmd, PhoneLink};
+use pcdock_farm::LiveFarm;
 use pcdock_serve::protocol::{ClientMsg, ServerMsg, PKG_JSON, PKG_VIDEO};
 use pcdock_serve::Serve;
 
@@ -22,16 +23,16 @@ impl PhoneLink for FakeLink {
     fn is_connected(&self) -> bool {
         self.connected
     }
-    fn connect(&mut self) -> Result<(), pcdock_daemon::LinkError> {
+    fn connect(&mut self) -> Result<(), LinkError> {
         self.connected = true;
         Ok(())
     }
-    fn poll(&mut self) -> Result<Vec<Event>, pcdock_daemon::LinkError> {
+    fn poll(&mut self) -> Result<Vec<Event>, LinkError> {
         // Чуть притормаживаем busy-loop воркера, чтобы не жечь CPU.
         std::thread::sleep(std::time::Duration::from_millis(5));
         Ok(self.events.lock().unwrap().pop_front().into_iter().collect())
     }
-    fn input(&mut self, cmd: &InputCmd) -> Result<(), pcdock_daemon::LinkError> {
+    fn input(&mut self, cmd: &InputCmd) -> Result<(), LinkError> {
         self.inputs.lock().unwrap().push(format!("{cmd:?}"));
         Ok(())
     }
@@ -69,7 +70,7 @@ fn send_json(wr: &mut TcpStream, msg: &ClientMsg) {
 
 #[test]
 fn tcp_watch_input_and_frame() {
-    let mut daemon = Daemon::new();
+    let mut daemon = LiveFarm::new();
     let inputs = Arc::new(Mutex::new(Vec::new()));
     let shared: Arc<Mutex<VecDeque<Event>>> = Arc::new(Mutex::new(VecDeque::new()));
     let link = FakeLink { connected: false, events: shared.clone(), inputs: inputs.clone() };
@@ -151,7 +152,7 @@ where
 
 #[test]
 fn ws_watch_and_frame() {
-    let mut daemon = Daemon::new();
+    let mut daemon = LiveFarm::new();
     let shared: Arc<Mutex<VecDeque<Event>>> = Arc::new(Mutex::new(VecDeque::new()));
     let inputs = Arc::new(Mutex::new(Vec::new()));
     daemon
@@ -188,7 +189,7 @@ fn local_watch_and_frame() {
     };
     use std::io::{Read, Write};
 
-    let mut daemon = Daemon::new();
+    let mut daemon = LiveFarm::new();
     let shared: Arc<Mutex<VecDeque<Event>>> = Arc::new(Mutex::new(VecDeque::new()));
     daemon
         .add_phone(

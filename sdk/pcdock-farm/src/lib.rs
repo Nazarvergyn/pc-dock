@@ -9,6 +9,9 @@
 //! Счётчик `frame_seq` растёт на каждый новый кадр — по нему клиент сокетов
 //! видит пропуск при заторе.
 
+pub mod runtime;
+pub use runtime::{CachedFrame, FarmEvent, LiveFarm};
+
 use std::collections::HashMap;
 
 use pcdock_core::input::{DeviceKind, InputError, MouseButton, TouchPhase, TouchPoint};
@@ -16,7 +19,7 @@ use pcdock_core::packet::SetStream;
 use pcdock_core::session::{Config, Event, Session, State, Transmit};
 
 /// Идентификатор трубки в ферме. Назначает вызывающий (индекс USB, серийник, ...).
-pub type PhoneId = u32;
+pub use pcdock_core::link::PhoneId;
 
 /// Последний кадр трубки: копия данных из события `Video`.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 pcdock-core = { path = "../pcdock-core" }
 pcdock-usb = { path = "../pcdock-usb" }
-pcdock-daemon = { path = "../pcdock-daemon" }
+pcdock-farm = { path = "../pcdock-farm" }
 pcdock-serve = { path = "../pcdock-serve" }
 pcdock-adb = { path = "../pcdock-adb" }
 clap = { version = "4", features = ["derive"] }

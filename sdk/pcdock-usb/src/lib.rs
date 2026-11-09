@@ -9,6 +9,9 @@
 //! Телефонов на ПК может быть несколько: `Settings::target` выбирает, какой из них трогать
 //! (по порту или серийнику), а `shutdown` сбрасывает только тот телефон, с которым работал этот `Dock`.
 
+mod link;
+pub use link::UsbLink;
+
 use pcdock_core::hid::{self, AoaStrings, ControlRequest};
 use pcdock_core::session::{Config, Event, Session, Transmit};
 use rusb::{Context, Device, DeviceHandle, Recipient, RequestType, TransferType, UsbContext};

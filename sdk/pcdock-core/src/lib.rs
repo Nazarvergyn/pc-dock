@@ -4,5 +4,6 @@
 
 pub mod hid;
 pub mod input;
+pub mod link;
 pub mod packet;
 pub mod session;
