@@ -25,6 +25,8 @@ object Proto {
     const val T_WAKE = 0x42
     /** Открыть приложение (хост → телефон): u32 request_id, имя пакета UTF-8. Ответ — STATUS 18. */
     const val T_LAUNCH_APP = 0x43
+    /** Список приложений с главным экраном (хост → телефон): u32 request_id. Ответ — STATUS 19. */
+    const val T_LIST_APPS = 0x44
     const val T_STATUS = 0x50
     const val T_ERROR = 0x7F
 
@@ -35,6 +37,8 @@ object Proto {
     const val CAP_FOREGROUND = 1 shl 6
     /** Телефон открывает приложение по команде хоста (LAUNCH_APP, ответ STATUS 18), если хост поставил тот же бит. */
     const val CAP_LAUNCH_APP = 1 shl 7
+    /** Телефон отдаёт список приложений с главным экраном (LIST_APPS, ответ STATUS 19), если хост поставил тот же бит. */
+    const val CAP_LIST_APPS = 1 shl 8
 
     const val CODEC_VIDEO_JPEG = 1
     const val CODEC_AUDIO_PCM_S16LE = 1
@@ -51,6 +55,8 @@ object Proto {
     const val STATUS_FOREGROUND_UNAVAILABLE = 17
     /** Ответ на LAUNCH_APP: detail = "<request_id> <результат>" (ok, not_installed, no_launcher_activity, blocked_bal, invalid_package, error). */
     const val STATUS_LAUNCH_RESULT = 18
+    /** Ответ на LIST_APPS: detail = "<request_id> <JSON-массив [{"package","label","icon"?}]>". */
+    const val STATUS_APP_LIST = 19
 }
 
 class Packet(val type: Int, val flags: Int, val payload: ByteArray) {
@@ -153,6 +159,13 @@ class SetStream(
 class LaunchApp(val requestId: Long, val packageName: String)
 
 object Messages {
+    /** LIST_APPS: u32 request_id. null — пакет повреждён. */
+    fun parseListApps(payload: ByteArray): Long? = try {
+        ByteBuffer.wrap(payload).int.toLong() and 0xFFFFFFFFL
+    } catch (e: Exception) {
+        null
+    }
+
     /** LAUNCH_APP: u32 request_id, затем имя пакета UTF-8 до конца. null — пакет повреждён. */
     fun parseLaunchApp(payload: ByteArray): LaunchApp? = try {
         val b = ByteBuffer.wrap(payload)

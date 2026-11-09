@@ -338,4 +338,20 @@ fn launch_app_only_when_both_sides_agree() {
     assert_eq!(LaunchApp::from_payload(&p.payload).unwrap(), LaunchApp { request_id: 7, package: "com.android.settings".into() });
     feed(&mut s, 20, &[Status { code: 18, detail: "7 ok".into() }.to_packet()]);
     assert!(events(&mut s).contains(&Event::Status(Status { code: 18, detail: "7 ok".into() })));
+    // Список приложений этот телефон не согласовал
+    assert_eq!(s.list_apps(8), Err(LaunchError::Unsupported));
+}
+
+#[test]
+fn list_apps_request_when_agreed() {
+    let cfg = Config { capabilities: Config::default().capabilities | caps::LIST_APPS, ..Config::default() };
+    let mut s = Session::new(cfg);
+    assert_eq!(s.list_apps(1), Err(LaunchError::NotActive));
+    s.start(0);
+    let hello = Hello { version_max: 2, version_min: 2, capabilities: caps::VIDEO_JPEG | caps::LIST_APPS, role: Role::Device, name: "p".into() };
+    feed(&mut s, 10, &[hello.to_packet()]);
+    drain(&mut s);
+    assert_eq!(s.list_apps(0x0A0B_0C0D), Ok(()));
+    let (streams, _) = drain(&mut s);
+    assert_eq!(streams, vec![vec![b'P', b'D', 0x44, 0, 0, 0, 0, 4, 0x0A, 0x0B, 0x0C, 0x0D]]);
 }

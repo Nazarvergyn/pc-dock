@@ -433,6 +433,19 @@ impl Session {
         Ok(())
     }
 
+    /// Просит телефон прислать список приложений с главным экраном (`LIST_APPS`). Ответ придёт событием `Status`
+    /// с кодом 19 и `detail` = `"<request_id> <JSON>"`. Ошибка — сессия не активна или `caps::LIST_APPS` не согласован.
+    pub fn list_apps(&mut self, request_id: u32) -> Result<(), LaunchError> {
+        if self.state != State::Active {
+            return Err(LaunchError::NotActive);
+        }
+        if self.negotiated_caps & caps::LIST_APPS == 0 {
+            return Err(LaunchError::Unsupported);
+        }
+        self.send_packet(list_apps_packet(request_id));
+        Ok(())
+    }
+
     // ----- команды ввода (PROTOCOL.md §8) -----
 
     fn with_input<R>(&mut self, f: impl FnOnce(&mut Input, &mut Vec<ControlRequest>) -> R) -> R {

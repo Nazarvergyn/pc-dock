@@ -141,6 +141,8 @@ class ScreenCaptureService : Service(), HostLink.Listener {
     private var foregroundSentAt = 0L
     // Запуск приложений по команде хоста (CAP_LAUNCH_APP, LAUNCH_APP → STATUS 18) — только если хост поставил бит в HELLO
     private var hostWantsLaunch = false
+    // Список приложений по команде хоста (CAP_LIST_APPS, LIST_APPS → STATUS 19)
+    private var hostWantsApps = false
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -777,6 +779,7 @@ class ScreenCaptureService : Service(), HostLink.Listener {
         sessionActive = false
         hostWantsForeground = false
         hostWantsLaunch = false
+        hostWantsApps = false
         stream = StreamConfig()
         Log.d(TAG, "USB подключён (#$connects): ${accessory.manufacturer} ${accessory.model}, жду HELLO от ПК")
         l.start()
@@ -802,6 +805,7 @@ class ScreenCaptureService : Service(), HostLink.Listener {
                 sessionActive = false
                 hostWantsForeground = false
                 hostWantsLaunch = false
+                hostWantsApps = false
             }
         }
     }
@@ -880,6 +884,25 @@ class ScreenCaptureService : Service(), HostLink.Listener {
                 }, 300)
             }
 
+            Proto.T_LIST_APPS -> {
+                reactivateIfPaused("LIST_APPS")
+                val id = Messages.parseListApps(p.payload) ?: return
+                if (!hostWantsApps) {
+                    l.sendControl(Messages.status(Proto.STATUS_APP_LIST, "$id []").encode())
+                    return
+                }
+                // Подписи и значки грузятся заметное время — не в потоке захвата
+                Thread({
+                    val json = try {
+                        AppLauncher.listApps(this)
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "LIST_APPS: $e")
+                        "[]"
+                    }
+                    l.sendControl(Messages.status(Proto.STATUS_APP_LIST, "$id $json").encode())
+                }, "list-apps").start()
+            }
+
             else -> {} // PONG и неизвестные типы пропускаем
         }
     }
@@ -900,10 +923,11 @@ class ScreenCaptureService : Service(), HostLink.Listener {
         sessionActive = true
         stream = StreamConfig()
         relayout("HELLO")
-        var caps = Proto.CAP_VIDEO_JPEG or Proto.CAP_ROTATION or Proto.CAP_FOREGROUND or Proto.CAP_LAUNCH_APP
+        var caps = Proto.CAP_VIDEO_JPEG or Proto.CAP_ROTATION or Proto.CAP_FOREGROUND or Proto.CAP_LAUNCH_APP or Proto.CAP_LIST_APPS
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) caps = caps or Proto.CAP_AUDIO_PCM
         hostWantsForeground = hello.capabilities and Proto.CAP_FOREGROUND != 0
         hostWantsLaunch = hello.capabilities and Proto.CAP_LAUNCH_APP != 0
+        hostWantsApps = hello.capabilities and Proto.CAP_LIST_APPS != 0
         l.sendControl(Messages.hello(caps, NAME).encode())
         val lay = layout
         if (lay != null) {

@@ -6,7 +6,13 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.provider.Settings
+import android.graphics.Bitmap
+import android.util.Base64
 import android.util.Log
+import androidx.core.graphics.drawable.toBitmap
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 
 /**
  * Открыть приложение по команде хоста (LAUNCH_APP, PROTOCOL.md «Запуск приложения (возможность 7)»).
@@ -34,6 +40,42 @@ object AppLauncher {
     /** Можно ли открывать приложения из фона: до Android 10 — всегда, дальше — с «Поверх других окон» */
     fun canStartFromBackground(context: Context): Boolean =
         Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || Settings.canDrawOverlays(context)
+
+    /** Сторона значка в списке приложений, пикселей */
+    private const val ICON_PX = 48
+
+    /**
+     * Приложения с главным экраном (LIST_APPS → STATUS 19): JSON-массив [{"package","label","icon"?}], значок — PNG 48×48
+     * в base64 (если получилось). Само приложение-приёмник не входит. Только имена и значки — ничего не сохраняется.
+     */
+    fun listApps(context: Context): String {
+        val pm = context.packageManager
+        val main = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        @Suppress("DEPRECATION")
+        val acts = pm.queryIntentActivities(main, 0)
+        val seen = HashSet<String>()
+        val out = JSONArray()
+        for (ri in acts) {
+            val pkg = ri.activityInfo?.packageName ?: continue
+            if (pkg == context.packageName || !validPackage(pkg) || !seen.add(pkg)) continue
+            val o = JSONObject().put("package", pkg)
+            try {
+                o.put("label", ri.loadLabel(pm)?.toString()?.take(100) ?: pkg)
+            } catch (e: Exception) {
+                o.put("label", pkg)
+            }
+            try {
+                val bmp = ri.loadIcon(pm).toBitmap(ICON_PX, ICON_PX, Bitmap.Config.ARGB_8888)
+                val bos = ByteArrayOutputStream()
+                bmp.compress(Bitmap.CompressFormat.PNG, 100, bos)
+                o.put("icon", Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP))
+            } catch (e: Exception) {
+                // без значка
+            }
+            out.put(o)
+        }
+        return out.toString()
+    }
 
     /** Открыть главный экран приложения; результат — код для STATUS 18 */
     fun launch(context: Context, pkg: String): String {

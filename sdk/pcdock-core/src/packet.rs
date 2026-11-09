@@ -24,6 +24,8 @@ pub mod caps {
     pub const FOREGROUND: u32 = 1 << 6;
     /// Телефон открывает приложение по команде хоста (`LAUNCH_APP`, ответ — `STATUS` 18).
     pub const LAUNCH_APP: u32 = 1 << 7;
+    /// Телефон отдаёт список приложений с главным экраном (`LIST_APPS`, ответ — `STATUS` 19).
+    pub const LIST_APPS: u32 = 1 << 8;
 }
 
 /// Коды кодеков.
@@ -57,6 +59,8 @@ pub enum PacketType {
     Wake,
     /// Открыть приложение по имени пакета (хост → телефон, возможность `caps::LAUNCH_APP`).
     LaunchApp,
+    /// Список приложений с главным экраном (хост → телефон, возможность `caps::LIST_APPS`).
+    ListApps,
     Status,
     Error,
     /// Тип, неизвестный этой версии ядра (такие пакеты пропускаются).
@@ -78,6 +82,7 @@ impl PacketType {
             0x41 => Self::SetStream,
             0x42 => Self::Wake,
             0x43 => Self::LaunchApp,
+            0x44 => Self::ListApps,
             0x50 => Self::Status,
             0x7F => Self::Error,
             other => Self::Unknown(other),
@@ -98,6 +103,7 @@ impl PacketType {
             Self::SetStream => 0x41,
             Self::Wake => 0x42,
             Self::LaunchApp => 0x43,
+            Self::ListApps => 0x44,
             Self::Status => 0x50,
             Self::Error => 0x7F,
             Self::Unknown(v) => v,
@@ -567,6 +573,12 @@ pub fn request_frame_packet() -> Packet {
 /// Разбудить экран телефона (пустой пакет, хост → телефон).
 pub fn wake_packet() -> Packet {
     Packet::new(PacketType::Wake, Vec::new())
+}
+
+/// Запрос списка приложений (`LIST_APPS`, 0x44): `u32 request_id`. Телефон отвечает `STATUS` 19 с `detail` =
+/// `"<request_id> <JSON-массив [{"package","label","icon"?}]>"`.
+pub fn list_apps_packet(request_id: u32) -> Packet {
+    Packet::new(PacketType::ListApps, request_id.to_be_bytes().to_vec())
 }
 
 /// Имя пакета Android, которое можно передать в `LAUNCH_APP`: латинская буква, затем буквы, цифры, `_` и `.`,
