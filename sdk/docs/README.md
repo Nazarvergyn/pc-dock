@@ -29,6 +29,7 @@
 | [transports.md](transports.md) | AOA, ADB, serial: как работают, что нужно на телефоне и ПК |
 | [operations.md](operations.md) | **руководство по эксплуатации**: установка, запуск, настройка, диагностика, безопасность |
 | [development.md](development.md) | сборка, тесты, структура репозитория, как добавить транспорт |
+| [migration.md](migration.md) | переход со старых версий (удалён `pcdock-daemon`, переименования) |
 
 Протокол между ПК и телефоном (пакеты v2) описан отдельно: [`devices/android/PROTOCOL.md`](../../devices/android/PROTOCOL.md).
 Принятые решения и их причины: [`devices/android/DECISIONS.md`](../../devices/android/DECISIONS.md).
