@@ -175,6 +175,15 @@ impl PhoneSpec {
         Ok(out)
     }
 
+    /// Назван ли этим правилом именно тот телефон, что виден как `s` (по серийнику, а для ADB — по адресу).
+    fn names(&self, s: &Sighting) -> bool {
+        let serial = s.serial.as_deref();
+        (self.serial.is_some() && self.serial.as_deref() == serial)
+            || (self.transport == Some(Transport::Adb)
+                && self.address.is_some()
+                && self.address.as_deref() == serial)
+    }
+
     pub fn matches(&self, s: &Sighting) -> bool {
         self.transport.is_none_or(|t| t == s.transport)
             && self.address.as_ref().is_none_or(|a| *a == s.address)
@@ -212,6 +221,10 @@ impl Rules {
     pub fn accepts(&self, s: &Sighting) -> bool {
         if self.pinned.iter().any(|p| p.matches(s)) {
             return true;
+        }
+        // Телефон закреплён за транспортом (`adb:СЕРИЙНИК`): по другим путям его не берём, даже при `auto`.
+        if self.pinned.iter().any(|p| p.names(s)) {
+            return false;
         }
         let by_address = format!("{}:{}", s.transport, s.address);
         self.auto
@@ -1067,6 +1080,16 @@ mod tests {
         };
         assert!(both.accepts(&usb));
         assert!(Rules::default().accepts(&usb));
+    }
+
+    #[test]
+    fn pinned_phone_is_not_taken_over_other_transports() {
+        let rules = Rules { auto: true, except: vec![], pinned: vec![PhoneSpec::parse("adb:AAA").unwrap()] };
+        assert!(rules.accepts(&sight(Transport::Adb, "AAA", Some("AAA"))));
+        // Тот же телефон по USB: закреплён за ADB, поэтому не берём.
+        assert!(!rules.accepts(&sight(Transport::Usb, "1-2", Some("AAA"))));
+        // Другие телефоны по-прежнему берутся автообнаружением.
+        assert!(rules.accepts(&sight(Transport::Usb, "1-3", Some("BBB"))));
     }
 
     #[test]
