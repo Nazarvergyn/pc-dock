@@ -22,9 +22,26 @@ class Injector(private val screen: ScreenInfo) {
     private val inject: java.lang.reflect.Method
 
     init {
-        val cls = Class.forName("android.hardware.input.InputManager")
-        manager = cls.getDeclaredMethod("getInstance").invoke(null)!!
-        inject = cls.getMethod("injectInputEvent", InputEvent::class.java, Int::class.javaPrimitiveType)
+        // Основной путь — сама служба ввода (`IInputManager`): её интерфейс стабилен с давних версий,
+        // а `InputManager.getInstance()` на Android 15 в процессе без приложения возвращает null.
+        var m: Any? = null
+        var f: java.lang.reflect.Method? = null
+        try {
+            val binder = Class.forName("android.os.ServiceManager")
+                .getMethod("getService", String::class.java).invoke(null, "input") as android.os.IBinder
+            m = Class.forName("android.hardware.input.IInputManager\$Stub")
+                .getMethod("asInterface", android.os.IBinder::class.java).invoke(null, binder)
+            f = m!!.javaClass.getMethod("injectInputEvent", InputEvent::class.java, Int::class.javaPrimitiveType)
+        } catch (e: Throwable) {
+            Log.w(tag, "IInputManager недоступен ($e), пробую InputManager.getInstance()")
+        }
+        if (m == null || f == null) {
+            val cls = Class.forName("android.hardware.input.InputManager")
+            m = cls.getDeclaredMethod("getInstance").invoke(null)!!
+            f = cls.getMethod("injectInputEvent", InputEvent::class.java, Int::class.javaPrimitiveType)
+        }
+        manager = m!!
+        inject = f!!
     }
 
     private class Contact(val id: Int, var x: Float, var y: Float, var pressure: Float, var w: Float, var h: Float)

@@ -29,6 +29,17 @@ object Main {
     @JvmStatic
     fun main(args: Array<String>) {
         val socketName = args.firstOrNull() ?: "pcdock"
+        // ПК держит поток этого процесса открытым: закрылся (выход, обрыв) — завершаемся, чтобы сервер не висел.
+        Thread({
+            try {
+                while (System.`in`.read() >= 0) {
+                    // игнорируем содержимое
+                }
+            } catch (_: Exception) {
+            }
+            Log.i(TAG, "stdin закрыт, завершаюсь")
+            System.exit(0)
+        }, "stdin-watch").apply { isDaemon = true }.start()
         Looper.prepareMainLooper()
         val server = Server()
         Thread({ server.listen(socketName) }, "accept").start()

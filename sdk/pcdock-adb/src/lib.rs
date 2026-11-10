@@ -59,7 +59,8 @@ impl pcdock_core::link::Discovery for AdbDiscovery {
     }
 }
 
-/// Минимальный клиент ADB-сервера: `devices` и `forward`. Без шелл-аутов.
+/// Минимальный клиент ADB-сервера (протокол smart socket): список устройств, проброс портов,
+/// загрузка файла и запуск процесса на телефоне.
 pub struct Adb {
     addr: String,
 }
@@ -83,19 +84,37 @@ impl Adb {
         Ok(s)
     }
 
-    /// Один запрос к серверу: шлёт `service`, возвращает тело ответа.
+    fn connect(&self) -> Result<TcpStream, String> {
+        self.open().map_err(|e| format!("нет ADB-сервера {}: {e}", self.addr))
+    }
+
+    /// Шлёт сервис и читает статус `OKAY`/`FAIL<причина>`.
+    fn call(s: &mut TcpStream, service: &str) -> Result<(), String> {
+        send_msg(s, service).map_err(|e| format!("запрос {service}: {e}"))?;
+        let status = read_n(s, 4).map_err(|e| format!("статус {service}: {e}"))?;
+        match &status[..] {
+            b"OKAY" => Ok(()),
+            b"FAIL" => Err(format!("ADB {service}: {}", read_msg(s).unwrap_or_default())),
+            _ => Err(format!("ADB {service}: плохой статус")),
+        }
+    }
+
+    /// Запрос с ответом-телом (`host:devices`).
     fn request(&self, service: &str) -> Result<String, String> {
-        let mut s = self.open().map_err(|e| format!("нет ADB-сервера {}: {e}", self.addr))?;
-        send_msg(&mut s, service).map_err(|e| format!("запрос {service}: {e}"))?;
-        let status = read_n(&mut s, 4).map_err(|e| format!("статус {service}: {e}"))?;
-        if &status == b"FAIL" {
-            let body = read_msg(&mut s).unwrap_or_default();
-            return Err(format!("ADB {service}: {body}"));
-        }
-        if &status != b"OKAY" {
-            return Err(format!("ADB {service}: плохой статус"));
-        }
+        let mut s = self.connect()?;
+        Self::call(&mut s, service)?;
         read_msg(&mut s).map_err(|e| format!("тело {service}: {e}"))
+    }
+
+    /// Запрос без тела, на который сервер отвечает `OKAY`, иногда дважды (проброс портов):
+    /// второй `OKAY` читаем, если он пришёл.
+    fn command(&self, service: &str) -> Result<(), String> {
+        let mut s = self.connect()?;
+        Self::call(&mut s, service)?;
+        s.set_read_timeout(Some(Duration::from_millis(300))).map_err(|e| e.to_string())?;
+        let mut more = [0u8; 4];
+        let _ = s.read(&mut more); // второй OKAY (если есть) или таймаут: оба нормальные
+        Ok(())
     }
 
     /// Серийники и состояния всех устройств ADB (`device`, `unauthorized`, `offline`…).
@@ -115,16 +134,69 @@ impl Adb {
         Ok(self.device_states()?.into_iter().filter(|(_, st)| st == "device").map(|(s, _)| s).collect())
     }
 
-    /// Проброс `tcp:local -> tcp:remote` для трубки. Пустой ответ = ок.
+    /// Проброс `tcp:local -> remote` (`tcp:47631`, `localabstract:pcdock`…).
+    pub fn forward_to(&self, serial: &str, local_port: u16, remote: &str) -> Result<(), String> {
+        self.command(&format!("host-serial:{serial}:forward:tcp:{local_port};{remote}"))
+    }
+
+    /// Проброс `tcp:local -> tcp:remote`.
     pub fn forward(&self, serial: &str, local_port: u16, remote_port: u16) -> Result<(), String> {
-        let _ = self.request(&format!("host:transport:{serial}"))?;
-        self.request(&format!("forward:tcp:{local_port};tcp:{remote_port}")).map(|_| ())
+        self.forward_to(serial, local_port, &format!("tcp:{remote_port}"))
     }
 
     /// Снять проброс.
     pub fn kill_forward(&self, serial: &str, local_port: u16) -> Result<(), String> {
-        let _ = self.request(&format!("host:transport:{serial}"))?;
-        self.request(&format!("killforward:tcp:{local_port}")).map(|_| ())
+        self.command(&format!("host-serial:{serial}:killforward:tcp:{local_port}"))
+    }
+
+    /// Открывает на телефоне сервис (`exec:…`) и отдаёт сырой поток: после `OKAY` это канал к процессу.
+    pub fn open_service(&self, serial: &str, service: &str) -> Result<TcpStream, String> {
+        let mut s = self.connect()?;
+        Self::call(&mut s, &format!("host:transport:{serial}"))?;
+        Self::call(&mut s, service)?;
+        Ok(s)
+    }
+
+    /// Кладёт файл на телефон (`cat > путь`). Путь без пробелов и кавычек.
+    pub fn push(&self, serial: &str, remote_path: &str, data: &[u8]) -> Result<(), String> {
+        if remote_path.chars().any(|c| c.is_whitespace() || "'\"$`;&|<>".contains(c)) {
+            return Err(format!("плохой путь на телефоне: {remote_path:?}"));
+        }
+        let mut s = self.open_service(serial, &format!("exec:cat > {remote_path}"))?;
+        s.set_write_timeout(Some(Duration::from_secs(30))).map_err(|e| e.to_string())?;
+        s.write_all(data).map_err(|e| format!("загрузка {remote_path}: {e}"))?;
+        s.shutdown(std::net::Shutdown::Write).map_err(|e| e.to_string())?;
+        // Ждём, пока `cat` закончит: поток закроется со стороны телефона.
+        s.set_read_timeout(Some(Duration::from_secs(30))).map_err(|e| e.to_string())?;
+        let mut sink = [0u8; 256];
+        loop {
+            match s.read(&mut sink) {
+                Ok(0) => return Ok(()),
+                Ok(_) => {}
+                Err(e) => return Err(format!("загрузка {remote_path}: {e}")),
+            }
+        }
+    }
+
+    /// Запускает команду на телефоне и держит её поток: пока он открыт, процесс живёт; закрытие потока
+    /// (наш выход или обрыв) завершает сервер, который следит за своим stdin.
+    pub fn spawn(&self, serial: &str, command: &str) -> Result<TcpStream, String> {
+        let s = self.open_service(serial, &format!("exec:{command}"))?;
+        s.set_read_timeout(None).map_err(|e| e.to_string())?;
+        Ok(s)
+    }
+}
+
+/// Соединение живое, если за короткое время нет ни конца потока, ни ошибки.
+fn is_alive(s: &TcpStream) -> bool {
+    if s.set_read_timeout(Some(Duration::from_millis(300))).is_err() {
+        return false;
+    }
+    let mut b = [0u8; 1];
+    match s.peek(&mut b) {
+        Ok(0) => false,
+        Ok(_) => true,
+        Err(e) => matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut),
     }
 }
 
@@ -152,10 +224,29 @@ pub struct AdbLink {
     adb: Adb,
     serial: String,
     local_port: u16,
+    /// Серверный процесс на телефоне (решение 32): APK кладётся и запускается с ПК. `None` — старый путь
+    /// через приложение `app-adb`, которое слушает порт `PHONE_PORT`.
+    server: Option<ServerSpec>,
+    /// Поток процесса сервера: пока открыт, сервер жив.
+    held: Option<TcpStream>,
     stream: Option<TcpStream>,
     buf: Vec<u8>,
     t0: std::time::Instant,
 }
+
+/// Где лежит сервер на ПК и как он называется на телефоне.
+#[derive(Clone, Debug)]
+pub struct ServerSpec {
+    /// APK сервера на ПК (`server-adb`).
+    pub apk: std::path::PathBuf,
+    /// Имя abstract-сокета на телефоне.
+    pub socket: String,
+}
+
+/// Куда кладётся сервер на телефоне.
+pub const REMOTE_APK: &str = "/data/local/tmp/pcdock-server.apk";
+/// Главный класс сервера.
+pub const SERVER_MAIN: &str = "com.device.server.Main";
 
 impl AdbLink {
     pub fn new(config: Config, serial: impl Into<String>, local_port: u16) -> Self {
@@ -164,10 +255,32 @@ impl AdbLink {
             adb: Adb::local(),
             serial: serial.into(),
             local_port,
+            server: None,
+            held: None,
             stream: None,
             buf: vec![0u8; 65536],
             t0: std::time::Instant::now(),
         }
+    }
+
+    /// Связь через серверный процесс на телефоне (без приложения и диалога записи экрана).
+    pub fn with_server(mut self, adb: Adb, server: ServerSpec) -> Self {
+        self.adb = adb;
+        self.server = Some(server);
+        self
+    }
+
+    /// Кладёт сервер на телефон, запускает и пробрасывает его сокет. Возвращает порт на ПК.
+    fn start_server(&mut self, spec: &ServerSpec) -> Result<(), LinkError> {
+        let apk = std::fs::read(&spec.apk)
+            .map_err(|e| LinkError::Fatal(format!("нет APK сервера {}: {e}", spec.apk.display())))?;
+        self.adb.push(&self.serial, REMOTE_APK, &apk).map_err(LinkError::Gone)?;
+        let cmd = format!("CLASSPATH={REMOTE_APK} app_process / {SERVER_MAIN} {}", spec.socket);
+        self.held = Some(self.adb.spawn(&self.serial, &cmd).map_err(LinkError::Gone)?);
+        self.adb
+            .forward_to(&self.serial, self.local_port, &format!("localabstract:{}", spec.socket))
+            .map_err(LinkError::Gone)?;
+        Ok(())
     }
 
     /// Конструктор для тестов: готовый сокет вместо проброса.
@@ -178,6 +291,8 @@ impl AdbLink {
             adb: Adb::local(),
             serial: "test".into(),
             local_port: 0,
+            server: None,
+            held: None,
             stream: Some(stream),
             buf: vec![0u8; 65536],
             t0: std::time::Instant::now(),
@@ -224,17 +339,42 @@ impl PhoneLink for AdbLink {
         if self.stream.is_some() {
             return Ok(());
         }
-        self.adb.forward(&self.serial, self.local_port, PHONE_PORT).map_err(LinkError::Fatal)?;
         let addr = format!("127.0.0.1:{}", self.local_port);
-        let s = TcpStream::connect_timeout(
-            &addr
+        let tries = if let Some(spec) = self.server.clone() {
+            self.start_server(&spec)?;
+            // Серверу нужно время, чтобы подняться и открыть сокет.
+            25
+        } else {
+            self.adb.forward(&self.serial, self.local_port, PHONE_PORT).map_err(LinkError::Fatal)?;
+            1
+        };
+        let mut attempt = 0;
+        let s = loop {
+            attempt += 1;
+            let sock_addr = addr
                 .to_socket_addrs()
                 .map_err(|e| LinkError::Fatal(format!("проброс {addr}: {e}")))?
                 .next()
-                .ok_or_else(|| LinkError::Fatal(format!("проброс {addr}: нет адреса")))?,
-            Duration::from_secs(5),
-        )
-        .map_err(|e| LinkError::Gone(format!("телефон не слушает {addr}: {e}")))?;
+                .ok_or_else(|| LinkError::Fatal(format!("проброс {addr}: нет адреса")))?;
+            match TcpStream::connect_timeout(&sock_addr, Duration::from_secs(5)) {
+                // Порт проброса принимает соединение всегда, даже если сервер на телефоне ещё не открыл
+                // сокет: тогда ADB сразу закрывает его. Живое соединение молчит (сервер ждёт нашего HELLO),
+                // мёртвое даёт конец потока.
+                Ok(s) if self.server.is_some() && !is_alive(&s) => {
+                    if attempt >= tries {
+                        self.held = None;
+                        return Err(LinkError::Gone("сервер на телефоне не открыл сокет".into()));
+                    }
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                Ok(s) => break s,
+                Err(e) if attempt >= tries => {
+                    self.held = None;
+                    return Err(LinkError::Gone(format!("телефон не слушает {addr}: {e}")));
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(200)),
+            }
+        };
         s.set_read_timeout(Some(IO_TIMEOUT)).map_err(|e| LinkError::Fatal(e.to_string()))?;
         s.set_write_timeout(Some(IO_TIMEOUT)).map_err(|e| LinkError::Fatal(e.to_string()))?;
         self.stream = Some(s);
@@ -244,6 +384,26 @@ impl PhoneLink for AdbLink {
     }
 
     fn poll(&mut self) -> Result<Vec<Event>, LinkError> {
+        let r = self.poll_inner();
+        if matches!(r, Err(LinkError::Gone(_))) {
+            // Канал потерян: следующий `connect` поднимет его заново (и сервер на телефоне тоже).
+            self.stream = None;
+            self.held = None;
+        }
+        r
+    }
+
+    fn input(&mut self, cmd: &InputCmd) -> Result<(), LinkError> {
+        self.input_inner(cmd)
+    }
+
+    fn shutdown(&mut self) {
+        self.shutdown_inner()
+    }
+}
+
+impl AdbLink {
+    fn poll_inner(&mut self) -> Result<Vec<Event>, LinkError> {
         self.flush()?;
         let s = self.stream.as_mut().ok_or_else(|| LinkError::Gone("нет сокета".into()))?;
         let n = match s.read(&mut self.buf) {
@@ -270,7 +430,7 @@ impl PhoneLink for AdbLink {
         Ok(events)
     }
 
-    fn input(&mut self, cmd: &InputCmd) -> Result<(), LinkError> {
+    fn input_inner(&mut self, cmd: &InputCmd) -> Result<(), LinkError> {
         let s = &mut self.session;
         let r = match cmd {
             InputCmd::DeviceEnable { kind, on } => {
@@ -316,9 +476,10 @@ impl PhoneLink for AdbLink {
         r.map_err(LinkError::Fatal)
     }
 
-    fn shutdown(&mut self) {
+    fn shutdown_inner(&mut self) {
         self.session.close();
         self.stream = None;
+        self.held = None; // сервер на телефоне видит закрытый поток и завершается
         let _ = self.adb.kill_forward(&self.serial, self.local_port);
     }
 }
@@ -331,34 +492,78 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
 
-    /// Фейковый ADB-сервер: отвечает OKAY на devices/transport/forward.
-    fn fake_adb(devices: &str) -> (String, Arc<Mutex<Vec<String>>>) {
+    /// Что видел фейковый ADB-сервер: запросы и объём загруженных файлов.
+    #[derive(Default)]
+    struct Seen {
+        services: Vec<String>,
+        pushed: Vec<usize>,
+        /// Соединения запущенного сервера, которые ещё открыты.
+        spawned_open: usize,
+    }
+
+    /// Фейковый ADB-сервер по настоящему протоколу: `host:devices` с телом, `host:transport` без тела,
+    /// затем сервис на том же соединении (`exec:` отдаёт сырой поток), `forward` отвечает двойным OKAY.
+    fn fake_adb(devices: &str) -> (String, Arc<Mutex<Seen>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
-        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::new(Mutex::new(Seen::default()));
         let seen2 = seen.clone();
         let body = devices.to_owned();
         std::thread::spawn(move || {
-            for stream in listener.incoming().take(8) {
-                let mut s = match stream {
-                    Ok(s) => s,
-                    Err(_) => break,
-                };
-                s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-                let len = match read_n(&mut s, 4) {
-                    Ok(l) => l,
-                    Err(_) => break,
-                };
-                let len = usize::from_str_radix(&String::from_utf8_lossy(&len), 16).unwrap_or(0);
-                let mut svc = vec![0u8; len];
-                if s.read_exact(&mut svc).is_err() {
-                    break;
-                }
-                let svc = String::from_utf8_lossy(&svc).into_owned();
-                seen2.lock().unwrap().push(svc.clone());
-                let reply = if svc == "host:devices" { body.clone() } else { String::new() };
-                let _ = s.write_all(b"OKAY");
-                let _ = s.write_all(format!("{:04X}{reply}", reply.len()).as_bytes());
+            for stream in listener.incoming().take(16) {
+                let Ok(mut s) = stream else { break };
+                let seen = seen2.clone();
+                let body = body.clone();
+                std::thread::spawn(move || {
+                    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                    loop {
+                        let Ok(len) = read_n(&mut s, 4) else { return };
+                        let len = usize::from_str_radix(&String::from_utf8_lossy(&len), 16).unwrap_or(0);
+                        let mut svc = vec![0u8; len];
+                        if s.read_exact(&mut svc).is_err() {
+                            return;
+                        }
+                        let svc = String::from_utf8_lossy(&svc).into_owned();
+                        seen.lock().unwrap().services.push(svc.clone());
+                        if svc == "host:devices" {
+                            let _ = s.write_all(b"OKAY");
+                            let _ = s.write_all(format!("{:04X}{body}", body.len()).as_bytes());
+                            return;
+                        } else if svc.starts_with("host:transport:") {
+                            let _ = s.write_all(b"OKAY");
+                        } else if svc.starts_with("exec:cat >") {
+                            let _ = s.write_all(b"OKAY");
+                            let mut total = 0;
+                            let mut buf = [0u8; 4096];
+                            while let Ok(n) = s.read(&mut buf) {
+                                if n == 0 {
+                                    break;
+                                }
+                                total += n;
+                            }
+                            seen.lock().unwrap().pushed.push(total);
+                            return;
+                        } else if svc.starts_with("exec:") {
+                            let _ = s.write_all(b"OKAY");
+                            seen.lock().unwrap().spawned_open += 1;
+                            s.set_read_timeout(None).unwrap();
+                            let mut buf = [0u8; 16];
+                            while let Ok(n) = s.read(&mut buf) {
+                                if n == 0 {
+                                    break;
+                                }
+                            }
+                            seen.lock().unwrap().spawned_open -= 1;
+                            return;
+                        } else if svc.contains(":forward:") {
+                            let _ = s.write_all(b"OKAYOKAY");
+                            return;
+                        } else {
+                            let _ = s.write_all(b"OKAY");
+                            return;
+                        }
+                    }
+                });
             }
         });
         (addr, seen)
@@ -369,13 +574,47 @@ mod tests {
         let (addr, seen) = fake_adb("ABC123\tdevice\nXYZ\tunauthorized\n");
         let adb = Adb::new(addr);
         assert_eq!(adb.devices().unwrap(), vec!["ABC123"]);
+        assert_eq!(adb.device_states().unwrap().len(), 2);
         adb.forward("ABC123", 45631, PHONE_PORT).unwrap();
+        adb.forward_to("ABC123", 45632, "localabstract:pcdock").unwrap();
         adb.kill_forward("ABC123", 45631).unwrap();
-        let got = seen.lock().unwrap().join("\n");
+        let got = seen.lock().unwrap().services.join("\n");
         assert!(got.contains("host:devices"), "{got}");
-        assert!(got.contains("host:transport:ABC123"), "{got}");
-        assert!(got.contains("forward:tcp:45631"), "{got}");
-        assert!(got.contains("killforward:tcp:45631"), "{got}");
+        assert!(got.contains("host-serial:ABC123:forward:tcp:45631;tcp:47631"), "{got}");
+        assert!(got.contains("host-serial:ABC123:forward:tcp:45632;localabstract:pcdock"), "{got}");
+        assert!(got.contains("host-serial:ABC123:killforward:tcp:45631"), "{got}");
+    }
+
+    #[test]
+    fn push_sends_the_file_and_rejects_bad_paths() {
+        let (addr, seen) = fake_adb("");
+        let adb = Adb::new(addr);
+        let data = vec![7u8; 100_000];
+        adb.push("ABC", "/data/local/tmp/x.apk", &data).unwrap();
+        let st = seen.lock().unwrap();
+        assert_eq!(st.pushed, vec![100_000]);
+        assert!(st.services.contains(&"host:transport:ABC".to_string()));
+        assert!(st.services.contains(&"exec:cat > /data/local/tmp/x.apk".to_string()));
+        drop(st);
+        assert!(adb.push("ABC", "/tmp/a b", &data).is_err());
+        assert!(adb.push("ABC", "/tmp/a;rm -rf x", &data).is_err());
+    }
+
+    #[test]
+    fn spawn_keeps_the_server_alive_until_the_stream_is_dropped() {
+        let (addr, seen) = fake_adb("");
+        let adb = Adb::new(addr);
+        let stream = adb.spawn("ABC", "CLASSPATH=/x app_process / com.device.server.Main pcdock").unwrap();
+        let t0 = std::time::Instant::now();
+        while seen.lock().unwrap().spawned_open == 0 && t0.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(seen.lock().unwrap().spawned_open, 1, "процесс запущен");
+        drop(stream);
+        while seen.lock().unwrap().spawned_open != 0 && t0.elapsed() < Duration::from_secs(4) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(seen.lock().unwrap().spawned_open, 0, "закрытие потока завершает процесс");
     }
 
     #[test]

@@ -26,6 +26,10 @@ struct Args {
     #[arg(long = "except")]
     except: Vec<String>,
 
+    /// APK серверного процесса для ADB-режима (`server-adb-debug.apk`): без диалога записи экрана.
+    #[arg(long = "server-apk")]
+    server_apk: Option<std::path::PathBuf>,
+
     /// Дополнительный производитель USB (VID, шестнадцатеричный, например `0x2a70`). Можно несколько раз.
     #[arg(long = "vid", value_parser = parse_vid)]
     vids: Vec<u16>,
@@ -121,6 +125,7 @@ fn main() {
     }
     let cfg = FarmConfig {
         vendor_ids,
+        server_apk: args.server_apk.clone(),
         name: args.name.clone(),
         video: args.video,
         audio: args.audio,

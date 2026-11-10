@@ -34,6 +34,9 @@ pub struct FarmConfig {
     pub adb_server: Option<String>,
     /// Первый локальный порт для проброса ADB; следующие телефоны берут порты выше.
     pub adb_local_port: u16,
+    /// APK серверного процесса для ADB-режима (`server-adb`). Без него ADB-телефон работает только через
+    /// прежнее приложение `app-adb`.
+    pub server_apk: Option<std::path::PathBuf>,
     pub every: Duration,
     pub lost_after: Duration,
     /// Предпочтение транспортов, если один телефон виден по нескольким.
@@ -56,6 +59,7 @@ impl Default for FarmConfig {
             vendor_ids: ANDROID_VIDS.to_vec(),
             adb_server: None,
             adb_local_port: 47000,
+            server_apk: None,
             every: d.every,
             lost_after: d.lost_after,
             order: d.order,
@@ -113,6 +117,7 @@ impl FarmConfig {
                         .collect::<Result<_, _>>()?
                 }
                 "adb_server" => cfg.adb_server = Some(str_of(k, v)?),
+                "server_apk" => cfg.server_apk = Some(str_of(k, v)?.into()),
                 "adb_local_port" => {
                     cfg.adb_local_port =
                         u16::try_from(num_of(k, v)?).map_err(|_| "adb_local_port: 0..65535".to_string())?
@@ -178,7 +183,12 @@ impl Farm {
             lost_after: cfg.lost_after,
             order: cfg.order.clone(),
         };
-        let factory = DefaultFactory { session: cfg.session(), next_adb_port: cfg.adb_local_port };
+        let factory = DefaultFactory {
+            session: cfg.session(),
+            next_adb_port: cfg.adb_local_port,
+            adb_server: cfg.adb_server.clone(),
+            server_apk: cfg.server_apk.clone(),
+        };
         let mut farm = Farm::new();
         farm.enable_discovery(providers, Box::new(factory), discovery);
         Ok((farm, warnings))
@@ -189,6 +199,8 @@ impl Farm {
 struct DefaultFactory {
     session: Config,
     next_adb_port: u16,
+    adb_server: Option<String>,
+    server_apk: Option<std::path::PathBuf>,
 }
 
 impl LinkFactory for DefaultFactory {
@@ -206,7 +218,17 @@ impl LinkFactory for DefaultFactory {
             Transport::Adb => {
                 let local = self.next_adb_port;
                 self.next_adb_port = self.next_adb_port.checked_add(1).unwrap_or(47000);
-                Ok(Box::new(pcdock_adb::AdbLink::new(self.session.clone(), s.address.clone(), local)))
+                let link = pcdock_adb::AdbLink::new(self.session.clone(), s.address.clone(), local);
+                Ok(Box::new(match &self.server_apk {
+                    Some(apk) => link.with_server(
+                        match &self.adb_server {
+                            Some(addr) => pcdock_adb::Adb::new(addr.clone()),
+                            None => pcdock_adb::Adb::local(),
+                        },
+                        pcdock_adb::ServerSpec { apk: apk.clone(), socket: "pcdock".into() },
+                    ),
+                    None => link,
+                }))
             }
             Transport::Serial => Err("serial-транспорт не готов".into()),
         }
