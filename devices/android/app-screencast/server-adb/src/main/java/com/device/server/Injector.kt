@@ -227,6 +227,18 @@ class Injector(private val screen: ScreenInfo) {
         return true
     }
 
+    /** Побудка: нажатие и отпускание KEYCODE_WAKEUP (экран включается, не переключаясь, если уже включён). */
+    fun wake() {
+        try {
+            val now = SystemClock.uptimeMillis()
+            for (action in intArrayOf(KeyEvent.ACTION_DOWN, KeyEvent.ACTION_UP)) {
+                inject.invoke(manager, KeyEvent(now, now, action, KeyEvent.KEYCODE_WAKEUP, 0, 0, 0, 0, 0, InputDevice.SOURCE_KEYBOARD), 0)
+            }
+        } catch (e: Throwable) {
+            Log.w(tag, "wake: $e")
+        }
+    }
+
     /** Отпускает всё удержанное: вызывается при закрытии канала, чтобы не залипли кнопки. */
     fun releaseAll() {
         try {

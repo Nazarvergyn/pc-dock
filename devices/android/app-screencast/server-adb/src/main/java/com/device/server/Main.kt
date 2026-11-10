@@ -108,6 +108,7 @@ object Main {
                     Proto.T_PING -> link?.sendControl(Messages.pong(packet.payload).encode())
                     Proto.T_SET_STREAM -> Messages.parseSetStream(packet.payload)?.let { onSetStream(it) }
                     Proto.T_REQUEST_FRAME -> capture.resend()
+                    Proto.T_WAKE -> injector.wake()
                     // Звук и побудка — отдельные шаги.
                     else -> {}
                 }
