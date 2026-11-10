@@ -16,5 +16,4 @@ rootProject.name = "app-screencast"
 include(":app")
 include(":lib-protocol")
 include(":lib-dock")
-include(":app-adb")
 include(":server-adb")

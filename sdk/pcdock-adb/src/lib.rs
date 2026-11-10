@@ -17,8 +17,6 @@ use pcdock_core::link::{InputCmd, LinkError, PhoneLink};
 use pcdock_core::packet::SetStream;
 use pcdock_core::session::{Config, Event, Session, Transmit};
 
-/// Порт приложения в телефоне (ServerSocket, localhost). Один на всех.
-pub const PHONE_PORT: u16 = 47631;
 /// Таймауты по умолчанию.
 pub const IO_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -224,8 +222,7 @@ pub struct AdbLink {
     adb: Adb,
     serial: String,
     local_port: u16,
-    /// Серверный процесс на телефоне (решение 32): APK кладётся и запускается с ПК. `None` — старый путь
-    /// через приложение `app-adb`, которое слушает порт `PHONE_PORT`.
+    /// Серверный процесс на телефоне (решение 32): APK кладётся и запускается с ПК.
     server: Option<ServerSpec>,
     /// Поток процесса сервера: пока открыт, сервер жив.
     held: Option<TcpStream>,
@@ -340,14 +337,12 @@ impl PhoneLink for AdbLink {
             return Ok(());
         }
         let addr = format!("127.0.0.1:{}", self.local_port);
-        let tries = if let Some(spec) = self.server.clone() {
-            self.start_server(&spec)?;
-            // Серверу нужно время, чтобы подняться и открыть сокет.
-            25
-        } else {
-            self.adb.forward(&self.serial, self.local_port, PHONE_PORT).map_err(LinkError::Fatal)?;
-            1
-        };
+        let spec = self.server.clone().ok_or_else(|| {
+            LinkError::Fatal("для ADB нужен APK сервера (`server-adb`): ServerSpec не задан".into())
+        })?;
+        self.start_server(&spec)?;
+        // Серверу нужно время, чтобы подняться и открыть сокет.
+        let tries = 25;
         let mut attempt = 0;
         let s = loop {
             attempt += 1;
@@ -360,7 +355,7 @@ impl PhoneLink for AdbLink {
                 // Порт проброса принимает соединение всегда, даже если сервер на телефоне ещё не открыл
                 // сокет: тогда ADB сразу закрывает его. Живое соединение молчит (сервер ждёт нашего HELLO),
                 // мёртвое даёт конец потока.
-                Ok(s) if self.server.is_some() && !is_alive(&s) => {
+                Ok(s) if !is_alive(&s) => {
                     if attempt >= tries {
                         self.held = None;
                         return Err(LinkError::Gone("сервер на телефоне не открыл сокет".into()));
@@ -575,7 +570,7 @@ mod tests {
         let adb = Adb::new(addr);
         assert_eq!(adb.devices().unwrap(), vec!["ABC123"]);
         assert_eq!(adb.device_states().unwrap().len(), 2);
-        adb.forward("ABC123", 45631, PHONE_PORT).unwrap();
+        adb.forward("ABC123", 45631, 47631).unwrap();
         adb.forward_to("ABC123", 45632, "localabstract:pcdock").unwrap();
         adb.kill_forward("ABC123", 45631).unwrap();
         let got = seen.lock().unwrap().services.join("\n");

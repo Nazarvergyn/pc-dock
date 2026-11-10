@@ -55,6 +55,15 @@ object Main {
             onGeometry = { events.add { sendDisplayInfo() } },
         )
         private var videoOn = false
+        private var audioOn = false
+        private val audio = AudioCap(
+            onConfig = { rate, ch -> link?.sendControl(Messages.audioConfig(rate, ch).encode()) },
+            onAudio = { pcm, pts -> link?.offerAudio(Messages.audioFrame(pcm, pts).encode()) },
+            onUnavailable = { why ->
+                link?.sendControl(Messages.status(Proto.STATUS_AUDIO_UNAVAILABLE, "audio unavailable: $why").encode())
+                audioOn = false
+            },
+        )
 
         // Всё, что трогает ввод и состояние сессии, выполняется одним потоком.
         private val events = LinkedBlockingQueue<() -> Unit>()
@@ -133,6 +142,8 @@ object Main {
                 Log.i(TAG, "Канал закрыт: $reason")
                 injector.releaseAll()
                 capture.stop()
+                audio.stop()
+                audioOn = false
                 videoOn = false
                 link = null
             }
@@ -142,6 +153,13 @@ object Main {
             capture.maxLongSide = maxOf(st.maxWidth, st.maxHeight)
             capture.jpegQuality = st.jpegQuality
             capture.maxFps = st.maxFps
+            if (st.audio && !audioOn) {
+                audioOn = true
+                audio.start()
+            } else if (!st.audio && audioOn) {
+                audioOn = false
+                audio.stop()
+            }
             if (st.video && !videoOn) {
                 videoOn = true
                 capture.start()
@@ -154,7 +172,7 @@ object Main {
 
         private fun onHello() {
             val l = link ?: return
-            l.sendControl(Messages.hello(Proto.CAP_VIDEO_JPEG or Proto.CAP_ROTATION, NAME).encode())
+            l.sendControl(Messages.hello(Proto.CAP_VIDEO_JPEG or Proto.CAP_ROTATION or Proto.CAP_AUDIO_PCM, NAME).encode())
             sendDisplayInfo()
         }
 

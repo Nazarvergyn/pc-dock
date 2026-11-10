@@ -34,8 +34,7 @@ pub struct FarmConfig {
     pub adb_server: Option<String>,
     /// Первый локальный порт для проброса ADB; следующие телефоны берут порты выше.
     pub adb_local_port: u16,
-    /// APK серверного процесса для ADB-режима (`server-adb`). Без него ADB-телефон работает только через
-    /// прежнее приложение `app-adb`.
+    /// APK серверного процесса для ADB-режима (`server-adb`). Без него ADB-телефоны не подключаются.
     pub server_apk: Option<std::path::PathBuf>,
     pub every: Duration,
     pub lost_after: Duration,
@@ -59,7 +58,7 @@ impl Default for FarmConfig {
             vendor_ids: ANDROID_VIDS.to_vec(),
             adb_server: None,
             adb_local_port: 47000,
-            server_apk: None,
+            server_apk: std::env::var_os("PCDOCK_SERVER_APK").map(Into::into),
             every: d.every,
             lost_after: d.lost_after,
             order: d.order,
@@ -218,17 +217,16 @@ impl LinkFactory for DefaultFactory {
             Transport::Adb => {
                 let local = self.next_adb_port;
                 self.next_adb_port = self.next_adb_port.checked_add(1).unwrap_or(47000);
-                let link = pcdock_adb::AdbLink::new(self.session.clone(), s.address.clone(), local);
-                Ok(Box::new(match &self.server_apk {
-                    Some(apk) => link.with_server(
-                        match &self.adb_server {
-                            Some(addr) => pcdock_adb::Adb::new(addr.clone()),
-                            None => pcdock_adb::Adb::local(),
-                        },
-                        pcdock_adb::ServerSpec { apk: apk.clone(), socket: "pcdock".into() },
-                    ),
-                    None => link,
-                }))
+                let apk = self.server_apk.clone().ok_or(
+                    "для ADB нужен APK сервера: ключ server_apk (pcdockd --server-apk) или переменная PCDOCK_SERVER_APK",
+                )?;
+                let adb = match &self.adb_server {
+                    Some(addr) => pcdock_adb::Adb::new(addr.clone()),
+                    None => pcdock_adb::Adb::local(),
+                };
+                let link = pcdock_adb::AdbLink::new(self.session.clone(), s.address.clone(), local)
+                    .with_server(adb, pcdock_adb::ServerSpec { apk, socket: "pcdock".into() });
+                Ok(Box::new(link))
             }
             Transport::Serial => Err("serial-транспорт не готов".into()),
         }
