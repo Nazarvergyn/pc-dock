@@ -127,6 +127,30 @@ control transfer, `poll_event` — кадры/звук/статусы фронт
 вызывающего, поток один. Все функции возвращают `0` (ок), `1` (есть элемент) или отрицательный
 код ошибки; паники ловятся внутри.
 
+### Живая ферма: `pcdock_farm_*`
+
+Если не хочется возить байты самому, ферма делает это за вас: сама находит телефоны (USB, ADB), подключает,
+переподключает и держит кэш кадров. Из C это три действия:
+
+```c
+// 1. Настройка JSON; "{}" = автообнаружение USB и ADB. Неизвестный ключ — ошибка.
+PcdockFarm *f = pcdock_farm_new(cfg, strlen(cfg));   // NULL → pcdock_farm_last_error
+// 2. Цикл событий (вид и номер телефона; подробности — JSON, кадры и звук — двоичные данные).
+while (pcdock_farm_poll(f, &kind, &phone) == 1) {
+    pcdock_farm_event_json(f, buf, &len);            // {"phone":1,"state":"ready"}
+    if (kind == PCDOCK_FARM_EV_VIDEO) pcdock_farm_event_data(f, jpeg, &jlen);
+}
+// 3. Команды телефону по номеру.
+pcdock_farm_touch_ex(f, phone, 0, PCDOCK_TOUCH_DOWN, 0.5f, 0.5f, -1, -1, -1);
+```
+
+Ключи настройки: `name`, `video`, `audio`, `auto`, `except`, `phones` (`usb`, `usb:1-2.3`, `usb:СЕРИЙНИК`,
+`adb:СЕРИЙНИК`), `usb`, `adb`, `serial`, `vendor_ids`, `adb_server`, `adb_local_port`, `every_ms`, `lost_after_ms`,
+`order`. Видео приходит в события только от телефонов, за которыми «следят» (`pcdock_farm_set_watching`);
+`pcdock_farm_last_frame` отдаёт последний кадр без очереди. Тот же `FarmConfig` читает демон, так что
+библиотека и демон настраиваются одинаково. Низкоуровневый реестр без потоков и транспорта (хост возит байты
+сам) остался в `pcdock_registry_*`.
+
 ## Сборка и тесты
 
 ```bash

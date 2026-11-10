@@ -63,6 +63,80 @@ impl Default for FarmConfig {
     }
 }
 
+#[cfg(feature = "json")]
+impl FarmConfig {
+    /// Настройка из JSON-объекта. Все ключи необязательны, неизвестный ключ — ошибка (опечатки не молчат):
+    /// `name`, `video`, `audio`, `auto`, `except` (строки), `phones` (строки `PhoneSpec`), `usb`, `adb`, `serial`,
+    /// `vendor_ids` (числа), `adb_server`, `adb_local_port`, `every_ms`, `lost_after_ms`,
+    /// `order` (`"usb"`, `"adb"`, `"serial"`).
+    pub fn from_json(text: &str) -> Result<Self, String> {
+        use serde_json::Value;
+        let root: Value = serde_json::from_str(text).map_err(|e| format!("конфиг не JSON: {e}"))?;
+        let obj = root.as_object().ok_or("конфиг должен быть JSON-объектом")?;
+        let mut cfg = Self::default();
+        let bool_of = |k: &str, v: &Value| v.as_bool().ok_or_else(|| format!("{k}: нужно true/false"));
+        let str_of =
+            |k: &str, v: &Value| v.as_str().map(String::from).ok_or_else(|| format!("{k}: нужна строка"));
+        let strs_of = |k: &str, v: &Value| -> Result<Vec<String>, String> {
+            v.as_array()
+                .ok_or_else(|| format!("{k}: нужен массив строк"))?
+                .iter()
+                .map(|x| str_of(k, x))
+                .collect()
+        };
+        let num_of =
+            |k: &str, v: &Value| v.as_u64().ok_or_else(|| format!("{k}: нужно неотрицательное число"));
+        for (k, v) in obj {
+            match k.as_str() {
+                "name" => cfg.name = str_of(k, v)?,
+                "video" => cfg.video = bool_of(k, v)?,
+                "audio" => cfg.audio = bool_of(k, v)?,
+                "auto" => cfg.auto = bool_of(k, v)?,
+                "usb" => cfg.usb = bool_of(k, v)?,
+                "adb" => cfg.adb = bool_of(k, v)?,
+                "serial" => cfg.serial = bool_of(k, v)?,
+                "except" => cfg.except = strs_of(k, v)?,
+                "phones" => {
+                    cfg.pinned =
+                        strs_of(k, v)?.iter().map(|s| PhoneSpec::parse(s)).collect::<Result<_, _>>()?
+                }
+                "vendor_ids" => {
+                    cfg.vendor_ids = v
+                        .as_array()
+                        .ok_or("vendor_ids: нужен массив чисел")?
+                        .iter()
+                        .map(|x| {
+                            x.as_u64()
+                                .and_then(|n| u16::try_from(n).ok())
+                                .ok_or_else(|| "vendor_ids: числа 0..65535".to_string())
+                        })
+                        .collect::<Result<_, _>>()?
+                }
+                "adb_server" => cfg.adb_server = Some(str_of(k, v)?),
+                "adb_local_port" => {
+                    cfg.adb_local_port =
+                        u16::try_from(num_of(k, v)?).map_err(|_| "adb_local_port: 0..65535".to_string())?
+                }
+                "every_ms" => cfg.every = Duration::from_millis(num_of(k, v)?),
+                "lost_after_ms" => cfg.lost_after = Duration::from_millis(num_of(k, v)?),
+                "order" => {
+                    cfg.order = strs_of(k, v)?
+                        .iter()
+                        .map(|s| match s.as_str() {
+                            "usb" => Ok(Transport::Usb),
+                            "adb" => Ok(Transport::Adb),
+                            "serial" => Ok(Transport::Serial),
+                            other => Err(format!("order: неизвестный транспорт {other:?}")),
+                        })
+                        .collect::<Result<_, _>>()?
+                }
+                other => return Err(format!("неизвестный ключ конфига: {other:?}")),
+            }
+        }
+        Ok(cfg)
+    }
+}
+
 impl FarmConfig {
     fn session(&self) -> Config {
         Config {
@@ -142,6 +216,26 @@ impl LinkFactory for DefaultFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "json")]
+    #[test]
+    fn json_config_parses_and_rejects_typos() {
+        let cfg = FarmConfig::from_json(
+            r#"{"auto": false, "phones": ["adb:ABC", "usb:1-2.3"], "except": ["usb"], "audio": true,
+                "every_ms": 500, "order": ["adb", "usb"], "vendor_ids": [6353]}"#,
+        )
+        .unwrap();
+        assert!(!cfg.auto && cfg.audio);
+        assert_eq!(cfg.pinned.len(), 2);
+        assert_eq!(cfg.every, Duration::from_millis(500));
+        assert_eq!(cfg.order, vec![Transport::Adb, Transport::Usb]);
+        assert_eq!(cfg.vendor_ids, vec![6353]);
+        assert!(FarmConfig::from_json("{}").is_ok());
+        assert!(FarmConfig::from_json(r#"{"autto": true}"#).is_err());
+        assert!(FarmConfig::from_json(r#"{"phones": ["bt:1"]}"#).is_err());
+        assert!(FarmConfig::from_json("[1]").is_err());
+        assert!(FarmConfig::from_json(r#"{"vendor_ids": [70000]}"#).is_err());
+    }
 
     #[test]
     fn config_needs_auto_or_pinned() {

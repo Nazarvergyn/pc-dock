@@ -371,6 +371,7 @@ dependencies = [
  "pcdock-adb",
  "pcdock-core",
  "pcdock-usb",
+ "serde_json",
 ]
 
 [[package]]
@@ -379,6 +380,7 @@ version = "0.1.0"
 dependencies = [
  "pcdock-core",
  "pcdock-farm",
+ "serde_json",
 ]
 
 [[package]]

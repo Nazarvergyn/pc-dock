@@ -19,7 +19,8 @@ use pcdock_core::packet::SetStream;
 use pcdock_core::session::{DisconnectReason, Event, Session, State, Transmit};
 use std::panic::{catch_unwind, UnwindSafe};
 
-mod farm;
+mod live;
+mod registry;
 
 /// Коды возврата.
 pub const PCDOCK_OK: i32 = 0;

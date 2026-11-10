@@ -23,17 +23,17 @@ use super::{
 };
 
 /// Непрозрачный дескриптор фермы.
-pub struct PcdockFarm {
+pub struct PcdockRegistry {
     farm: Registry,
     last_tx: HashMap<PhoneId, Transmit>,
     last_ev: HashMap<PhoneId, Event>,
 }
 
-fn check_farm(p: *mut PcdockFarm) -> Result<&'static mut PcdockFarm, i32> {
+fn check_registry(p: *mut PcdockRegistry) -> Result<&'static mut PcdockRegistry, i32> {
     if p.is_null() {
         return Err(PCDOCK_ERR_NULL);
     }
-    // SAFETY: указатель выдан `pcdock_farm_new` и жив до `pcdock_farm_free`.
+    // SAFETY: указатель выдан `pcdock_registry_new` и жив до `pcdock_registry_free`.
     Ok(unsafe { &mut *p })
 }
 
@@ -44,7 +44,7 @@ fn farm_err(e: FarmError) -> i32 {
     }
 }
 
-fn device_kind(kind: u32) -> Result<DeviceKind, i32> {
+pub(crate) fn device_kind(kind: u32) -> Result<DeviceKind, i32> {
     match kind {
         PCDOCK_DEV_TOUCH => Ok(DeviceKind::Touch),
         PCDOCK_DEV_MOUSE => Ok(DeviceKind::Mouse),
@@ -53,7 +53,7 @@ fn device_kind(kind: u32) -> Result<DeviceKind, i32> {
     }
 }
 
-fn touch_phase(phase: u32) -> Result<TouchPhase, i32> {
+pub(crate) fn touch_phase(phase: u32) -> Result<TouchPhase, i32> {
     match phase {
         PCDOCK_TOUCH_DOWN => Ok(TouchPhase::Down),
         PCDOCK_TOUCH_MOVE => Ok(TouchPhase::Move),
@@ -63,7 +63,7 @@ fn touch_phase(phase: u32) -> Result<TouchPhase, i32> {
     }
 }
 
-fn mouse_button(button: u32) -> Result<MouseButton, i32> {
+pub(crate) fn mouse_button(button: u32) -> Result<MouseButton, i32> {
     match button {
         PCDOCK_BTN_LEFT => Ok(MouseButton::Left),
         PCDOCK_BTN_RIGHT => Ok(MouseButton::Right),
@@ -72,17 +72,17 @@ fn mouse_button(button: u32) -> Result<MouseButton, i32> {
     }
 }
 
-fn last_event(h: &PcdockFarm, id: PhoneId) -> Result<Event, i32> {
+fn last_event(h: &PcdockRegistry, id: PhoneId) -> Result<Event, i32> {
     h.last_ev.get(&id).cloned().ok_or(PCDOCK_ERR_ARG)
 }
 
 // ----- жизненный цикл -----
 
-/// Создаёт пустую ферму. Освободить через `pcdock_farm_free`.
+/// Создаёт пустую ферму. Освободить через `pcdock_registry_free`.
 #[no_mangle]
-pub extern "C" fn pcdock_farm_new() -> *mut PcdockFarm {
+pub extern "C" fn pcdock_registry_new() -> *mut PcdockRegistry {
     match catch_unwind(|| {
-        Box::into_raw(Box::new(PcdockFarm {
+        Box::into_raw(Box::new(PcdockRegistry {
             farm: Registry::new(),
             last_tx: HashMap::new(),
             last_ev: HashMap::new(),
@@ -95,10 +95,10 @@ pub extern "C" fn pcdock_farm_new() -> *mut PcdockFarm {
 
 /// Освобождает ферму вместе со всеми сессиями.
 #[no_mangle]
-pub extern "C" fn pcdock_farm_free(p: *mut PcdockFarm) {
+pub extern "C" fn pcdock_registry_free(p: *mut PcdockRegistry) {
     let _ = catch_unwind(|| {
         if !p.is_null() {
-            // SAFETY: указатель выдан `pcdock_farm_new` и освобождается один раз здесь.
+            // SAFETY: указатель выдан `pcdock_registry_new` и освобождается один раз здесь.
             unsafe { drop(Box::from_raw(p)) };
         }
     });
@@ -106,9 +106,9 @@ pub extern "C" fn pcdock_farm_free(p: *mut PcdockFarm) {
 
 /// Добавляет трубку. Имя/поток задаются отдельно до `start`.
 #[no_mangle]
-pub extern "C" fn pcdock_farm_add(p: *mut PcdockFarm, id: u32) -> i32 {
+pub extern "C" fn pcdock_registry_add(p: *mut PcdockRegistry, id: u32) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         h.farm.add_phone(id).map_err(farm_err)?;
         Ok(PCDOCK_OK)
     })
@@ -116,9 +116,9 @@ pub extern "C" fn pcdock_farm_add(p: *mut PcdockFarm, id: u32) -> i32 {
 
 /// Убирает трубку (сессия закрывается).
 #[no_mangle]
-pub extern "C" fn pcdock_farm_remove(p: *mut PcdockFarm, id: u32) -> i32 {
+pub extern "C" fn pcdock_registry_remove(p: *mut PcdockRegistry, id: u32) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         h.farm.remove_phone(id).map_err(farm_err)?;
         h.last_tx.remove(&id);
         h.last_ev.remove(&id);
@@ -128,8 +128,8 @@ pub extern "C" fn pcdock_farm_remove(p: *mut PcdockFarm, id: u32) -> i32 {
 
 /// Число трубок в ферме.
 #[no_mangle]
-pub extern "C" fn pcdock_farm_count(p: *mut PcdockFarm) -> i32 {
-    match check_farm(p) {
+pub extern "C" fn pcdock_registry_count(p: *mut PcdockRegistry) -> i32 {
+    match check_registry(p) {
         Ok(h) => h.farm.len() as i32,
         Err(_) => PCDOCK_ERR_NULL,
     }
@@ -138,9 +138,9 @@ pub extern "C" fn pcdock_farm_count(p: *mut PcdockFarm) -> i32 {
 /// Идентификатор трубки по порядковому номеру 0..count (порядок сортированный).
 /// Возвращает 1 и пишет id, либо 0 (нет такой) или ошибку.
 #[no_mangle]
-pub extern "C" fn pcdock_farm_id_at(p: *mut PcdockFarm, index: u32, out_id: *mut u32) -> i32 {
+pub extern "C" fn pcdock_registry_id_at(p: *mut PcdockRegistry, index: u32, out_id: *mut u32) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         if out_id.is_null() {
             return Err(PCDOCK_ERR_NULL);
         }
@@ -157,9 +157,14 @@ pub extern "C" fn pcdock_farm_id_at(p: *mut PcdockFarm, index: u32, out_id: *mut
 
 /// Имя реализации для `HELLO` (вызывать до `start`).
 #[no_mangle]
-pub extern "C" fn pcdock_farm_set_name(p: *mut PcdockFarm, id: u32, name: *const u8, len: usize) -> i32 {
+pub extern "C" fn pcdock_registry_set_name(
+    p: *mut PcdockRegistry,
+    id: u32,
+    name: *const u8,
+    len: usize,
+) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         let bytes = check_slice(name, len)?;
         h.farm.set_name(id, &String::from_utf8_lossy(bytes)).map_err(farm_err)?;
         Ok(PCDOCK_OK)
@@ -168,14 +173,14 @@ pub extern "C" fn pcdock_farm_set_name(p: *mut PcdockFarm, id: u32, name: *const
 
 /// Начальные настройки потока трубки (вызывать до `start`).
 #[no_mangle]
-pub extern "C" fn pcdock_farm_set_initial_stream(
-    p: *mut PcdockFarm,
+pub extern "C" fn pcdock_registry_set_initial_stream(
+    p: *mut PcdockRegistry,
     id: u32,
     video: bool,
     audio: bool,
 ) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         h.farm.set_initial_stream(id, video, audio).map_err(farm_err)?;
         Ok(PCDOCK_OK)
     })
@@ -183,18 +188,18 @@ pub extern "C" fn pcdock_farm_set_initial_stream(
 
 /// Флаг «трубку сейчас смотрят»: сокет-мост шлёт её кадры, анализ берёт по запросу.
 #[no_mangle]
-pub extern "C" fn pcdock_farm_set_watching(p: *mut PcdockFarm, id: u32, watching: bool) -> i32 {
+pub extern "C" fn pcdock_registry_set_watching(p: *mut PcdockRegistry, id: u32, watching: bool) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         h.farm.set_watching(id, watching).map_err(farm_err)?;
         Ok(PCDOCK_OK)
     })
 }
 
 #[no_mangle]
-pub extern "C" fn pcdock_farm_is_watching(p: *mut PcdockFarm, id: u32) -> i32 {
+pub extern "C" fn pcdock_registry_is_watching(p: *mut PcdockRegistry, id: u32) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         Ok(if h.farm.is_watching(id).map_err(farm_err)? { 1 } else { 0 })
     })
 }
@@ -203,8 +208,8 @@ pub extern "C" fn pcdock_farm_is_watching(p: *mut PcdockFarm, id: u32) -> i32 {
 /// Пишет seq/кодек/ключ/pts и данные в буфер. Возвращает 1 (есть кадр), 0 (нет) или ошибку.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
-pub extern "C" fn pcdock_farm_last_frame(
-    p: *mut PcdockFarm,
+pub extern "C" fn pcdock_registry_last_frame(
+    p: *mut PcdockRegistry,
     id: u32,
     out_seq: *mut u64,
     out_codec: *mut u8,
@@ -214,7 +219,7 @@ pub extern "C" fn pcdock_farm_last_frame(
     inout_len: *mut usize,
 ) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         if out_seq.is_null() || out_codec.is_null() || out_key.is_null() || out_pts_us.is_null() {
             return Err(PCDOCK_ERR_NULL);
         }
@@ -234,9 +239,9 @@ pub extern "C" fn pcdock_farm_last_frame(
 
 /// Состояние сессии трубки: 0 idle, 1 connecting, 2 active.
 #[no_mangle]
-pub extern "C" fn pcdock_farm_state(p: *mut PcdockFarm, id: u32) -> i32 {
+pub extern "C" fn pcdock_registry_state(p: *mut PcdockRegistry, id: u32) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         Ok(match h.farm.state(id).map_err(farm_err)? {
             State::Idle => PCDOCK_STATE_IDLE as i32,
             State::Connecting => PCDOCK_STATE_CONNECTING as i32,
@@ -248,33 +253,33 @@ pub extern "C" fn pcdock_farm_state(p: *mut PcdockFarm, id: u32) -> i32 {
 // ----- транспорт -----
 
 #[no_mangle]
-pub extern "C" fn pcdock_farm_start(p: *mut PcdockFarm, id: u32, now_ms: u64) -> i32 {
+pub extern "C" fn pcdock_registry_start(p: *mut PcdockRegistry, id: u32, now_ms: u64) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         h.farm.start(id, now_ms).map_err(farm_err)?;
         Ok(PCDOCK_OK)
     })
 }
 
 #[no_mangle]
-pub extern "C" fn pcdock_farm_close(p: *mut PcdockFarm, id: u32) -> i32 {
+pub extern "C" fn pcdock_registry_close(p: *mut PcdockRegistry, id: u32) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         h.farm.close(id).map_err(farm_err)?;
         Ok(PCDOCK_OK)
     })
 }
 
 #[no_mangle]
-pub extern "C" fn pcdock_farm_handle_input(
-    p: *mut PcdockFarm,
+pub extern "C" fn pcdock_registry_handle_input(
+    p: *mut PcdockRegistry,
     id: u32,
     now_ms: u64,
     data: *const u8,
     len: usize,
 ) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         let bytes = check_slice(data, len)?;
         h.farm.handle_input(id, now_ms, bytes).map_err(farm_err)?;
         Ok(PCDOCK_OK)
@@ -282,18 +287,18 @@ pub extern "C" fn pcdock_farm_handle_input(
 }
 
 #[no_mangle]
-pub extern "C" fn pcdock_farm_handle_timeout(p: *mut PcdockFarm, id: u32, now_ms: u64) -> i32 {
+pub extern "C" fn pcdock_registry_handle_timeout(p: *mut PcdockRegistry, id: u32, now_ms: u64) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         h.farm.handle_timeout(id, now_ms).map_err(farm_err)?;
         Ok(PCDOCK_OK)
     })
 }
 
 #[no_mangle]
-pub extern "C" fn pcdock_farm_next_timeout(p: *mut PcdockFarm, id: u32, out_ms: *mut u64) -> i32 {
+pub extern "C" fn pcdock_registry_next_timeout(p: *mut PcdockRegistry, id: u32, out_ms: *mut u64) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         if out_ms.is_null() {
             return Err(PCDOCK_ERR_NULL);
         }
@@ -310,8 +315,8 @@ pub extern "C" fn pcdock_farm_next_timeout(p: *mut PcdockFarm, id: u32, out_ms: 
 
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
-pub extern "C" fn pcdock_farm_poll_transmit(
-    p: *mut PcdockFarm,
+pub extern "C" fn pcdock_registry_poll_transmit(
+    p: *mut PcdockRegistry,
     id: u32,
     out_kind: *mut u32,
     out_dir: *mut u32,
@@ -323,7 +328,7 @@ pub extern "C" fn pcdock_farm_poll_transmit(
     inout_len: *mut usize,
 ) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         if out_kind.is_null()
             || out_dir.is_null()
             || out_request.is_null()
@@ -371,9 +376,9 @@ pub extern "C" fn pcdock_farm_poll_transmit(
 }
 
 #[no_mangle]
-pub extern "C" fn pcdock_farm_poll_event(p: *mut PcdockFarm, id: u32, out_kind: *mut u32) -> i32 {
+pub extern "C" fn pcdock_registry_poll_event(p: *mut PcdockRegistry, id: u32, out_kind: *mut u32) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         if out_kind.is_null() {
             return Err(PCDOCK_ERR_NULL);
         }
@@ -402,8 +407,8 @@ pub extern "C" fn pcdock_farm_poll_event(p: *mut PcdockFarm, id: u32, out_kind: 
 // ----- детали событий (читаются после poll_event той же трубки) -----
 
 #[no_mangle]
-pub extern "C" fn pcdock_farm_event_connected(
-    p: *mut PcdockFarm,
+pub extern "C" fn pcdock_registry_event_connected(
+    p: *mut PcdockRegistry,
     id: u32,
     out_version: *mut u16,
     out_caps: *mut u32,
@@ -411,7 +416,7 @@ pub extern "C" fn pcdock_farm_event_connected(
     inout_len: *mut usize,
 ) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         if out_version.is_null() || out_caps.is_null() {
             return Err(PCDOCK_ERR_NULL);
         }
@@ -428,8 +433,8 @@ pub extern "C" fn pcdock_farm_event_connected(
 
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
-pub extern "C" fn pcdock_farm_event_display(
-    p: *mut PcdockFarm,
+pub extern "C" fn pcdock_registry_event_display(
+    p: *mut PcdockRegistry,
     id: u32,
     out_stream_w: *mut u16,
     out_stream_h: *mut u16,
@@ -439,7 +444,7 @@ pub extern "C" fn pcdock_farm_event_display(
     out_rotation: *mut u8,
 ) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         if out_stream_w.is_null()
             || out_stream_h.is_null()
             || out_screen_w.is_null()
@@ -465,8 +470,8 @@ pub extern "C" fn pcdock_farm_event_display(
 }
 
 #[no_mangle]
-pub extern "C" fn pcdock_farm_event_video(
-    p: *mut PcdockFarm,
+pub extern "C" fn pcdock_registry_event_video(
+    p: *mut PcdockRegistry,
     id: u32,
     out_codec: *mut u8,
     out_key: *mut bool,
@@ -475,7 +480,7 @@ pub extern "C" fn pcdock_farm_event_video(
     inout_len: *mut usize,
 ) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         if out_codec.is_null() || out_key.is_null() || out_pts_us.is_null() {
             return Err(PCDOCK_ERR_NULL);
         }
@@ -492,15 +497,15 @@ pub extern "C" fn pcdock_farm_event_video(
 }
 
 #[no_mangle]
-pub extern "C" fn pcdock_farm_event_audio_config(
-    p: *mut PcdockFarm,
+pub extern "C" fn pcdock_registry_event_audio_config(
+    p: *mut PcdockRegistry,
     id: u32,
     out_codec: *mut u8,
     out_rate: *mut u32,
     out_channels: *mut u8,
 ) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         if out_codec.is_null() || out_rate.is_null() || out_channels.is_null() {
             return Err(PCDOCK_ERR_NULL);
         }
@@ -517,15 +522,15 @@ pub extern "C" fn pcdock_farm_event_audio_config(
 }
 
 #[no_mangle]
-pub extern "C" fn pcdock_farm_event_audio(
-    p: *mut PcdockFarm,
+pub extern "C" fn pcdock_registry_event_audio(
+    p: *mut PcdockRegistry,
     id: u32,
     out_pts_us: *mut u64,
     out_buf: *mut u8,
     inout_len: *mut usize,
 ) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         if out_pts_us.is_null() {
             return Err(PCDOCK_ERR_NULL);
         }
@@ -540,15 +545,15 @@ pub extern "C" fn pcdock_farm_event_audio(
 }
 
 #[no_mangle]
-pub extern "C" fn pcdock_farm_event_status(
-    p: *mut PcdockFarm,
+pub extern "C" fn pcdock_registry_event_status(
+    p: *mut PcdockRegistry,
     id: u32,
     out_code: *mut u16,
     out_buf: *mut u8,
     inout_len: *mut usize,
 ) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         if out_code.is_null() {
             return Err(PCDOCK_ERR_NULL);
         }
@@ -567,15 +572,15 @@ pub extern "C" fn pcdock_farm_event_status(
 }
 
 #[no_mangle]
-pub extern "C" fn pcdock_farm_event_disconnected(
-    p: *mut PcdockFarm,
+pub extern "C" fn pcdock_registry_event_disconnected(
+    p: *mut PcdockRegistry,
     id: u32,
     out_reason: *mut u32,
     out_buf: *mut u8,
     inout_len: *mut usize,
 ) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         if out_reason.is_null() {
             return Err(PCDOCK_ERR_NULL);
         }
@@ -599,9 +604,14 @@ pub extern "C" fn pcdock_farm_event_disconnected(
 // ----- ввод -----
 
 #[no_mangle]
-pub extern "C" fn pcdock_farm_device_enable(p: *mut PcdockFarm, id: u32, kind: u32, enabled: bool) -> i32 {
+pub extern "C" fn pcdock_registry_device_enable(
+    p: *mut PcdockRegistry,
+    id: u32,
+    kind: u32,
+    enabled: bool,
+) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         h.farm.device_enable(id, device_kind(kind)?, enabled).map_err(farm_err)?;
         Ok(PCDOCK_OK)
     })
@@ -609,8 +619,8 @@ pub extern "C" fn pcdock_farm_device_enable(p: *mut PcdockFarm, id: u32, kind: u
 
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
-pub extern "C" fn pcdock_farm_touch_ex(
-    p: *mut PcdockFarm,
+pub extern "C" fn pcdock_registry_touch_ex(
+    p: *mut PcdockRegistry,
     id: u32,
     cid: u8,
     phase: u32,
@@ -621,7 +631,7 @@ pub extern "C" fn pcdock_farm_touch_ex(
     pressure: f32,
 ) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         let w = if width >= 0.0 { Some(width) } else { None };
         let hh = if height >= 0.0 { Some(height) } else { None };
         let pr = if pressure >= 0.0 { Some(pressure) } else { None };
@@ -631,99 +641,109 @@ pub extern "C" fn pcdock_farm_touch_ex(
 }
 
 #[no_mangle]
-pub extern "C" fn pcdock_farm_cursor_move_abs(p: *mut PcdockFarm, id: u32, x: f32, y: f32) -> i32 {
+pub extern "C" fn pcdock_registry_cursor_move_abs(p: *mut PcdockRegistry, id: u32, x: f32, y: f32) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         h.farm.cursor_move_abs(id, x, y).map_err(farm_err)?;
         Ok(PCDOCK_OK)
     })
 }
 
 #[no_mangle]
-pub extern "C" fn pcdock_farm_cursor_move_rel(p: *mut PcdockFarm, id: u32, dx: i32, dy: i32) -> i32 {
+pub extern "C" fn pcdock_registry_cursor_move_rel(p: *mut PcdockRegistry, id: u32, dx: i32, dy: i32) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         h.farm.cursor_move_rel(id, dx, dy).map_err(farm_err)?;
         Ok(PCDOCK_OK)
     })
 }
 
 #[no_mangle]
-pub extern "C" fn pcdock_farm_cursor_resync(p: *mut PcdockFarm, id: u32) -> i32 {
+pub extern "C" fn pcdock_registry_cursor_resync(p: *mut PcdockRegistry, id: u32) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         h.farm.cursor_resync(id).map_err(farm_err)?;
         Ok(PCDOCK_OK)
     })
 }
 
 #[no_mangle]
-pub extern "C" fn pcdock_farm_mouse_button(p: *mut PcdockFarm, id: u32, button: u32, down: bool) -> i32 {
+pub extern "C" fn pcdock_registry_mouse_button(
+    p: *mut PcdockRegistry,
+    id: u32,
+    button: u32,
+    down: bool,
+) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         h.farm.mouse_button(id, mouse_button(button)?, down).map_err(farm_err)?;
         Ok(PCDOCK_OK)
     })
 }
 
 #[no_mangle]
-pub extern "C" fn pcdock_farm_scroll(p: *mut PcdockFarm, id: u32, ticks: f32) -> i32 {
+pub extern "C" fn pcdock_registry_scroll(p: *mut PcdockRegistry, id: u32, ticks: f32) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         h.farm.scroll(id, ticks).map_err(farm_err)?;
         Ok(PCDOCK_OK)
     })
 }
 
 #[no_mangle]
-pub extern "C" fn pcdock_farm_scroll_h(p: *mut PcdockFarm, id: u32, ticks: f32) -> i32 {
+pub extern "C" fn pcdock_registry_scroll_h(p: *mut PcdockRegistry, id: u32, ticks: f32) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         h.farm.scroll_h(id, ticks).map_err(farm_err)?;
         Ok(PCDOCK_OK)
     })
 }
 
 #[no_mangle]
-pub extern "C" fn pcdock_farm_key(p: *mut PcdockFarm, id: u32, usage: u16, down: bool) -> i32 {
+pub extern "C" fn pcdock_registry_key(p: *mut PcdockRegistry, id: u32, usage: u16, down: bool) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         h.farm.key(id, usage, down).map_err(farm_err)?;
         Ok(PCDOCK_OK)
     })
 }
 
 #[no_mangle]
-pub extern "C" fn pcdock_farm_release_all(p: *mut PcdockFarm, id: u32) -> i32 {
+pub extern "C" fn pcdock_registry_release_all(p: *mut PcdockRegistry, id: u32) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         h.farm.release_all(id).map_err(farm_err)?;
         Ok(PCDOCK_OK)
     })
 }
 
 #[no_mangle]
-pub extern "C" fn pcdock_farm_request_frame(p: *mut PcdockFarm, id: u32) -> i32 {
+pub extern "C" fn pcdock_registry_request_frame(p: *mut PcdockRegistry, id: u32) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         h.farm.request_frame(id).map_err(farm_err)?;
         Ok(PCDOCK_OK)
     })
 }
 
 #[no_mangle]
-pub extern "C" fn pcdock_farm_wake(p: *mut PcdockFarm, id: u32) -> i32 {
+pub extern "C" fn pcdock_registry_wake(p: *mut PcdockRegistry, id: u32) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         h.farm.wake(id).map_err(farm_err)?;
         Ok(PCDOCK_OK)
     })
 }
 
 #[no_mangle]
-pub extern "C" fn pcdock_farm_set_stream(p: *mut PcdockFarm, id: u32, video: bool, audio: bool) -> i32 {
+pub extern "C" fn pcdock_registry_set_stream(
+    p: *mut PcdockRegistry,
+    id: u32,
+    video: bool,
+    audio: bool,
+) -> i32 {
     guard(|| {
-        let h = check_farm(p)?;
+        let h = check_registry(p)?;
         h.farm.set_stream(id, video, audio).map_err(farm_err)?;
         Ok(PCDOCK_OK)
     })
@@ -742,27 +762,30 @@ mod tests {
 
     #[test]
     fn farm_over_ffi_routes_by_phone() {
-        let f = pcdock_farm_new();
+        let f = pcdock_registry_new();
         assert!(!f.is_null());
-        assert_eq!(pcdock_farm_add(f, 1), PCDOCK_OK);
-        assert_eq!(pcdock_farm_add(f, 2), PCDOCK_OK);
-        assert_eq!(pcdock_farm_add(f, 1), PCDOCK_ERR_ARG);
-        assert_eq!(pcdock_farm_count(f), 2);
+        assert_eq!(pcdock_registry_add(f, 1), PCDOCK_OK);
+        assert_eq!(pcdock_registry_add(f, 2), PCDOCK_OK);
+        assert_eq!(pcdock_registry_add(f, 1), PCDOCK_ERR_ARG);
+        assert_eq!(pcdock_registry_count(f), 2);
         let mut id = 0u32;
-        assert_eq!(pcdock_farm_id_at(f, 0, &mut id), PCDOCK_ITEM);
+        assert_eq!(pcdock_registry_id_at(f, 0, &mut id), PCDOCK_ITEM);
         assert_eq!(id, 1);
-        assert_eq!(pcdock_farm_start(f, 1, 1000), PCDOCK_OK);
-        assert_eq!(pcdock_farm_start(f, 2, 1000), PCDOCK_OK);
+        assert_eq!(pcdock_registry_start(f, 1, 1000), PCDOCK_OK);
+        assert_eq!(pcdock_registry_start(f, 2, 1000), PCDOCK_OK);
         let hb = hello_bytes();
-        assert_eq!(pcdock_farm_handle_input(f, 1, 1001, hb.as_ptr(), hb.len()), PCDOCK_OK);
-        assert_eq!(pcdock_farm_state(f, 1), PCDOCK_STATE_ACTIVE as i32);
-        assert_eq!(pcdock_farm_state(f, 2), PCDOCK_STATE_CONNECTING as i32);
+        assert_eq!(pcdock_registry_handle_input(f, 1, 1001, hb.as_ptr(), hb.len()), PCDOCK_OK);
+        assert_eq!(pcdock_registry_state(f, 1), PCDOCK_STATE_ACTIVE as i32);
+        assert_eq!(pcdock_registry_state(f, 2), PCDOCK_STATE_CONNECTING as i32);
         // touch_ex второй трубке: первая не затронута.
-        assert_eq!(pcdock_farm_touch_ex(f, 2, 0, PCDOCK_TOUCH_DOWN, 0.5, 0.5, -1.0, -1.0, -1.0), PCDOCK_OK);
-        assert_eq!(pcdock_farm_set_watching(f, 1, true), PCDOCK_OK);
-        assert_eq!(pcdock_farm_is_watching(f, 1), 1);
-        assert_eq!(pcdock_farm_remove(f, 2), PCDOCK_OK);
-        assert_eq!(pcdock_farm_count(f), 1);
-        pcdock_farm_free(f);
+        assert_eq!(
+            pcdock_registry_touch_ex(f, 2, 0, PCDOCK_TOUCH_DOWN, 0.5, 0.5, -1.0, -1.0, -1.0),
+            PCDOCK_OK
+        );
+        assert_eq!(pcdock_registry_set_watching(f, 1, true), PCDOCK_OK);
+        assert_eq!(pcdock_registry_is_watching(f, 1), 1);
+        assert_eq!(pcdock_registry_remove(f, 2), PCDOCK_OK);
+        assert_eq!(pcdock_registry_count(f), 1);
+        pcdock_registry_free(f);
     }
 }
