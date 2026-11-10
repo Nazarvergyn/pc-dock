@@ -241,7 +241,8 @@ pub struct DiscoveryConfig {
     pub rules: Rules,
     /// Как часто опрашивать источники (проверяется при каждом `drain`).
     pub every: Duration,
-    /// Сколько телефон может не показываться, прежде чем считаться потерянным. Больше времени,
+    /// Сколько телефон может не показываться, прежде чем считаться потерянным. Больше времени (в WSL через usbipd
+    /// переподключение после сброса USB занимает до 40 с, на Linux/macOS 1–3 с),
     /// которое телефон отсутствует при переходе в режим аксессуара и обратно (несколько секунд).
     pub lost_after: Duration,
     /// Предпочтение транспортов, когда один телефон виден по нескольким: раньше в списке — важнее.
@@ -253,7 +254,7 @@ impl Default for DiscoveryConfig {
         Self {
             rules: Rules::default(),
             every: Duration::from_secs(2),
-            lost_after: Duration::from_secs(15),
+            lost_after: Duration::from_secs(45),
             order: vec![Transport::Usb, Transport::Adb, Transport::Serial],
         }
     }
