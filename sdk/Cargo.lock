@@ -410,6 +410,7 @@ dependencies = [
  "clap",
  "env_logger",
  "log",
+ "pcdock-core",
  "pcdock-farm",
  "pcdock-serve",
 ]

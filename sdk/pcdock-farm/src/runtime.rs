@@ -247,6 +247,11 @@ pub struct DiscoveryConfig {
     pub lost_after: Duration,
     /// Предпочтение транспортов, когда один телефон виден по нескольким: раньше в списке — важнее.
     pub order: Vec<Transport>,
+    /// Предпочтение для отдельного телефона (серийник → транспорт): важнее общего порядка.
+    pub prefer: std::collections::HashMap<String, Transport>,
+    /// Сколько ждать, пока выбранный путь станет рабочим (`needs_app`, `needs_access`), прежде чем
+    /// попробовать другой путь, если телефон виден по нескольким. `None` — не переключаться.
+    pub fallback_after: Option<Duration>,
 }
 
 impl Default for DiscoveryConfig {
@@ -256,6 +261,8 @@ impl Default for DiscoveryConfig {
             every: Duration::from_secs(2),
             lost_after: Duration::from_secs(45),
             order: vec![Transport::Usb, Transport::Adb, Transport::Serial],
+            prefer: Default::default(),
+            fallback_after: Some(Duration::from_secs(20)),
         }
     }
 }
@@ -266,6 +273,10 @@ struct Tracked {
     last_seen: Instant,
     /// Телефон виден, но подключиться нельзя: вместо настоящего канала стоит заглушка.
     parked: Option<Issue>,
+    /// С какого момента выбранный путь не рабочий (`needs_app`/`needs_access`).
+    failing_since: Option<Instant>,
+    /// Пути, которые уже пробовали и которые не сработали: к ним не возвращаемся, пока телефон не пропадёт.
+    tried: Vec<Transport>,
 }
 
 /// Канал-заглушка для телефона, к которому пока нельзя подключиться (нет прав, нет подтверждения отладки):
@@ -297,6 +308,9 @@ struct Auto {
     tracked: HashMap<String, Tracked>,
     /// Ключ → выданный идентификатор: вернувшийся телефон получает прежний номер.
     ids: HashMap<String, PhoneId>,
+    /// Какой путь доводил телефон до `ready` (в памяти, пока работает ферма): при следующем появлении
+    /// берём его первым.
+    good: HashMap<String, Transport>,
     /// Ключи, на которых фабрика уже ошиблась: предупреждаем один раз.
     failed: std::collections::HashSet<String>,
 }
@@ -389,6 +403,7 @@ impl Farm {
             tracked: HashMap::new(),
             ids: HashMap::new(),
             failed: Default::default(),
+            good: HashMap::new(),
         });
     }
 
@@ -431,8 +446,16 @@ impl Farm {
                 }
             }
         }
+        // Сначала рабочие пути, потом заданный для телефона или вспомнивший успех, потом общий порядок.
+        let good = auto.good.clone();
         let rank = |s: &Sighting| {
-            (s.issue.is_some(), auto.cfg.order.iter().position(|o| *o == s.transport).unwrap_or(usize::MAX))
+            let wanted =
+                s.serial.as_ref().and_then(|v| auto.cfg.prefer.get(v)).or_else(|| good.get(&s.key()));
+            (
+                s.issue.is_some(),
+                wanted.is_none_or(|t| *t != s.transport),
+                auto.cfg.order.iter().position(|o| *o == s.transport).unwrap_or(usize::MAX),
+            )
         };
 
         for (key, group) in &seen {
@@ -465,6 +488,45 @@ impl Farm {
                             Err(e) => out.push(FarmEvent::Warning { phone: id, detail: e }),
                         }
                         continue;
+                    }
+                    // Выбранный путь не становится рабочим, а есть другой: после ожидания пробуем другой.
+                    let state = self.slots.get(&id).map(|sl| sl.state);
+                    match state {
+                        Some(PhoneState::Ready) => {
+                            t.failing_since = None;
+                            auto.good.insert(key.clone(), t.transport);
+                        }
+                        Some(PhoneState::NeedsApp | PhoneState::NeedsAccess) => {
+                            let since = *t.failing_since.get_or_insert(now);
+                            if auto.cfg.fallback_after.is_some_and(|d| now.duration_since(since) >= d) {
+                                let alt = group
+                                    .iter()
+                                    .filter(|s| s.issue.is_none() && s.transport != t.transport)
+                                    .find(|s| !t.tried.contains(&s.transport))
+                                    .cloned();
+                                if let Some(alt) = alt {
+                                    match auto.factory.make(&alt) {
+                                        Ok(link) => {
+                                            let _ = self.remove_phone(id);
+                                            if self.add_phone(id, link).is_ok() {
+                                                t.tried.push(t.transport);
+                                                t.transport = alt.transport;
+                                                t.failing_since = None;
+                                                out.push(FarmEvent::Appeared {
+                                                    phone: id,
+                                                    transport: alt.transport,
+                                                    address: alt.address.clone(),
+                                                    serial: alt.serial.clone(),
+                                                });
+                                            }
+                                        }
+                                        Err(e) => out.push(FarmEvent::Warning { phone: id, detail: e }),
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                        _ => t.failing_since = None,
                     }
                     let still_there = group.iter().any(|s| s.transport == t.transport && s.issue.is_none());
                     if still_there {
@@ -511,6 +573,8 @@ impl Farm {
                                         transport: best.transport,
                                         last_seen: now,
                                         parked: best.issue,
+                                        failing_since: None,
+                                        tried: Vec::new(),
                                     },
                                 );
                                 out.push(FarmEvent::Appeared {
@@ -1208,6 +1272,108 @@ mod tests {
         let down = evs.iter().filter(|e| matches!(e, FarmEvent::LinkDown { .. })).count();
         assert_eq!((blocked, down), (1, 1), "причина названа один раз: {evs:?}");
         assert_eq!(d.state(2).unwrap(), PhoneState::NeedsAccess);
+    }
+
+    /// USB-канал молчит (приложения нет), ADB-канал отвечает.
+    struct UsbSilentFactory;
+
+    impl LinkFactory for UsbSilentFactory {
+        fn make(&mut self, s: &Sighting) -> Result<Box<dyn PhoneLink>, String> {
+            let events = if s.transport == Transport::Usb { vec![Event::PeerSilent] } else { vec![hello()] };
+            Ok(Box::new(FakeLink::with_events(events).0))
+        }
+    }
+
+    fn wait_state(f: &mut Farm, id: PhoneId, want: PhoneState) -> bool {
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(3) {
+            f.drain();
+            if f.state(id) == Ok(want) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    fn fallback_farm(fallback: Option<Duration>) -> (Farm, Arc<Mutex<Vec<Sighting>>>) {
+        let seen = Arc::new(Mutex::new(vec![
+            sight(Transport::Usb, "1-2", Some("AAA")),
+            sight(Transport::Adb, "AAA", Some("AAA")),
+        ]));
+        let mut f = Farm::new();
+        let cfg = DiscoveryConfig {
+            every: Duration::ZERO,
+            lost_after: Duration::from_secs(3600),
+            fallback_after: fallback,
+            ..Default::default()
+        };
+        f.enable_discovery(vec![Box::new(FakeScan(seen.clone()))], Box::new(UsbSilentFactory), cfg);
+        (f, seen)
+    }
+
+    #[test]
+    fn silent_usb_phone_falls_back_to_adb_and_remembers_it() {
+        let (mut f, seen) = fallback_farm(Some(Duration::ZERO));
+        assert_eq!(appeared(&f.discover_now()), vec![(1, Transport::Usb)], "первым берём USB");
+        assert!(wait_state(&mut f, 1, PhoneState::NeedsApp), "приложения нет");
+        // Следующий проход: USB не стал рабочим, ADB есть — переходим на него под тем же номером.
+        let evs = f.discover_now();
+        assert!(appeared(&evs).contains(&(1, Transport::Adb)), "{evs:?}");
+        assert!(wait_state(&mut f, 1, PhoneState::Ready), "по ADB телефон готов");
+        f.discover_now(); // запоминаем, что ADB сработал
+                          // Телефон пропал и вернулся: теперь сразу ADB, а не USB.
+        *seen.lock().unwrap() = vec![];
+        let mut f2 = f;
+        if let Some(a) = f2.auto.as_mut() {
+            a.cfg.lost_after = Duration::ZERO;
+        }
+        f2.discover_now();
+        assert!(f2.phones().is_empty());
+        *seen.lock().unwrap() =
+            vec![sight(Transport::Usb, "1-2", Some("AAA")), sight(Transport::Adb, "AAA", Some("AAA"))];
+        assert_eq!(appeared(&f2.discover_now()), vec![(1, Transport::Adb)], "вспомнили рабочий путь");
+    }
+
+    #[test]
+    fn no_fallback_when_disabled_or_nothing_to_fall_back_to() {
+        let (mut f, _) = fallback_farm(None);
+        f.discover_now();
+        assert!(wait_state(&mut f, 1, PhoneState::NeedsApp));
+        assert!(appeared(&f.discover_now()).is_empty(), "переход выключен");
+
+        let seen = Arc::new(Mutex::new(vec![sight(Transport::Usb, "1-2", Some("AAA"))]));
+        let mut g = Farm::new();
+        let cfg = DiscoveryConfig {
+            every: Duration::ZERO,
+            fallback_after: Some(Duration::ZERO),
+            ..Default::default()
+        };
+        g.enable_discovery(vec![Box::new(FakeScan(seen))], Box::new(UsbSilentFactory), cfg);
+        g.discover_now();
+        assert!(wait_state(&mut g, 1, PhoneState::NeedsApp));
+        assert!(appeared(&g.discover_now()).is_empty(), "другого пути нет");
+    }
+
+    #[test]
+    fn per_phone_preference_beats_general_order() {
+        let seen = Arc::new(Mutex::new(vec![
+            sight(Transport::Usb, "1-2", Some("AAA")),
+            sight(Transport::Adb, "AAA", Some("AAA")),
+            sight(Transport::Usb, "1-3", Some("BBB")),
+            sight(Transport::Adb, "BBB", Some("BBB")),
+        ]));
+        let mut f = Farm::new();
+        let mut prefer = std::collections::HashMap::new();
+        prefer.insert("AAA".to_string(), Transport::Adb);
+        let cfg = DiscoveryConfig { every: Duration::ZERO, prefer, ..Default::default() };
+        f.enable_discovery(vec![Box::new(FakeScan(seen))], Box::new(FakeFactory), cfg);
+        let mut got = appeared(&f.discover_now());
+        got.sort();
+        // AAA — по ADB (по настройке), BBB — по USB (общий порядок).
+        let transports: Vec<Transport> = got.iter().map(|(_, t)| *t).collect();
+        assert!(transports.contains(&Transport::Adb) && transports.contains(&Transport::Usb), "{got:?}");
+        assert_eq!(f.phones().len(), 2);
     }
 
     #[test]

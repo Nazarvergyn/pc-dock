@@ -34,6 +34,14 @@ struct Args {
     #[arg(long = "vid", value_parser = parse_vid)]
     vids: Vec<u16>,
 
+    /// Путь для отдельного телефона: `СЕРИЙНИК=usb|adb|serial` (важнее общего порядка). Можно несколько раз.
+    #[arg(long = "prefer", value_parser = parse_prefer)]
+    prefer: Vec<(String, pcdock_core::link::Transport)>,
+
+    /// Не переходить на другой путь, если выбранный не стал рабочим (приложения нет, нет прав).
+    #[arg(long = "no-fallback")]
+    no_fallback: bool,
+
     /// Выключить семейство при --auto.
     #[arg(long = "no-usb")]
     no_usb: bool,
@@ -86,6 +94,18 @@ fn is_loopback(addr: &str) -> bool {
     matches!(host.trim_matches(['[', ']']), "127.0.0.1" | "localhost" | "::1") || host.starts_with("127.")
 }
 
+fn parse_prefer(s: &str) -> Result<(String, pcdock_core::link::Transport), String> {
+    use pcdock_core::link::Transport;
+    let (serial, t) = s.split_once('=').ok_or_else(|| format!("{s:?}: нужно СЕРИЙНИК=usb|adb|serial"))?;
+    let t = match t {
+        "usb" => Transport::Usb,
+        "adb" => Transport::Adb,
+        "serial" => Transport::Serial,
+        _ => return Err(format!("{s:?}: транспорт usb, adb или serial")),
+    };
+    Ok((serial.to_string(), t))
+}
+
 fn parse_vid(s: &str) -> Result<u16, String> {
     u16::from_str_radix(s.trim_start_matches("0x").trim_start_matches("0X"), 16)
         .map_err(|_| format!("{s:?}: нужен VID в шестнадцатеричном виде, например 0x2a70"))
@@ -126,6 +146,8 @@ fn main() {
     let cfg = FarmConfig {
         vendor_ids,
         server_apk: args.server_apk.clone(),
+        prefer: args.prefer.iter().cloned().collect(),
+        fallback_after: if args.no_fallback { None } else { FarmConfig::default().fallback_after },
         name: args.name.clone(),
         video: args.video,
         audio: args.audio,

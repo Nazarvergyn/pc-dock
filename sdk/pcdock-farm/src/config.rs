@@ -40,6 +40,10 @@ pub struct FarmConfig {
     pub lost_after: Duration,
     /// Предпочтение транспортов, если один телефон виден по нескольким.
     pub order: Vec<Transport>,
+    /// Предпочтение для отдельных телефонов: серийник → транспорт (важнее общего порядка).
+    pub prefer: std::collections::HashMap<String, Transport>,
+    /// Через сколько перейти на другой путь, если выбранный не стал рабочим (`None` — не переходить).
+    pub fallback_after: Option<Duration>,
 }
 
 impl Default for FarmConfig {
@@ -62,6 +66,8 @@ impl Default for FarmConfig {
             every: d.every,
             lost_after: d.lost_after,
             order: d.order,
+            prefer: d.prefer,
+            fallback_after: d.fallback_after,
         }
     }
 }
@@ -123,6 +129,23 @@ impl FarmConfig {
                 }
                 "every_ms" => cfg.every = Duration::from_millis(num_of(k, v)?),
                 "lost_after_ms" => cfg.lost_after = Duration::from_millis(num_of(k, v)?),
+                "prefer" => {
+                    let map =
+                        v.as_object().ok_or("prefer: нужен объект {\"СЕРИЙНИК\": \"usb|adb|serial\"}")?;
+                    for (serial, t) in map {
+                        let t = match t.as_str() {
+                            Some("usb") => Transport::Usb,
+                            Some("adb") => Transport::Adb,
+                            Some("serial") => Transport::Serial,
+                            _ => return Err(format!("prefer.{serial}: нужно usb, adb или serial")),
+                        };
+                        cfg.prefer.insert(serial.clone(), t);
+                    }
+                }
+                "fallback_after_ms" => {
+                    let ms = num_of(k, v)?;
+                    cfg.fallback_after = if ms == 0 { None } else { Some(Duration::from_millis(ms)) };
+                }
                 "order" => {
                     cfg.order = strs_of(k, v)?
                         .iter()
@@ -181,6 +204,8 @@ impl Farm {
             every: cfg.every,
             lost_after: cfg.lost_after,
             order: cfg.order.clone(),
+            prefer: cfg.prefer.clone(),
+            fallback_after: cfg.fallback_after,
         };
         let factory = DefaultFactory {
             session: cfg.session(),
