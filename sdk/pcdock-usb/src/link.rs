@@ -87,6 +87,10 @@ impl PhoneLink for UsbLink {
 
 fn classify_usb(e: &crate::Error) -> LinkError {
     match e {
+        // Нет прав или драйвера: повторять бессмысленно, человеку нужно подсказать, что сделать.
+        crate::Error::Usb(rusb::Error::Access | rusb::Error::NotSupported) => {
+            LinkError::Blocked(pcdock_core::link::PhoneState::NeedsAccess, e.to_string())
+        }
         crate::Error::Usb(_) | crate::Error::NoDevice | crate::Error::HandshakeTimeout => {
             LinkError::Gone(e.to_string())
         }
@@ -99,7 +103,8 @@ fn classify_usb(e: &crate::Error) -> LinkError {
 pub struct UsbDiscovery {
     ctx: rusb::Context,
     vendor_ids: Vec<u16>,
-    /// Порт → (серийник, сколько раз пробовали читать). Неудачное чтение повторяется не больше трёх раз.
+    /// Порт → (серийник, сколько раз пробовали читать). Неудачное чтение повторяется не больше трёх раз;
+    /// отсутствие прав не считается попыткой: после правки прав телефон подхватится сам.
     serials: std::collections::HashMap<crate::UsbPort, (Option<String>, u8)>,
 }
 
@@ -119,14 +124,23 @@ impl pcdock_core::link::Discovery for UsbDiscovery {
         let mut out = Vec::new();
         for (device, info) in &found {
             let entry = self.serials.entry(info.port.clone()).or_insert((None, 0));
+            let mut issue = None;
             if entry.0.is_none() && entry.1 < 3 {
-                entry.0 = crate::read_serial(device, std::time::Duration::from_millis(500));
-                entry.1 += 1;
+                let (serial, problem) = crate::probe_serial(device, std::time::Duration::from_millis(500));
+                issue = problem;
+                if issue.is_none() {
+                    entry.1 += 1;
+                }
+                entry.0 = serial;
+            } else if entry.0.is_none() {
+                // Серийник не читается, но права проверим: вдруг их только что выдали (или отозвали).
+                issue = crate::probe_serial(device, std::time::Duration::from_millis(500)).1;
             }
             out.push(Sighting {
                 transport: Transport::Usb,
                 address: info.port.to_string(),
                 serial: entry.0.clone(),
+                issue,
             });
         }
         out

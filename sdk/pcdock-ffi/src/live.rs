@@ -40,6 +40,9 @@ pub const PCDOCK_PHONE_CONNECTING: i32 = 1;
 pub const PCDOCK_PHONE_READY: i32 = 2;
 pub const PCDOCK_PHONE_NEEDS_PERMISSION: i32 = 3;
 pub const PCDOCK_PHONE_LOST: i32 = 4;
+pub const PCDOCK_PHONE_NEEDS_APP: i32 = 5;
+pub const PCDOCK_PHONE_NEEDS_ACCESS: i32 = 6;
+pub const PCDOCK_PHONE_NEEDS_AUTH: i32 = 7;
 
 /// Непрозрачный дескриптор живой фермы.
 pub struct PcdockFarm {
@@ -154,6 +157,9 @@ fn state_name(s: PhoneState) -> &'static str {
         PhoneState::Connecting => "connecting",
         PhoneState::Ready => "ready",
         PhoneState::NeedsPermission => "needs_permission",
+        PhoneState::NeedsApp => "needs_app",
+        PhoneState::NeedsAccess => "needs_access",
+        PhoneState::NeedsAuth => "needs_auth",
         PhoneState::Lost => "lost",
     }
 }
@@ -163,7 +169,9 @@ fn event_json(ev: &FarmEvent) -> serde_json::Value {
         FarmEvent::Appeared { phone, transport, address, serial } => {
             json!({"phone": phone, "transport": transport.to_string(), "address": address, "serial": serial})
         }
-        FarmEvent::State { phone, state } => json!({"phone": phone, "state": state_name(*state)}),
+        FarmEvent::State { phone, state, detail } => {
+            json!({"phone": phone, "state": state_name(*state), "detail": detail})
+        }
         FarmEvent::Lost { phone } => json!({"phone": phone}),
         FarmEvent::Connected { phone, version, capabilities, name } => {
             json!({"phone": phone, "version": version, "capabilities": capabilities, "name": name})
@@ -272,7 +280,8 @@ pub extern "C" fn pcdock_farm_phone_at(p: *mut PcdockFarm, index: u32, out_id: *
     })
 }
 
-/// Состояние телефона: 0 appeared, 1 connecting, 2 ready, 3 needs_permission, 4 lost.
+/// Состояние телефона: 0 appeared, 1 connecting, 2 ready, 3 needs_permission, 4 lost, 5 needs_app,
+/// 6 needs_access, 7 needs_auth.
 #[no_mangle]
 pub extern "C" fn pcdock_farm_state(p: *mut PcdockFarm, id: u32) -> i32 {
     guard(|| {
@@ -282,6 +291,9 @@ pub extern "C" fn pcdock_farm_state(p: *mut PcdockFarm, id: u32) -> i32 {
             PhoneState::Connecting => PCDOCK_PHONE_CONNECTING,
             PhoneState::Ready => PCDOCK_PHONE_READY,
             PhoneState::NeedsPermission => PCDOCK_PHONE_NEEDS_PERMISSION,
+            PhoneState::NeedsApp => PCDOCK_PHONE_NEEDS_APP,
+            PhoneState::NeedsAccess => PCDOCK_PHONE_NEEDS_ACCESS,
+            PhoneState::NeedsAuth => PCDOCK_PHONE_NEEDS_AUTH,
             PhoneState::Lost => PCDOCK_PHONE_LOST,
         })
     })
@@ -487,9 +499,9 @@ mod tests {
 
     #[test]
     fn event_json_describes_events() {
-        let ev = FarmEvent::State { phone: 3, state: PhoneState::NeedsPermission };
+        let ev = FarmEvent::State { phone: 3, state: PhoneState::NeedsAuth, detail: "x".into() };
         assert_eq!(kind_of(&ev), (PCDOCK_FARM_EV_STATE, 3));
-        assert_eq!(event_json(&ev), json!({"phone": 3, "state": "needs_permission"}));
+        assert_eq!(event_json(&ev), json!({"phone": 3, "state": "needs_auth", "detail": "x"}));
         let ev = FarmEvent::Appeared {
             phone: 1,
             transport: pcdock_core::link::Transport::Usb,

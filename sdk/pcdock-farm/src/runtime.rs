@@ -10,7 +10,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use pcdock_core::link::{
-    Discovery, InputCmd, LinkError, LinkFactory, PhoneId, PhoneLink, PhoneState, Sighting, Transport,
+    Discovery, InputCmd, Issue, LinkError, LinkFactory, PhoneId, PhoneLink, PhoneState, Sighting, Transport,
 };
 use pcdock_core::session::Event;
 
@@ -98,6 +98,8 @@ pub enum FarmEvent {
     State {
         phone: PhoneId,
         state: PhoneState,
+        /// Подсказка человеку (пусто, если делать ничего не нужно).
+        detail: String,
     },
     /// Телефон пропал надолго.
     Lost {
@@ -248,6 +250,28 @@ struct Tracked {
     id: PhoneId,
     transport: Transport,
     last_seen: Instant,
+    /// Телефон виден, но подключиться нельзя: вместо настоящего канала стоит заглушка.
+    parked: Option<Issue>,
+}
+
+/// Канал-заглушка для телефона, к которому пока нельзя подключиться (нет прав, нет подтверждения отладки):
+/// ферма показывает состояние и подсказку, а настоящий канал ставит, когда помеха исчезнет.
+struct ParkedLink(Issue);
+
+impl PhoneLink for ParkedLink {
+    fn is_connected(&self) -> bool {
+        false
+    }
+    fn connect(&mut self) -> Result<(), LinkError> {
+        Err(LinkError::Blocked(self.0.state(), "ждём действий пользователя".into()))
+    }
+    fn poll(&mut self) -> Result<Vec<Event>, LinkError> {
+        Ok(Vec::new())
+    }
+    fn input(&mut self, _: &InputCmd) -> Result<(), LinkError> {
+        Ok(())
+    }
+    fn shutdown(&mut self) {}
 }
 
 struct Auto {
@@ -370,7 +394,7 @@ impl Farm {
         if let Some(slot) = self.slots.get_mut(&phone) {
             if slot.state != state {
                 slot.state = state;
-                out.push(FarmEvent::State { phone, state });
+                out.push(FarmEvent::State { phone, state, detail: state.hint().to_string() });
             }
         }
     }
@@ -393,19 +417,46 @@ impl Farm {
                 }
             }
         }
-        let rank = |t: Transport| auto.cfg.order.iter().position(|o| *o == t).unwrap_or(usize::MAX);
+        let rank = |s: &Sighting| {
+            (s.issue.is_some(), auto.cfg.order.iter().position(|o| *o == s.transport).unwrap_or(usize::MAX))
+        };
 
         for (key, group) in &seen {
-            let best = group.iter().min_by_key(|s| rank(s.transport)).expect("группа не пуста").clone();
+            let best = group.iter().min_by_key(|s| rank(s)).expect("группа не пуста").clone();
             match auto.tracked.get_mut(key) {
                 Some(t) => {
                     t.last_seen = now;
-                    let still_there = group.iter().any(|s| s.transport == t.transport);
+                    let id = t.id;
+                    if let Some(issue) = best.issue {
+                        // Помеха появилась (или осталась): работающий канал заменяем заглушкой с подсказкой.
+                        if t.parked != Some(issue) {
+                            let _ = self.remove_phone(id);
+                            if self.add_phone(id, Box::new(ParkedLink(issue))).is_ok() {
+                                t.parked = Some(issue);
+                                self.set_state(id, issue.state(), out);
+                            }
+                        }
+                        continue;
+                    }
+                    if t.parked.is_some() {
+                        // Помеха исчезла (права выданы, отладка подтверждена): ставим настоящий канал.
+                        match auto.factory.make(&best) {
+                            Ok(link) => {
+                                let _ = self.remove_phone(id);
+                                if self.add_phone(id, link).is_ok() {
+                                    t.parked = None;
+                                    t.transport = best.transport;
+                                }
+                            }
+                            Err(e) => out.push(FarmEvent::Warning { phone: id, detail: e }),
+                        }
+                        continue;
+                    }
+                    let still_there = group.iter().any(|s| s.transport == t.transport && s.issue.is_none());
                     if still_there {
                         continue;
                     }
                     // Прежний путь пропал, а другой есть: переводим телефон на него под тем же номером.
-                    let id = t.id;
                     match auto.factory.make(&best) {
                         Ok(link) => {
                             let _ = self.remove_phone(id);
@@ -430,14 +481,23 @@ impl Farm {
                             .find(|n| !self.slots.contains_key(n) && !auto.ids.values().any(|v| v == n))
                             .expect("кончились номера"),
                     };
-                    match auto.factory.make(&best) {
+                    let made: Result<Box<dyn PhoneLink>, String> = match best.issue {
+                        Some(issue) => Ok(Box::new(ParkedLink(issue))),
+                        None => auto.factory.make(&best),
+                    };
+                    match made {
                         Ok(link) => {
                             if self.add_phone(id, link).is_ok() {
                                 auto.ids.insert(key.clone(), id);
                                 auto.failed.remove(key);
                                 auto.tracked.insert(
                                     key.clone(),
-                                    Tracked { id, transport: best.transport, last_seen: now },
+                                    Tracked {
+                                        id,
+                                        transport: best.transport,
+                                        last_seen: now,
+                                        parked: best.issue,
+                                    },
                                 );
                                 out.push(FarmEvent::Appeared {
                                     phone: id,
@@ -445,6 +505,9 @@ impl Farm {
                                     address: best.address.clone(),
                                     serial: best.serial.clone(),
                                 });
+                                if let Some(issue) = best.issue {
+                                    self.set_state(id, issue.state(), out);
+                                }
                             }
                         }
                         Err(e) => {
@@ -512,7 +575,27 @@ impl Farm {
                     self.set_state(phone, PhoneState::Ready, &mut out)
                 }
                 FarmEvent::LinkDown { .. } | FarmEvent::Disconnected { .. } => {
-                    self.set_state(phone, PhoneState::Connecting, &mut out)
+                    // Пока человек не сделал нужное, «подключаемся» говорить неправда: оставляем причину.
+                    let blocked = self.slots.get(&phone).is_some_and(|s| {
+                        matches!(
+                            s.state,
+                            PhoneState::NeedsApp | PhoneState::NeedsAccess | PhoneState::NeedsAuth
+                        )
+                    });
+                    if !blocked {
+                        self.set_state(phone, PhoneState::Connecting, &mut out)
+                    }
+                }
+                // Телефон молчит, хотя рукопожатия ещё не было: скорее всего, приложения нет или оно не запущено.
+                FarmEvent::PeerSilent { .. }
+                    if self.slots.get(&phone).is_some_and(|s| s.state == PhoneState::Connecting) =>
+                {
+                    self.set_state(phone, PhoneState::NeedsApp, &mut out)
+                }
+                // Состояние, о котором сообщил сам канал (например, нет прав на USB).
+                FarmEvent::State { state, .. } => {
+                    self.set_state(phone, *state, &mut out);
+                    continue;
                 }
                 _ => {}
             }
@@ -561,6 +644,23 @@ fn worker_loop(
     let send = |ev: FarmEvent| {
         let _ = ev_tx.send(ev);
     };
+    // Одну и ту же причину не повторяем каждую секунду: сообщаем, когда она сменилась.
+    let mut last_problem: Option<String> = None;
+    let mut report = |err: LinkError| {
+        let key = err.to_string();
+        if last_problem.as_deref() == Some(key.as_str()) {
+            return;
+        }
+        last_problem = Some(key);
+        match err {
+            LinkError::Gone(detail) => send(FarmEvent::LinkDown { phone: id, detail }),
+            LinkError::Fatal(detail) => send(FarmEvent::Warning { phone: id, detail }),
+            LinkError::Blocked(state, detail) => {
+                send(FarmEvent::LinkDown { phone: id, detail });
+                send(FarmEvent::State { phone: id, state, detail: state.hint().to_string() });
+            }
+        }
+    };
     loop {
         // Команды забираем всегда, даже без связи: ввод копится в сессии.
         match cmd_rx.try_recv() {
@@ -582,13 +682,8 @@ fn worker_loop(
         if !link.is_connected() {
             match link.connect() {
                 Ok(()) => {}
-                Err(LinkError::Gone(detail)) => {
-                    send(FarmEvent::LinkDown { phone: id, detail });
-                    thread::sleep(Duration::from_secs(1));
-                    continue;
-                }
-                Err(LinkError::Fatal(detail)) => {
-                    send(FarmEvent::Warning { phone: id, detail });
+                Err(e) => {
+                    report(e);
                     thread::sleep(Duration::from_secs(1));
                     continue;
                 }
@@ -600,12 +695,12 @@ fn worker_loop(
                     send(map_event(id, ev));
                 }
             }
-            Err(LinkError::Gone(detail)) => {
-                send(FarmEvent::LinkDown { phone: id, detail });
-                thread::sleep(Duration::from_secs(1));
-            }
-            Err(LinkError::Fatal(detail)) => {
-                send(FarmEvent::Warning { phone: id, detail });
+            Err(e) => {
+                let gone = !matches!(e, LinkError::Fatal(_));
+                report(e);
+                if gone {
+                    thread::sleep(Duration::from_secs(1));
+                }
             }
         }
     }
@@ -807,7 +902,7 @@ mod tests {
     }
 
     fn sight(transport: Transport, address: &str, serial: Option<&str>) -> Sighting {
-        Sighting { transport, address: address.into(), serial: serial.map(String::from) }
+        Sighting { transport, address: address.into(), serial: serial.map(String::from), issue: None }
     }
 
     fn auto_farm(lost_after: Duration) -> (Farm, Arc<Mutex<Vec<Sighting>>>) {
@@ -986,6 +1081,109 @@ mod tests {
             vec![sight(Transport::Usb, "1-2", Some("AAA")), sight(Transport::Usb, "1-3", Some("BBB"))];
         assert_eq!(appeared(&f.discover_now()), vec![(1, Transport::Usb)]);
         assert_eq!(f.phones(), vec![1]);
+    }
+
+    fn issue(transport: Transport, address: &str, serial: &str, issue: Issue) -> Sighting {
+        Sighting { issue: Some(issue), ..sight(transport, address, Some(serial)) }
+    }
+
+    fn states(evs: &[FarmEvent]) -> Vec<PhoneState> {
+        evs.iter()
+            .filter_map(|e| match e {
+                FarmEvent::State { state, .. } => Some(*state),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn unauthorized_adb_phone_is_parked_with_a_hint_then_connected() {
+        let (mut f, seen) = auto_farm(Duration::from_secs(3600));
+        *seen.lock().unwrap() = vec![issue(Transport::Adb, "AAA", "AAA", Issue::Unauthorized)];
+        let evs = f.discover_now();
+        assert_eq!(appeared(&evs), vec![(1, Transport::Adb)]);
+        assert_eq!(states(&evs), vec![PhoneState::NeedsAuth]);
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, FarmEvent::State { detail, .. } if detail.contains("отладку"))));
+        assert_eq!(f.state(1).unwrap(), PhoneState::NeedsAuth);
+        // Повторный скан с той же помехой ничего не меняет.
+        let again = f.discover_now();
+        assert!(states(&again).is_empty());
+
+        // Человек нажал «Разрешить»: тот же номер, настоящий канал.
+        *seen.lock().unwrap() = vec![sight(Transport::Adb, "AAA", Some("AAA"))];
+        f.discover_now();
+        assert_eq!(f.phones(), vec![1]);
+        let t0 = Instant::now();
+        let mut ready = false;
+        while t0.elapsed() < Duration::from_secs(2) && !ready {
+            ready = f.drain().iter().any(|e| matches!(e, FarmEvent::State { state: PhoneState::Ready, .. }));
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready, "после снятия помехи телефон дошёл до ready");
+    }
+
+    #[test]
+    fn usb_without_access_is_reported_and_recovers() {
+        let (mut f, seen) = auto_farm(Duration::from_secs(3600));
+        *seen.lock().unwrap() = vec![issue(Transport::Usb, "1-2", "AAA", Issue::NoAccess)];
+        f.discover_now();
+        assert_eq!(f.state(1).unwrap(), PhoneState::NeedsAccess);
+        *seen.lock().unwrap() = vec![sight(Transport::Usb, "1-2", Some("AAA"))];
+        f.discover_now();
+        assert_eq!(f.phones(), vec![1]);
+    }
+
+    #[test]
+    fn silent_phone_before_handshake_means_no_app() {
+        let mut d = Farm::new();
+        let (l, _) = FakeLink::with_events(vec![Event::PeerSilent]);
+        d.add_phone(4, Box::new(l)).unwrap();
+        let t0 = Instant::now();
+        let mut hint = None;
+        while t0.elapsed() < Duration::from_secs(2) && hint.is_none() {
+            for e in d.drain() {
+                if let FarmEvent::State { state: PhoneState::NeedsApp, detail, .. } = e {
+                    hint = Some(detail);
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(hint.expect("needs_app").contains("приложение"));
+    }
+
+    struct BlockedLink;
+
+    impl PhoneLink for BlockedLink {
+        fn is_connected(&self) -> bool {
+            false
+        }
+        fn connect(&mut self) -> Result<(), LinkError> {
+            Err(LinkError::Blocked(PhoneState::NeedsAccess, "Access denied".into()))
+        }
+        fn poll(&mut self) -> Result<Vec<Event>, LinkError> {
+            Ok(vec![])
+        }
+        fn input(&mut self, _: &InputCmd) -> Result<(), LinkError> {
+            Ok(())
+        }
+        fn shutdown(&mut self) {}
+    }
+
+    #[test]
+    fn blocked_link_reports_state_once_not_every_retry() {
+        let mut d = Farm::new();
+        d.add_phone(2, Box::new(BlockedLink)).unwrap();
+        thread::sleep(Duration::from_millis(1600));
+        let evs = d.drain();
+        let blocked = evs
+            .iter()
+            .filter(|e| matches!(e, FarmEvent::State { state: PhoneState::NeedsAccess, .. }))
+            .count();
+        let down = evs.iter().filter(|e| matches!(e, FarmEvent::LinkDown { .. })).count();
+        assert_eq!((blocked, down), (1, 1), "причина названа один раз: {evs:?}");
+        assert_eq!(d.state(2).unwrap(), PhoneState::NeedsAccess);
     }
 
     #[test]

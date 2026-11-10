@@ -35,15 +35,25 @@ impl AdbDiscovery {
 
 impl pcdock_core::link::Discovery for AdbDiscovery {
     fn scan(&mut self) -> Vec<pcdock_core::link::Sighting> {
-        use pcdock_core::link::{Sighting, Transport};
+        use pcdock_core::link::{Issue, Sighting, Transport};
         self.adb
-            .devices()
+            .device_states()
             .unwrap_or_default()
             .into_iter()
-            .map(|serial| Sighting {
+            .filter_map(|(serial, state)| {
+                let issue = match state.as_str() {
+                    "device" => None,
+                    "unauthorized" => Some(Issue::Unauthorized),
+                    // offline, bootloader и прочее: не наш случай или временно.
+                    _ => return None,
+                };
+                Some((serial, issue))
+            })
+            .map(|(serial, issue)| Sighting {
                 transport: Transport::Adb,
                 address: serial.clone(),
                 serial: Some(serial),
+                issue,
             })
             .collect()
     }
@@ -88,19 +98,21 @@ impl Adb {
         read_msg(&mut s).map_err(|e| format!("тело {service}: {e}"))
     }
 
-    /// Серийники устройств в состоянии `device`.
-    pub fn devices(&self) -> Result<Vec<String>, String> {
+    /// Серийники и состояния всех устройств ADB (`device`, `unauthorized`, `offline`…).
+    pub fn device_states(&self) -> Result<Vec<(String, String)>, String> {
         let body = self.request("host:devices")?;
         Ok(body
             .lines()
             .filter_map(|l| {
                 let mut it = l.split_whitespace();
-                match (it.next(), it.next()) {
-                    (Some(s), Some("device")) => Some(s.to_owned()),
-                    _ => None,
-                }
+                Some((it.next()?.to_owned(), it.next()?.to_owned()))
             })
             .collect())
+    }
+
+    /// Серийники устройств в состоянии `device`.
+    pub fn devices(&self) -> Result<Vec<String>, String> {
+        Ok(self.device_states()?.into_iter().filter(|(_, st)| st == "device").map(|(s, _)| s).collect())
     }
 
     /// Проброс `tcp:local -> tcp:remote` для трубки. Пустой ответ = ок.

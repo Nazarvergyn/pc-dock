@@ -22,7 +22,26 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 /// VID производителей, телефоны которых мы пробуем (Google, Samsung, HTC, Huawei, Xiaomi, ...).
-pub const ANDROID_VIDS: [u16; 6] = [0x18D1, 0x04E8, 0x0BB4, 0x12D1, 0x2717, 0x22B8];
+/// Производители телефонов (USB VID). Сюда не входят производители чипов, адаптеров и периферии (Intel,
+/// Qualcomm, MediaTek, Sony, ASUS, Lenovo…): их устройства чаще не телефоны, и каждое пришлось бы открывать
+/// ради серийника. Своего производителя добавляют в настройках (`vendor_ids`, `pcdockd --vid`).
+pub const ANDROID_VIDS: [u16; 15] = [
+    0x18D1, // Google
+    0x04E8, // Samsung
+    0x0BB4, // HTC
+    0x12D1, // Huawei
+    0x339B, // Honor
+    0x2717, // Xiaomi
+    0x22B8, // Motorola
+    0x2A70, // OnePlus
+    0x22D9, // Oppo, Realme
+    0x2D95, // Vivo
+    0x2B0E, // Nothing
+    0x2E04, // HMD (Nokia)
+    0x0FCE, // Sony Ericsson (телефоны Sony)
+    0x1004, // LG
+    0x19D2, // ZTE
+];
 /// PID телефона в режиме аксессуара.
 pub const ACCESSORY_PIDS: std::ops::RangeInclusive<u16> = 0x2D00..=0x2D05;
 
@@ -260,6 +279,21 @@ fn serial_of_handle(handle: &DeviceHandle<Context>, timeout: Duration) -> Option
     desc.serial_number_string_index()?;
     let lang = *handle.read_languages(timeout).ok()?.first()?;
     handle.read_serial_number_string(lang, &desc, timeout).ok().filter(|s| !s.is_empty())
+}
+
+/// Серийник телефона и, если устройство не удалось открыть из-за прав или драйвера, причина.
+/// Linux отвечает `Access` (нужно правило udev), Windows без драйвера WinUSB — `NotSupported`.
+fn probe_serial(
+    device: &Device<Context>,
+    timeout: Duration,
+) -> (Option<String>, Option<pcdock_core::link::Issue>) {
+    match device.open() {
+        Ok(handle) => (serial_of_handle(&handle, timeout), None),
+        Err(rusb::Error::Access | rusb::Error::NotSupported) => {
+            (None, Some(pcdock_core::link::Issue::NoAccess))
+        }
+        Err(_) => (None, None),
+    }
 }
 
 fn read_serial(device: &Device<Context>, timeout: Duration) -> Option<String> {

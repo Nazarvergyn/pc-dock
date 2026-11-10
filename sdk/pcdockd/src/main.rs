@@ -26,6 +26,10 @@ struct Args {
     #[arg(long = "except")]
     except: Vec<String>,
 
+    /// Дополнительный производитель USB (VID, шестнадцатеричный, например `0x2a70`). Можно несколько раз.
+    #[arg(long = "vid", value_parser = parse_vid)]
+    vids: Vec<u16>,
+
     /// Выключить семейство при --auto.
     #[arg(long = "no-usb")]
     no_usb: bool,
@@ -67,6 +71,11 @@ struct Args {
     audio: bool,
 }
 
+fn parse_vid(s: &str) -> Result<u16, String> {
+    u16::from_str_radix(s.trim_start_matches("0x").trim_start_matches("0X"), 16)
+        .map_err(|_| format!("{s:?}: нужен VID в шестнадцатеричном виде, например 0x2a70"))
+}
+
 fn main() {
     let args = Args::parse();
     if std::env::var("RUST_LOG").is_err() {
@@ -93,7 +102,14 @@ fn main() {
         log::error!("нужен --auto или хотя бы один --phone (см. --help)");
         std::process::exit(2);
     }
+    let mut vendor_ids = FarmConfig::default().vendor_ids;
+    for v in &args.vids {
+        if !vendor_ids.contains(v) {
+            vendor_ids.push(*v);
+        }
+    }
     let cfg = FarmConfig {
+        vendor_ids,
         name: args.name.clone(),
         video: args.video,
         audio: args.audio,

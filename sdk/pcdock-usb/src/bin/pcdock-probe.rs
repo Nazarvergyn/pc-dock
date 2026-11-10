@@ -44,6 +44,14 @@ fn main() {
         .unwrap_or(20);
 
     let value_of = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    if has("--udev-rules") {
+        // Правила для Linux: телефоны в обычном режиме и режиме аксессуара (VID Google 18d1, PID 2d00/2d01).
+        println!("# /etc/udev/rules.d/51-pcdock.rules; затем: sudo udevadm control --reload && sudo udevadm trigger");
+        for vid in ANDROID_VIDS {
+            println!("SUBSYSTEM==\"usb\", ATTR{{idVendor}}==\"{vid:04x}\", MODE=\"0660\", TAG+=\"uaccess\"");
+        }
+        return;
+    }
     if has("--list") {
         match list_phones(&ANDROID_VIDS, has("--serials")) {
             Ok(phones) if phones.is_empty() => println!("телефонов не видно"),

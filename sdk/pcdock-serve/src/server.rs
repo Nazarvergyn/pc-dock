@@ -386,6 +386,19 @@ fn route(clients: &Clients, ev: FarmEvent) {
     }
 }
 
+fn state_name(s: PhoneState) -> &'static str {
+    match s {
+        PhoneState::Appeared => "appeared",
+        PhoneState::Connecting => "connecting",
+        PhoneState::Ready => "ready",
+        PhoneState::NeedsPermission => "needs_permission",
+        PhoneState::NeedsApp => "needs_app",
+        PhoneState::NeedsAccess => "needs_access",
+        PhoneState::NeedsAuth => "needs_auth",
+        PhoneState::Lost => "lost",
+    }
+}
+
 fn map_daemon_event(ev: FarmEvent) -> (PhoneId, ServerMsg) {
     match ev {
         FarmEvent::Connected { phone, version, capabilities, name } => {
@@ -406,15 +419,8 @@ fn map_daemon_event(ev: FarmEvent) -> (PhoneId, ServerMsg) {
         FarmEvent::Appeared { phone, transport, address, serial } => {
             (phone, ServerMsg::Appeared { phone, transport: transport.to_string(), address, serial })
         }
-        FarmEvent::State { phone, state } => {
-            let state = match state {
-                PhoneState::Appeared => "appeared",
-                PhoneState::Connecting => "connecting",
-                PhoneState::Ready => "ready",
-                PhoneState::NeedsPermission => "needs_permission",
-                PhoneState::Lost => "lost",
-            };
-            (phone, ServerMsg::State { phone, state: state.into() })
+        FarmEvent::State { phone, state, detail } => {
+            (phone, ServerMsg::State { phone, state: state_name(state).into(), detail })
         }
         FarmEvent::Lost { phone } => (phone, ServerMsg::Lost { phone }),
         FarmEvent::Video { .. } | FarmEvent::Audio { .. } => {

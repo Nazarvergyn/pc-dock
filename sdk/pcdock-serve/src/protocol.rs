@@ -146,10 +146,12 @@ pub enum ServerMsg {
         address: String,
         serial: Option<String>,
     },
-    /// Состояние: `appeared`, `connecting`, `ready`, `needs_permission`, `lost`.
+    /// Состояние: `appeared`, `connecting`, `ready`, `needs_permission`, `needs_app`, `needs_access`,
+    /// `needs_auth`, `lost`; `detail` — подсказка человеку (может быть пустой).
     State {
         phone: u32,
         state: String,
+        detail: String,
     },
     Lost {
         phone: u32,

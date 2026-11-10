@@ -79,6 +79,8 @@ impl InputCmd {
 pub enum LinkError {
     Gone(String),
     Fatal(String),
+    /// Работать нельзя, пока человек что-то не сделает (см. [`PhoneState::hint`]).
+    Blocked(PhoneState, String),
 }
 
 impl std::fmt::Display for LinkError {
@@ -86,6 +88,7 @@ impl std::fmt::Display for LinkError {
         match self {
             Self::Gone(e) => write!(f, "устройство пропало: {e}"),
             Self::Fatal(e) => write!(f, "{e}"),
+            Self::Blocked(_, e) => write!(f, "{e}"),
         }
     }
 }
@@ -135,6 +138,26 @@ pub struct Sighting {
     pub address: String,
     /// Серийник телефона, если известен: по нему ферма узнаёт один и тот же телефон на разных транспортах.
     pub serial: Option<String>,
+    /// Что мешает работать, если телефон виден, но пользоваться им нельзя.
+    pub issue: Option<Issue>,
+}
+
+/// Почему виден телефон, но подключиться к нему пока нельзя.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Issue {
+    /// Нет прав на USB-устройство (Linux: правило udev; Windows: драйвер WinUSB).
+    NoAccess,
+    /// ADB: компьютер не подтверждён на телефоне («Разрешить отладку»).
+    Unauthorized,
+}
+
+impl Issue {
+    pub fn state(self) -> PhoneState {
+        match self {
+            Self::NoAccess => PhoneState::NeedsAccess,
+            Self::Unauthorized => PhoneState::NeedsAuth,
+        }
+    }
 }
 
 impl Sighting {
@@ -168,6 +191,33 @@ pub enum PhoneState {
     Ready,
     /// Приложение запущено, но захвата экрана нет (нужно разрешение на телефоне).
     NeedsPermission,
+    /// Телефон перешёл в режим аксессуара, но приложение PC Dock не отвечает (не установлено или не запущено).
+    NeedsApp,
+    /// Нет прав на USB-устройство.
+    NeedsAccess,
+    /// ADB ждёт подтверждения компьютера на телефоне.
+    NeedsAuth,
     /// Пропал с обнаружения.
     Lost,
+}
+
+impl PhoneState {
+    /// Что сказать пользователю в этом состоянии (пусто, если ничего делать не нужно).
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::NeedsPermission => "Разрешите запись экрана на телефоне (диалог «Начать запись»).",
+            Self::NeedsApp => {
+                "Телефон перешёл в режим аксессуара, но приложение PC Dock не отвечает: установите его на телефон \
+                 и подтвердите запуск при подключении."
+            }
+            Self::NeedsAccess => {
+                "Нет доступа к USB-устройству: на Linux добавьте правило udev, на Windows поставьте драйвер WinUSB \
+                 (см. sdk/README.md, «Первое подключение»)."
+            }
+            Self::NeedsAuth => {
+                "Подтвердите на телефоне «Разрешить отладку по USB с этого компьютера» (отметьте «Всегда разрешать»)."
+            }
+            _ => "",
+        }
+    }
 }
