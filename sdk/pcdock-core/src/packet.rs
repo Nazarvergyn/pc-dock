@@ -30,6 +30,9 @@ pub mod caps {
     pub const UI_TREE: u32 = 1 << 9;
     /// Телефон отдаёт причины завершения процессов приложения (`EXIT_INFO`, ответ — `STATUS` 22; Android 11+).
     pub const EXIT_INFO: u32 = 1 << 10;
+    /// Телефон делает HTTPS GET по своей сети по умолчанию и отвечает телом, кодом и типом сети (`IP_CHECK`, ответ —
+    /// `STATUS` 23): внешний IP телефона.
+    pub const IP_CHECK: u32 = 1 << 11;
 }
 
 /// Коды кодеков.
@@ -69,6 +72,8 @@ pub enum PacketType {
     UiDump,
     /// Причины завершения процессов приложения (хост → телефон, возможность `caps::EXIT_INFO`).
     ExitInfo,
+    /// HTTPS-запрос по сети телефона — внешний IP (хост → телефон, возможность `caps::IP_CHECK`).
+    IpCheck,
     Status,
     Error,
     /// Тип, неизвестный этой версии ядра (такие пакеты пропускаются).
@@ -93,6 +98,7 @@ impl PacketType {
             0x44 => Self::ListApps,
             0x45 => Self::UiDump,
             0x46 => Self::ExitInfo,
+            0x47 => Self::IpCheck,
             0x50 => Self::Status,
             0x7F => Self::Error,
             other => Self::Unknown(other),
@@ -116,6 +122,7 @@ impl PacketType {
             Self::ListApps => 0x44,
             Self::UiDump => 0x45,
             Self::ExitInfo => 0x46,
+            Self::IpCheck => 0x47,
             Self::Status => 0x50,
             Self::Error => 0x7F,
             Self::Unknown(v) => v,
@@ -624,6 +631,39 @@ impl ExitInfoReq {
     }
 }
 
+/// Запрос «IP-адрес телефона» (`IP_CHECK`, 0x47): `u32 request_id`, затем URL UTF-8 до конца. Ответ — `STATUS` 23
+/// `"<request_id> <JSON-объект>"`: `{"ok":true,"code":200,"body":"…","transport":"cellular","ms":312,"gateway":"…"}` или
+/// `{"ok":false,"error":"timeout",…}` (PROTOCOL.md «IP-адрес телефона (возможность 11)»).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IpCheckReq {
+    pub request_id: u32,
+    pub url: String,
+}
+
+impl IpCheckReq {
+    pub fn to_packet(&self) -> Packet {
+        let mut p = self.request_id.to_be_bytes().to_vec();
+        p.extend_from_slice(self.url.as_bytes());
+        Packet::new(PacketType::IpCheck, p)
+    }
+
+    pub fn from_payload(data: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor::new(data);
+        Ok(Self { request_id: c.u32()?, url: utf8(c.rest()) })
+    }
+}
+
+/// URL, который можно передать в `IP_CHECK` (те же правила проверяет телефон): только `https://`, не длиннее 512 байт,
+/// без пробелов и управляющих символов, непустой адрес без `user@`.
+pub fn valid_ip_check_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else { return false };
+    if url.len() > 512 || url.chars().any(|c| (c as u32) <= 0x20 || c as u32 == 0x7f) {
+        return false;
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    !authority.is_empty() && !authority.contains('@') && !authority.starts_with(':')
+}
+
 /// Имя пакета Android, которое можно передать в `LAUNCH_APP`: латинская буква, затем буквы, цифры, `_` и `.`,
 /// не длиннее 255 байт (те же правила проверяет телефон).
 pub fn valid_package(p: &str) -> bool {
@@ -838,6 +878,30 @@ mod tests {
         assert_eq!(ExitInfoReq::from_payload(&p.payload).unwrap(), e);
         assert!(ExitInfoReq::from_payload(&[0, 0, 0, 1, 0]).is_err());
         assert_eq!(PacketType::from_u8(0x45), PacketType::UiDump);
+    }
+
+    #[test]
+    fn ip_check_roundtrip_and_url_rules() {
+        let q = IpCheckReq { request_id: 0x0102_0304, url: "https://pynelo.mpd-system.top/api/v1/ip".into() };
+        let bytes = q.to_packet().encode();
+        assert_eq!(&bytes[..12], &[b'P', b'D', 0x47, 0, 0, 0, 0, 4 + q.url.len() as u8, 1, 2, 3, 4]);
+        let mut r = PacketReader::new();
+        r.push(&bytes);
+        let p = r.next_packet().unwrap();
+        assert_eq!(p.ptype, PacketType::IpCheck);
+        assert_eq!(IpCheckReq::from_payload(&p.payload).unwrap(), q);
+        assert!(IpCheckReq::from_payload(&[0, 0]).is_err());
+        assert_eq!(PacketType::from_u8(0x47), PacketType::IpCheck);
+        assert_eq!(PacketType::IpCheck.to_u8(), 0x47);
+        assert!(valid_ip_check_url("https://pynelo.mpd-system.top/api/v1/ip"));
+        assert!(valid_ip_check_url("https://1.2.3.4:8443?x=1"));
+        assert!(!valid_ip_check_url("http://pynelo.mpd-system.top/api/v1/ip"), "только https");
+        assert!(!valid_ip_check_url("https://"), "пустой адрес");
+        assert!(!valid_ip_check_url("https://user:pw@host/x"), "без user@");
+        assert!(!valid_ip_check_url("https://host/a b"), "без пробелов");
+        assert!(!valid_ip_check_url("https://host/\nx"), "без управляющих символов");
+        assert!(!valid_ip_check_url(&format!("https://h/{}", "a".repeat(600))), "не длиннее 512");
+        assert!(!valid_ip_check_url("file:///etc/passwd"));
     }
 
     #[test]

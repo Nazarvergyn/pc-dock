@@ -109,6 +109,8 @@ pub enum LaunchError {
     Unsupported,
     /// Некорректное имя пакета.
     BadPackage,
+    /// Некорректный URL для `IP_CHECK` (только `https://`, см. `packet::valid_ip_check_url`).
+    BadUrl,
 }
 
 #[derive(Debug)]
@@ -472,6 +474,23 @@ impl Session {
             return Err(LaunchError::BadPackage);
         }
         self.send_packet(ExitInfoReq { request_id, since_ms, package: package.to_string() }.to_packet());
+        Ok(())
+    }
+
+    /// Просит телефон сделать HTTPS GET по своей сети по умолчанию (`IP_CHECK`) — внешний IP телефона. Ответ придёт
+    /// событием `Status` с кодом 23 и `detail` = `"<request_id> <JSON>"`. Ошибка — сессия не активна, `caps::IP_CHECK`
+    /// не согласован или URL некорректен.
+    pub fn ip_check(&mut self, request_id: u32, url: &str) -> Result<(), LaunchError> {
+        if self.state != State::Active {
+            return Err(LaunchError::NotActive);
+        }
+        if self.negotiated_caps & caps::IP_CHECK == 0 {
+            return Err(LaunchError::Unsupported);
+        }
+        if !valid_ip_check_url(url) {
+            return Err(LaunchError::BadUrl);
+        }
+        self.send_packet(IpCheckReq { request_id, url: url.to_string() }.to_packet());
         Ok(())
     }
 

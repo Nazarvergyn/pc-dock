@@ -396,3 +396,35 @@ fn ui_dump_and_exit_info_only_when_agreed() {
     feed(&mut s, 20, &[Status { code: 20, detail: "5 1/1 no_service".into() }.to_packet()]);
     assert!(events(&mut s).contains(&Event::Status(Status { code: 20, detail: "5 1/1 no_service".into() })));
 }
+
+#[test]
+fn ip_check_only_when_agreed() {
+    // Старый телефон (без бита 11) — команда не уходит
+    let mut s = active_session();
+    assert_eq!(s.ip_check(1, "https://pynelo.mpd-system.top/api/v1/ip"), Err(LaunchError::Unsupported));
+    assert!(drain(&mut s).0.is_empty());
+
+    let cfg = Config { capabilities: Config::default().capabilities | caps::IP_CHECK, ..Config::default() };
+    let mut s = Session::new(cfg);
+    assert_eq!(s.ip_check(1, "https://x.y/ip"), Err(LaunchError::NotActive));
+    s.start(0);
+    let hello = Hello { version_max: 2, version_min: 2, capabilities: caps::VIDEO_JPEG | caps::IP_CHECK, role: Role::Device, name: "p".into() };
+    feed(&mut s, 10, &[hello.to_packet()]);
+    drain(&mut s);
+    events(&mut s);
+    assert_eq!(s.ip_check(2, "http://x.y/ip"), Err(LaunchError::BadUrl));
+    assert_eq!(s.ip_check(2, "https://a@x.y/ip"), Err(LaunchError::BadUrl));
+    assert!(drain(&mut s).0.is_empty(), "неверный URL не уходит");
+    assert_eq!(s.ip_check(7, "https://x.y/ip"), Ok(()));
+    let (streams, _) = drain(&mut s);
+    assert_eq!(streams.len(), 1);
+    let mut r = PacketReader::new();
+    r.push(&streams[0]);
+    let p = r.next_packet().unwrap();
+    assert_eq!(p.ptype, PacketType::IpCheck);
+    assert_eq!(IpCheckReq::from_payload(&p.payload).unwrap(), IpCheckReq { request_id: 7, url: "https://x.y/ip".into() });
+    // Ответ — обычный STATUS 23
+    let d = r#"7 {"ok":true,"code":200,"body":"{\"ip\":\"1.2.3.4\"}","transport":"cellular","ms":120}"#;
+    feed(&mut s, 20, &[Status { code: 23, detail: d.into() }.to_packet()]);
+    assert!(events(&mut s).contains(&Event::Status(Status { code: 23, detail: d.into() })));
+}

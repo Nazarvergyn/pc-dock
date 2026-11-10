@@ -146,6 +146,9 @@ class ScreenCaptureService : Service(), HostLink.Listener {
     // Элементы экрана (CAP_UI_TREE, UI_DUMP → STATUS 20, «экран изменился» → STATUS 21) и падения (CAP_EXIT_INFO → STATUS 22)
     @Volatile private var hostWantsUi = false
     @Volatile private var hostWantsExit = false
+    // IP-адрес телефона (CAP_IP_CHECK, IP_CHECK → STATUS 23)
+    @Volatile private var hostWantsIp = false
+    private val ipExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "ip-check") }
     // Дампы и причины завершения — по одному, не в потоке захвата (обход дерева — межпроцессные вызовы)
     private val uiExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "ui-tree") }
 
@@ -787,6 +790,7 @@ class ScreenCaptureService : Service(), HostLink.Listener {
         hostWantsApps = false
         hostWantsUi = false
         hostWantsExit = false
+        hostWantsIp = false
         stopUiChanges()
         stream = StreamConfig()
         Log.d(TAG, "USB подключён (#$connects): ${accessory.manufacturer} ${accessory.model}, жду HELLO от ПК")
@@ -816,6 +820,7 @@ class ScreenCaptureService : Service(), HostLink.Listener {
                 hostWantsApps = false
                 hostWantsUi = false
                 hostWantsExit = false
+                hostWantsIp = false
                 stopUiChanges()
             }
         }
@@ -953,6 +958,25 @@ class ScreenCaptureService : Service(), HostLink.Listener {
                 }
             }
 
+            Proto.T_IP_CHECK -> {
+                reactivateIfPaused("IP_CHECK")
+                val cmd = Messages.parseIpCheck(p.payload) ?: return
+                if (!hostWantsIp) {
+                    l.sendControl(Messages.status(Proto.STATUS_IP_CHECK, "${cmd.requestId} ${IpCheck.error("not_negotiated", "none", 0)}").encode())
+                    return
+                }
+                // Сеть — не в потоке захвата и не в очереди дампов экрана
+                ipExecutor.execute {
+                    val answer = try {
+                        IpCheck.run(this, cmd.url)
+                    } catch (e: Throwable) {
+                        IpCheck.error("io: " + e.javaClass.simpleName, "none", 0)
+                    }
+                    Log.d(TAG, "IP_CHECK #${cmd.requestId}: $answer")
+                    l.sendControl(Messages.status(Proto.STATUS_IP_CHECK, "${cmd.requestId} $answer").encode())
+                }
+            }
+
             else -> {} // PONG и неизвестные типы пропускаем
         }
     }
@@ -974,13 +998,14 @@ class ScreenCaptureService : Service(), HostLink.Listener {
         stream = StreamConfig()
         relayout("HELLO")
         var caps = Proto.CAP_VIDEO_JPEG or Proto.CAP_ROTATION or Proto.CAP_FOREGROUND or Proto.CAP_LAUNCH_APP or Proto.CAP_LIST_APPS or
-            Proto.CAP_UI_TREE or Proto.CAP_EXIT_INFO
+            Proto.CAP_UI_TREE or Proto.CAP_EXIT_INFO or Proto.CAP_IP_CHECK
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) caps = caps or Proto.CAP_AUDIO_PCM
         hostWantsForeground = hello.capabilities and Proto.CAP_FOREGROUND != 0
         hostWantsLaunch = hello.capabilities and Proto.CAP_LAUNCH_APP != 0
         hostWantsApps = hello.capabilities and Proto.CAP_LIST_APPS != 0
         hostWantsUi = hello.capabilities and Proto.CAP_UI_TREE != 0
         hostWantsExit = hello.capabilities and Proto.CAP_EXIT_INFO != 0
+        hostWantsIp = hello.capabilities and Proto.CAP_IP_CHECK != 0
         if (hostWantsUi) startUiChanges(l) else stopUiChanges()
         l.sendControl(Messages.hello(caps, NAME).encode())
         val lay = layout
@@ -1113,6 +1138,7 @@ class ScreenCaptureService : Service(), HostLink.Listener {
         Log.d(TAG, "Service onDestroy: кадров отправлено=$framesSent, подключений=$connects")
         stopUiChanges()
         uiExecutor.shutdownNow()
+        ipExecutor.shutdownNow()
         running = false
         isRunning = false
         projectionAlive = false

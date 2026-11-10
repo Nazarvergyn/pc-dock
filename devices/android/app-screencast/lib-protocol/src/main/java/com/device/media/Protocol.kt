@@ -31,6 +31,8 @@ object Proto {
     const val T_UI_DUMP = 0x45
     /** Причины завершения процессов приложения (хост → телефон): u32 request_id, u64 since_ms, пакет. Ответ — STATUS 22. */
     const val T_EXIT_INFO = 0x46
+    /** IP-адрес телефона (хост → телефон): u32 request_id, URL (https) UTF-8. Ответ — STATUS 23. */
+    const val T_IP_CHECK = 0x47
     const val T_STATUS = 0x50
     const val T_ERROR = 0x7F
 
@@ -47,6 +49,8 @@ object Proto {
     const val CAP_UI_TREE = 1 shl 9
     /** Телефон отдаёт причины завершения процессов приложения (EXIT_INFO → STATUS 22), если хост поставил бит. */
     const val CAP_EXIT_INFO = 1 shl 10
+    /** Телефон делает HTTPS GET по сети по умолчанию и отвечает телом и типом сети (IP_CHECK → STATUS 23), если хост поставил бит. */
+    const val CAP_IP_CHECK = 1 shl 11
 
     const val CODEC_VIDEO_JPEG = 1
     const val CODEC_AUDIO_PCM_S16LE = 1
@@ -71,6 +75,8 @@ object Proto {
     const val STATUS_UI_CHANGED = 21
     /** Ответ на EXIT_INFO: detail = "<request_id> <JSON-массив | unsupported | no_permission | invalid_package>". */
     const val STATUS_EXIT_INFO = 22
+    /** Ответ на IP_CHECK: detail = "<request_id> <JSON-объект>" (ok, code, body, transport, ms или ok=false, error). */
+    const val STATUS_IP_CHECK = 23
 }
 
 class Packet(val type: Int, val flags: Int, val payload: ByteArray) {
@@ -174,6 +180,8 @@ class LaunchApp(val requestId: Long, val packageName: String)
 
 class ExitInfoReq(val requestId: Long, val sinceMs: Long, val packageName: String)
 
+class IpCheckReq(val requestId: Long, val url: String)
+
 object Messages {
     /** LIST_APPS: u32 request_id. null — пакет повреждён. */
     fun parseListApps(payload: ByteArray): Long? = try {
@@ -192,6 +200,16 @@ object Messages {
         val since = b.long
         val name = ByteArray(b.remaining()).also { b.get(it) }.toString(Charsets.UTF_8)
         ExitInfoReq(id, since, name)
+    } catch (e: Exception) {
+        null
+    }
+
+    /** IP_CHECK: u32 request_id, затем URL UTF-8 до конца. null — пакет повреждён. */
+    fun parseIpCheck(payload: ByteArray): IpCheckReq? = try {
+        val b = ByteBuffer.wrap(payload)
+        val id = b.int.toLong() and 0xFFFFFFFFL
+        val url = ByteArray(b.remaining()).also { b.get(it) }.toString(Charsets.UTF_8)
+        IpCheckReq(id, url)
     } catch (e: Exception) {
         null
     }
