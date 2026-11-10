@@ -446,6 +446,35 @@ impl Session {
         Ok(())
     }
 
+    /// Просит телефон прислать элементы экрана (`UI_DUMP`). Ответ придёт событиями `Status` с кодом 20
+    /// (`"<request_id> <i>/<n> <часть>"`). Ошибка — сессия не активна или `caps::UI_TREE` не согласован.
+    pub fn ui_dump(&mut self, request_id: u32) -> Result<(), LaunchError> {
+        if self.state != State::Active {
+            return Err(LaunchError::NotActive);
+        }
+        if self.negotiated_caps & caps::UI_TREE == 0 {
+            return Err(LaunchError::Unsupported);
+        }
+        self.send_packet(ui_dump_packet(request_id));
+        Ok(())
+    }
+
+    /// Просит телефон прислать причины завершения процессов приложения после `since_ms` (`EXIT_INFO`). Ответ —
+    /// событие `Status` с кодом 22. Ошибка — сессия не активна, `caps::EXIT_INFO` не согласован или имя пакета неверно.
+    pub fn exit_info(&mut self, request_id: u32, since_ms: u64, package: &str) -> Result<(), LaunchError> {
+        if self.state != State::Active {
+            return Err(LaunchError::NotActive);
+        }
+        if self.negotiated_caps & caps::EXIT_INFO == 0 {
+            return Err(LaunchError::Unsupported);
+        }
+        if !valid_package(package) {
+            return Err(LaunchError::BadPackage);
+        }
+        self.send_packet(ExitInfoReq { request_id, since_ms, package: package.to_string() }.to_packet());
+        Ok(())
+    }
+
     // ----- команды ввода (PROTOCOL.md §8) -----
 
     fn with_input<R>(&mut self, f: impl FnOnce(&mut Input, &mut Vec<ControlRequest>) -> R) -> R {

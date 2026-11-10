@@ -27,6 +27,10 @@ object Proto {
     const val T_LAUNCH_APP = 0x43
     /** Список приложений с главным экраном (хост → телефон): u32 request_id. Ответ — STATUS 19. */
     const val T_LIST_APPS = 0x44
+    /** Элементы экрана (хост → телефон): u32 request_id. Ответ — STATUS 20 частями. */
+    const val T_UI_DUMP = 0x45
+    /** Причины завершения процессов приложения (хост → телефон): u32 request_id, u64 since_ms, пакет. Ответ — STATUS 22. */
+    const val T_EXIT_INFO = 0x46
     const val T_STATUS = 0x50
     const val T_ERROR = 0x7F
 
@@ -39,6 +43,10 @@ object Proto {
     const val CAP_LAUNCH_APP = 1 shl 7
     /** Телефон отдаёт список приложений с главным экраном (LIST_APPS, ответ STATUS 19), если хост поставил тот же бит. */
     const val CAP_LIST_APPS = 1 shl 8
+    /** Телефон отдаёт элементы экрана (UI_DUMP → STATUS 20) и сообщает «экран изменился» (STATUS 21), если хост поставил бит. */
+    const val CAP_UI_TREE = 1 shl 9
+    /** Телефон отдаёт причины завершения процессов приложения (EXIT_INFO → STATUS 22), если хост поставил бит. */
+    const val CAP_EXIT_INFO = 1 shl 10
 
     const val CODEC_VIDEO_JPEG = 1
     const val CODEC_AUDIO_PCM_S16LE = 1
@@ -57,6 +65,12 @@ object Proto {
     const val STATUS_LAUNCH_RESULT = 18
     /** Ответ на LIST_APPS: detail = "<request_id> <JSON-массив [{"package","label","icon"?}]>". */
     const val STATUS_APP_LIST = 19
+    /** Ответ на UI_DUMP частями: detail = "<request_id> <i>/<n> <часть>" (склеенные части — "xml …", "no_service", "no_window", "error …"). */
+    const val STATUS_UI_DUMP = 20
+    /** Экран изменился (не чаще 4 раз в секунду), detail = "". */
+    const val STATUS_UI_CHANGED = 21
+    /** Ответ на EXIT_INFO: detail = "<request_id> <JSON-массив | unsupported | no_permission | invalid_package>". */
+    const val STATUS_EXIT_INFO = 22
 }
 
 class Packet(val type: Int, val flags: Int, val payload: ByteArray) {
@@ -158,10 +172,26 @@ class SetStream(
 
 class LaunchApp(val requestId: Long, val packageName: String)
 
+class ExitInfoReq(val requestId: Long, val sinceMs: Long, val packageName: String)
+
 object Messages {
     /** LIST_APPS: u32 request_id. null — пакет повреждён. */
     fun parseListApps(payload: ByteArray): Long? = try {
         ByteBuffer.wrap(payload).int.toLong() and 0xFFFFFFFFL
+    } catch (e: Exception) {
+        null
+    }
+
+    /** UI_DUMP: u32 request_id. null — пакет повреждён. */
+    fun parseUiDump(payload: ByteArray): Long? = parseListApps(payload)
+
+    /** EXIT_INFO: u32 request_id, u64 since_ms, затем имя пакета UTF-8 до конца. null — пакет повреждён. */
+    fun parseExitInfo(payload: ByteArray): ExitInfoReq? = try {
+        val b = ByteBuffer.wrap(payload)
+        val id = b.int.toLong() and 0xFFFFFFFFL
+        val since = b.long
+        val name = ByteArray(b.remaining()).also { b.get(it) }.toString(Charsets.UTF_8)
+        ExitInfoReq(id, since, name)
     } catch (e: Exception) {
         null
     }

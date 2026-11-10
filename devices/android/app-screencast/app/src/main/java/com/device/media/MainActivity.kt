@@ -81,17 +81,21 @@ class MainActivity : AppCompatActivity() {
 
     private fun usageGranted() = ForegroundWatch.hasUsageAccess(this)
     private fun overlayGranted() = AppLauncher.canStartFromBackground(this)
-    private fun allPermsGranted() = usageGranted() && overlayGranted()
+    private fun uiGranted() = UiTreeService.enabledInSettings(this)
+    private fun allPermsGranted() = usageGranted() && overlayGranted() && uiGranted()
 
     /**
-     * Разрешения для компьютера (например, pynelo) — с состоянием и кнопками в системные настройки:
+     * Разрешения для компьютера (например, pynelo) — с состоянием и кнопкой в системные настройки (по одному: после
+     * возврата окно показывается снова со следующим недостающим):
      *  • «Доступ к истории использования» — видеть, какое приложение на экране (сценарии только в разрешённых приложениях);
-     *  • «Поверх других окон» — открывать приложение по команде компьютера (шаг «Открыть приложение»).
+     *  • «Поверх других окон» — открывать приложение по команде компьютера (шаг «Открыть приложение»);
+     *  • служба «Device Media: элементы экрана» (Специальные возможности) — видеть кнопки и надписи (нажатие по тексту).
      */
     private fun showPermissions() {
         val mark = { ok: Boolean -> if (ok) "✓ разрешено" else "✗ не разрешено" }
         val usage = usageGranted()
         val overlay = overlayGranted()
+        val ui = uiGranted()
         val b = AlertDialog.Builder(this)
             .setTitle("Разрешения для компьютера")
             .setMessage(
@@ -100,14 +104,27 @@ class MainActivity : AppCompatActivity() {
                     "  чтобы видеть, какое приложение открыто на экране (узнаётся только его имя, ничего не сохраняется).\n\n" +
                     "• Поверх других окон — ${mark(overlay)}\n" +
                     "  чтобы открывать приложение по команде компьютера (шаг «Открыть приложение»).\n\n" +
-                    "В открывшемся списке выберите «Device Media» → «Разрешить»."
+                    "• Элементы экрана (Специальные возможности) — ${mark(ui)}\n" +
+                    "  чтобы сценарий находил кнопки и надписи по тексту. Текст паролей не передаётся, с экранов " +
+                    "заблокированных хостом приложений ничего не передаётся, служба ничего не нажимает.\n\n" +
+                    "В открывшемся списке выберите «Device Media» → «Разрешить» (для элементов экрана — включите службу)."
             )
             .setCancelable(false)
-            .setNegativeButton(if (usage && overlay) "Готово" else "Позже") { _, _ -> continueLaunch() }
-        if (!usage) b.setPositiveButton("История использования") { _, _ -> openSettings(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
-        if (!overlay) {
+            .setNegativeButton(if (usage && overlay && ui) "Готово" else "Позже") { _, _ -> continueLaunch() }
+        when {
+            !usage -> b.setPositiveButton("История использования") { _, _ -> openSettings(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
+            !overlay -> {
+                val i = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+                b.setPositiveButton("Поверх других окон") { _, _ -> openSettings(i) }
+            }
+            !ui -> b.setPositiveButton("Специальные возможности") { _, _ -> openSettings(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+        }
+        // Если не хватает больше одного — второй кнопкой следующий (третий — после возврата)
+        if (!usage && !overlay) {
             val i = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
             b.setNeutralButton("Поверх других окон") { _, _ -> openSettings(i) }
+        } else if ((!usage || !overlay) && !ui) {
+            b.setNeutralButton("Специальные возможности") { _, _ -> openSettings(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
         }
         b.show()
     }

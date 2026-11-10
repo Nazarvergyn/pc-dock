@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Элементы экрана для компьютера (UiTreeService, PROTOCOL.md «Элементы экрана (возможность 9)»): только чтение окна.
+     Жестов нет (canPerformGestures не задан) — ввод идёт HID-устройствами AOA. События — только смена окна/содержимого
+     (сказать компьютеру «экран изменился»). flagReportViewIds — resource-id, как у uiautomator. -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagReportViewIds|flagIncludeNotImportantViews"
+    android:canRetrieveWindowContent="true"
+    android:notificationTimeout="200"
+    android:description="@string/ui_tree_description" />

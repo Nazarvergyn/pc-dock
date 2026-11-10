@@ -355,3 +355,44 @@ fn list_apps_request_when_agreed() {
     let (streams, _) = drain(&mut s);
     assert_eq!(streams, vec![vec![b'P', b'D', 0x44, 0, 0, 0, 0, 4, 0x0A, 0x0B, 0x0C, 0x0D]]);
 }
+
+#[test]
+fn ui_dump_and_exit_info_only_when_agreed() {
+    // Старый телефон (без битов 9 и 10) — команды не уходят
+    let mut s = active_session();
+    assert_eq!(s.ui_dump(1), Err(LaunchError::Unsupported));
+    assert_eq!(s.exit_info(1, 0, "com.example.shop"), Err(LaunchError::Unsupported));
+    assert!(drain(&mut s).0.is_empty());
+
+    let cfg = Config { capabilities: Config::default().capabilities | caps::UI_TREE | caps::EXIT_INFO, ..Config::default() };
+    let mut s = Session::new(cfg);
+    assert_eq!(s.ui_dump(1), Err(LaunchError::NotActive));
+    s.start(0);
+    let hello = Hello {
+        version_max: 2,
+        version_min: 2,
+        capabilities: caps::VIDEO_JPEG | caps::UI_TREE | caps::EXIT_INFO,
+        role: Role::Device,
+        name: "p".into(),
+    };
+    feed(&mut s, 10, &[hello.to_packet()]);
+    drain(&mut s);
+    events(&mut s);
+    assert_eq!(s.ui_dump(5), Ok(()));
+    assert_eq!(s.exit_info(6, 1_700_000_000_000, "com.x;reboot"), Err(LaunchError::BadPackage));
+    assert_eq!(s.exit_info(6, 1_700_000_000_000, "com.example.shop"), Ok(()));
+    let (streams, _) = drain(&mut s);
+    assert_eq!(streams.len(), 2);
+    assert_eq!(streams[0], vec![b'P', b'D', 0x45, 0, 0, 0, 0, 4, 0, 0, 0, 5]);
+    let mut r = PacketReader::new();
+    r.push(&streams[1]);
+    let p = r.next_packet().unwrap();
+    assert_eq!(p.ptype, PacketType::ExitInfo);
+    assert_eq!(
+        ExitInfoReq::from_payload(&p.payload).unwrap(),
+        ExitInfoReq { request_id: 6, since_ms: 1_700_000_000_000, package: "com.example.shop".into() }
+    );
+    // Ответы — обычные STATUS
+    feed(&mut s, 20, &[Status { code: 20, detail: "5 1/1 no_service".into() }.to_packet()]);
+    assert!(events(&mut s).contains(&Event::Status(Status { code: 20, detail: "5 1/1 no_service".into() })));
+}

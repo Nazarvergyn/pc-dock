@@ -26,6 +26,10 @@ pub mod caps {
     pub const LAUNCH_APP: u32 = 1 << 7;
     /// Телефон отдаёт список приложений с главным экраном (`LIST_APPS`, ответ — `STATUS` 19).
     pub const LIST_APPS: u32 = 1 << 8;
+    /// Телефон отдаёт элементы экрана (`UI_DUMP`, ответ — `STATUS` 20 частями) и сообщает «экран изменился» (`STATUS` 21).
+    pub const UI_TREE: u32 = 1 << 9;
+    /// Телефон отдаёт причины завершения процессов приложения (`EXIT_INFO`, ответ — `STATUS` 22; Android 11+).
+    pub const EXIT_INFO: u32 = 1 << 10;
 }
 
 /// Коды кодеков.
@@ -61,6 +65,10 @@ pub enum PacketType {
     LaunchApp,
     /// Список приложений с главным экраном (хост → телефон, возможность `caps::LIST_APPS`).
     ListApps,
+    /// Элементы экрана (хост → телефон, возможность `caps::UI_TREE`).
+    UiDump,
+    /// Причины завершения процессов приложения (хост → телефон, возможность `caps::EXIT_INFO`).
+    ExitInfo,
     Status,
     Error,
     /// Тип, неизвестный этой версии ядра (такие пакеты пропускаются).
@@ -83,6 +91,8 @@ impl PacketType {
             0x42 => Self::Wake,
             0x43 => Self::LaunchApp,
             0x44 => Self::ListApps,
+            0x45 => Self::UiDump,
+            0x46 => Self::ExitInfo,
             0x50 => Self::Status,
             0x7F => Self::Error,
             other => Self::Unknown(other),
@@ -104,6 +114,8 @@ impl PacketType {
             Self::Wake => 0x42,
             Self::LaunchApp => 0x43,
             Self::ListApps => 0x44,
+            Self::UiDump => 0x45,
+            Self::ExitInfo => 0x46,
             Self::Status => 0x50,
             Self::Error => 0x7F,
             Self::Unknown(v) => v,
@@ -581,6 +593,37 @@ pub fn list_apps_packet(request_id: u32) -> Packet {
     Packet::new(PacketType::ListApps, request_id.to_be_bytes().to_vec())
 }
 
+/// Запрос элементов экрана (`UI_DUMP`, 0x45): `u32 request_id`. Телефон отвечает `STATUS` 20 одной или несколькими
+/// частями `"<request_id> <i>/<n> <часть>"`; склеенные части — `"xml <дамп как у uiautomator>"`,
+/// `"no_service"`, `"no_window"` или `"error <причина>"`.
+pub fn ui_dump_packet(request_id: u32) -> Packet {
+    Packet::new(PacketType::UiDump, request_id.to_be_bytes().to_vec())
+}
+
+/// Запрос причин завершения процессов приложения (`EXIT_INFO`, 0x46): `u32 request_id`, `u64 since_ms` (мс с 1970,
+/// раньше — не присылать), затем имя пакета UTF-8 до конца. Ответ — `STATUS` 22 `"<request_id> <JSON | unsupported |
+/// no_permission | invalid_package>"`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExitInfoReq {
+    pub request_id: u32,
+    pub since_ms: u64,
+    pub package: String,
+}
+
+impl ExitInfoReq {
+    pub fn to_packet(&self) -> Packet {
+        let mut p = self.request_id.to_be_bytes().to_vec();
+        p.extend_from_slice(&self.since_ms.to_be_bytes());
+        p.extend_from_slice(self.package.as_bytes());
+        Packet::new(PacketType::ExitInfo, p)
+    }
+
+    pub fn from_payload(data: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor::new(data);
+        Ok(Self { request_id: c.u32()?, since_ms: c.u64()?, package: utf8(c.rest()) })
+    }
+}
+
 /// Имя пакета Android, которое можно передать в `LAUNCH_APP`: латинская буква, затем буквы, цифры, `_` и `.`,
 /// не длиннее 255 байт (те же правила проверяет телефон).
 pub fn valid_package(p: &str) -> bool {
@@ -779,6 +822,22 @@ mod tests {
         assert_eq!(negotiate(&host, &phone), Ok((2, caps::VIDEO_JPEG)));
         let old_phone = Hello { version_max: 1, version_min: 1, ..sample_hello() };
         assert_eq!(negotiate(&host, &old_phone), Err(error_code::UNSUPPORTED_VERSION));
+    }
+
+    #[test]
+    fn ui_dump_and_exit_info_roundtrip() {
+        let bytes = ui_dump_packet(0x0102_0304).encode();
+        assert_eq!(&bytes[..12], &[b'P', b'D', 0x45, 0, 0, 0, 0, 4, 1, 2, 3, 4]);
+        let e = ExitInfoReq { request_id: 9, since_ms: 1_700_000_000_123, package: "com.example.shop".into() };
+        let bytes = e.to_packet().encode();
+        assert_eq!(bytes[2], 0x46);
+        let mut r = PacketReader::new();
+        r.push(&bytes);
+        let p = r.next_packet().unwrap();
+        assert_eq!(p.ptype, PacketType::ExitInfo);
+        assert_eq!(ExitInfoReq::from_payload(&p.payload).unwrap(), e);
+        assert!(ExitInfoReq::from_payload(&[0, 0, 0, 1, 0]).is_err());
+        assert_eq!(PacketType::from_u8(0x45), PacketType::UiDump);
     }
 
     #[test]

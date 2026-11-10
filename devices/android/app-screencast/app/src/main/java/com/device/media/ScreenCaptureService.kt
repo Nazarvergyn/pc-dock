@@ -143,6 +143,11 @@ class ScreenCaptureService : Service(), HostLink.Listener {
     private var hostWantsLaunch = false
     // Список приложений по команде хоста (CAP_LIST_APPS, LIST_APPS → STATUS 19)
     private var hostWantsApps = false
+    // Элементы экрана (CAP_UI_TREE, UI_DUMP → STATUS 20, «экран изменился» → STATUS 21) и падения (CAP_EXIT_INFO → STATUS 22)
+    @Volatile private var hostWantsUi = false
+    @Volatile private var hostWantsExit = false
+    // Дампы и причины завершения — по одному, не в потоке захвата (обход дерева — межпроцессные вызовы)
+    private val uiExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "ui-tree") }
 
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -780,6 +785,9 @@ class ScreenCaptureService : Service(), HostLink.Listener {
         hostWantsForeground = false
         hostWantsLaunch = false
         hostWantsApps = false
+        hostWantsUi = false
+        hostWantsExit = false
+        stopUiChanges()
         stream = StreamConfig()
         Log.d(TAG, "USB подключён (#$connects): ${accessory.manufacturer} ${accessory.model}, жду HELLO от ПК")
         l.start()
@@ -806,6 +814,9 @@ class ScreenCaptureService : Service(), HostLink.Listener {
                 hostWantsForeground = false
                 hostWantsLaunch = false
                 hostWantsApps = false
+                hostWantsUi = false
+                hostWantsExit = false
+                stopUiChanges()
             }
         }
     }
@@ -903,6 +914,45 @@ class ScreenCaptureService : Service(), HostLink.Listener {
                 }, "list-apps").start()
             }
 
+            Proto.T_UI_DUMP -> {
+                reactivateIfPaused("UI_DUMP")
+                val id = Messages.parseUiDump(p.payload) ?: return
+                if (!hostWantsUi) {
+                    l.sendControl(Messages.status(Proto.STATUS_UI_DUMP, "$id 1/1 error not_negotiated").encode())
+                    return
+                }
+                uiExecutor.execute {
+                    val answer = try {
+                        UiTreeService.dump(this)
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "UI_DUMP: $e")
+                        "error " + e.javaClass.simpleName
+                    }
+                    val parts = UiTreeService.chunks(answer)
+                    for ((i, part) in parts.withIndex()) {
+                        l.sendControl(Messages.status(Proto.STATUS_UI_DUMP, "$id ${i + 1}/${parts.size} $part").encode())
+                    }
+                }
+            }
+
+            Proto.T_EXIT_INFO -> {
+                reactivateIfPaused("EXIT_INFO")
+                val cmd = Messages.parseExitInfo(p.payload) ?: return
+                if (!hostWantsExit) {
+                    l.sendControl(Messages.status(Proto.STATUS_EXIT_INFO, "${cmd.requestId} ${ExitInfo.UNSUPPORTED}").encode())
+                    return
+                }
+                uiExecutor.execute {
+                    val answer = try {
+                        ExitInfo.query(this, cmd.packageName, cmd.sinceMs)
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "EXIT_INFO: $e")
+                        "[]"
+                    }
+                    l.sendControl(Messages.status(Proto.STATUS_EXIT_INFO, "${cmd.requestId} $answer").encode())
+                }
+            }
+
             else -> {} // PONG и неизвестные типы пропускаем
         }
     }
@@ -923,11 +973,15 @@ class ScreenCaptureService : Service(), HostLink.Listener {
         sessionActive = true
         stream = StreamConfig()
         relayout("HELLO")
-        var caps = Proto.CAP_VIDEO_JPEG or Proto.CAP_ROTATION or Proto.CAP_FOREGROUND or Proto.CAP_LAUNCH_APP or Proto.CAP_LIST_APPS
+        var caps = Proto.CAP_VIDEO_JPEG or Proto.CAP_ROTATION or Proto.CAP_FOREGROUND or Proto.CAP_LAUNCH_APP or Proto.CAP_LIST_APPS or
+            Proto.CAP_UI_TREE or Proto.CAP_EXIT_INFO
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) caps = caps or Proto.CAP_AUDIO_PCM
         hostWantsForeground = hello.capabilities and Proto.CAP_FOREGROUND != 0
         hostWantsLaunch = hello.capabilities and Proto.CAP_LAUNCH_APP != 0
         hostWantsApps = hello.capabilities and Proto.CAP_LIST_APPS != 0
+        hostWantsUi = hello.capabilities and Proto.CAP_UI_TREE != 0
+        hostWantsExit = hello.capabilities and Proto.CAP_EXIT_INFO != 0
+        if (hostWantsUi) startUiChanges(l) else stopUiChanges()
         l.sendControl(Messages.hello(caps, NAME).encode())
         val lay = layout
         if (lay != null) {
@@ -944,6 +998,17 @@ class ScreenCaptureService : Service(), HostLink.Listener {
         }
         lastJpeg?.let { deliverFrame(it, lastPtsUs) }
         reportForeground(true)
+    }
+
+    /** «Экран изменился» → хосту (STATUS 21): служба элементов экрана зовёт не чаще 4 раз в секунду */
+    private fun startUiChanges(l: HostLink) {
+        UiTreeService.onChange = {
+            if (link === l && sessionActive && hostWantsUi) l.sendControl(Messages.status(Proto.STATUS_UI_CHANGED, "").encode())
+        }
+    }
+
+    private fun stopUiChanges() {
+        UiTreeService.onChange = null
     }
 
     /**
@@ -1046,6 +1111,8 @@ class ScreenCaptureService : Service(), HostLink.Listener {
 
     override fun onDestroy() {
         Log.d(TAG, "Service onDestroy: кадров отправлено=$framesSent, подключений=$connects")
+        stopUiChanges()
+        uiExecutor.shutdownNow()
         running = false
         isRunning = false
         projectionAlive = false
