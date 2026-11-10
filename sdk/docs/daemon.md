@@ -1,0 +1,168 @@
+# Демон `pcdockd` и протокол приложения
+
+Демон держит ферму в отдельном процессе и отдаёт её другим процессам и браузерам. Он ничего не решает про телефоны:
+аргументы превращает в `FarmConfig`, события фермы рассылает клиентам, команды клиентов передаёт ферме.
+
+## Запуск
+
+```bash
+pcdockd --auto --server-apk /opt/pcdock/server-adb-debug.apk
+```
+
+Без аргументов демон завершается с кодом 2 и просьбой указать `--auto` или `--phone`.
+
+### Параметры
+
+| Параметр | Назначение |
+|---|---|
+| `-a`, `--auto` | принимать всё найденное (USB, ADB) |
+| `--phone <спец>` | закреплённый телефон (можно несколько раз): `usb`, `usb:1-2.3`, `usb:СЕРИЙНИК`, `adb:СЕРИЙНИК`, `serial:ПУТЬ`. Без `--auto` это «только эти» |
+| `--except <спец>` | исключить при `--auto`: семейство, `usb:1-2.3`, `adb:СЕРИЙНИК`, серийник |
+| `--server-apk <файл>` | APK серверного процесса для ADB (`server-adb-debug.apk`); или переменная `PCDOCK_SERVER_APK` |
+| `--vid <0x....>` | добавить производителя USB (VID в шестнадцатеричном виде), можно несколько раз |
+| `--prefer <СЕРИЙНИК=usb\|adb\|serial>` | путь для отдельного телефона, можно несколько раз |
+| `--no-fallback` | не переходить на другой путь, если выбранный не стал рабочим |
+| `--no-usb`, `--no-adb` | выключить семейство при `--auto` |
+| `--serial` | искать serial-трубы (по умолчанию выключено) |
+| `--token <пароль>` | пароль для клиентов; или переменная `PCDOCK_TOKEN` |
+| `--tcp <адрес>` / `--no-tcp` | TCP (по умолчанию `127.0.0.1:9001`) |
+| `--ws <адрес>` / `--no-ws` | WebSocket (по умолчанию `127.0.0.1:9002`) |
+| `--local <имя>` / `--no-local` | локальная труба (по умолчанию `pcdock`) |
+| `--name <имя>` | имя хоста в рукопожатии (по умолчанию `pcdockd/1.0`) |
+| `--audio` | включить звук у новых телефонов |
+| `-v`, `-vv` | подробные логи (`debug`, `trace`); также переменная `RUST_LOG` |
+
+Известная особенность: параметр `--video` существует, но по умолчанию включён и выключить видео флагом нельзя (звук включается
+`--audio`); управлять потоком можно командой клиента `SetStream`.
+
+### Слушатели
+
+- **TCP**: поток пакетов с конвертом (ниже). Для программ любого языка.
+- **WebSocket**: текстовые фреймы — JSON, бинарные — кадры. Для браузеров.
+- **Локальная труба**: имя по умолчанию `pcdock`. Linux: абстрактный unix-сокет `@pcdock`; Windows: именованный канал
+  `\\.\pipe\pcdock`; macOS: сокет `/tmp/pcdock`.
+
+**Безопасность:** по сокету можно смотреть экран и управлять телефоном. Без пароля демон слушает только `localhost`: попытка
+указать другой адрес без `--token` заканчивается ошибкой запуска (код 2). С паролем клиент первым сообщением шлёт `Auth`.
+Шифрования нет: наружу выставляйте только через защищённый туннель (SSH, VPN, обратный прокси с TLS).
+
+## Протокол приложения
+
+Команды и события это JSON-объекты; кадры и звук это бинарные пакеты. Номер телефона во всех сообщениях `phone`.
+
+### Конверт
+
+- **TCP и локальная труба.** Каждый пакет: `u32` длина (little-endian, считая байт типа и тело), затем байт типа и тело.
+  Тип `0` JSON, `1` видео, `2` звук.
+- **WebSocket.** Текстовый фрейм JSON; бинарный фрейм кадр (видео или звук).
+
+Ограничение WebSocket: у бинарных фреймов нет байта типа, видео и звук различаются только размером шапки и тем, что вы
+подписались. Звук по WebSocket не рекомендуется; для звука берите TCP или локальную трубу.
+
+### Видеопакет (тип 1; бинарный фрейм в WebSocket)
+
+| Смещение | Размер | Поле |
+|---|---|---|
+| 0 | 4 | номер телефона (u32 LE) |
+| 4 | 8 | порядковый номер кадра (u64 LE): пропуск значит потерю |
+| 12 | 1 | кодек (1 = JPEG) |
+| 13 | 1 | ключевой кадр (0/1) |
+| 14 | 8 | метка времени, мкс (u64 LE) |
+| 22 | … | JPEG |
+
+### Звуковой пакет (тип 2)
+
+`u32 LE` номер телефона, `u64 LE` метка времени (мкс), затем PCM 16 бит, little-endian, частота и каналы из `AudioConfig`.
+
+### Команды клиента (`"op"`)
+
+Пароль, если задан `--token`, должен идти первым.
+
+| `op` | Поля | Действие |
+|---|---|---|
+| `Auth` | `token` | авторизация |
+| `List` | | список номеров телефонов |
+| `Watch` / `Unwatch` | `phone` | подписаться на кадры / отписаться |
+| `TouchEx` | `phone, cid, phase, x, y, width?, height?, pressure?` | касание: `phase` 0 down, 1 move, 2 up, 3 cancel; `x,y,…` доли 0..1; `width`, `height`, `pressure` можно опустить (null) |
+| `CursorMoveAbs` | `phone, x, y` | курсор в точку (доли 0..1) |
+| `CursorMoveRel` | `phone, dx, dy` | курсор на сдвиг |
+| `CursorResync` | `phone` | заново выровнять курсор |
+| `MouseButton` | `phone, button, down` | `button`: 0 левая, 1 правая, 2 средняя |
+| `Scroll` / `ScrollH` | `phone, ticks` | прокрутка |
+| `Key` | `phone, usage, down` | клавиша, код USB HID |
+| `DeviceEnable` | `phone, kind, on` | `kind`: 0 касание, 1 мышь, 2 клавиатура |
+| `ReleaseAll` | `phone` | отпустить всё |
+| `RequestFrame` | `phone` | повторить последний кадр |
+| `Wake` | `phone` | включить экран |
+| `SetStream` | `phone, video, audio` | включить или выключить видео и звук |
+
+Пример: `{"op":"TouchEx","phone":1,"cid":0,"phase":0,"x":0.5,"y":0.4,"width":null,"height":null,"pressure":0.7}`.
+
+### События сервера (`"ev"`)
+
+События о телефонах `Appeared`, `State`, `Lost` приходят **всем** клиентам. Остальные только тем, кто подписан на этот телефон
+(`Watch`).
+
+| `ev` | Поля |
+|---|---|
+| `Authed` | пароль принят |
+| `Phones` | `phones`: список номеров (ответ на `List`) |
+| `Watched` | `phone`, `on` |
+| `Appeared` | `phone, transport, address, serial` |
+| `State` | `phone, state, detail` |
+| `Lost` | `phone` |
+| `Connected` | `phone, version, caps, name` |
+| `Display` | `phone, stream_w, stream_h, screen_w, screen_h, dpi, rotation` |
+| `AudioConfig` | `phone, codec, rate, channels` |
+| `Status` | `phone, code, detail` |
+| `PeerSilent`, `Malformed`, `Disconnected`, `LinkDown`, `Warning` | `phone` и сведения |
+| `Error` | `detail` (плохая команда, нет такого телефона, нужна авторизация, неверный токен) |
+
+## Пример клиента на Python (TCP)
+
+```python
+import json, socket, struct
+
+s = socket.create_connection(("127.0.0.1", 9001))
+
+def send(msg):
+    body = b"\x00" + json.dumps(msg).encode()          # тип 0 = JSON
+    s.sendall(struct.pack("<I", len(body)) + body)
+
+def recv():
+    n = struct.unpack("<I", s.recv(4, socket.MSG_WAITALL))[0]
+    data = s.recv(n, socket.MSG_WAITALL)
+    return data[0], data[1:]                            # (тип, тело)
+
+# send({"op": "Auth", "token": "..."})                  # если демон запущен с токеном
+send({"op": "List"})
+send({"op": "Watch", "phone": 1})
+while True:
+    kind, body = recv()
+    if kind == 0:
+        print(json.loads(body))
+    elif kind == 1:
+        phone, seq, codec, key, pts = struct.unpack_from("<IQBBQ", body)
+        jpeg = body[22:]
+        print(f"кадр {seq} от {phone}: {len(jpeg)} байт")
+```
+
+## Пример клиента в браузере (WebSocket)
+
+```html
+<img id="screen"><script>
+const ws = new WebSocket("ws://127.0.0.1:9002");
+ws.binaryType = "blob";
+ws.onopen = () => ws.send(JSON.stringify({op: "Watch", phone: 1}));
+ws.onmessage = async (e) => {
+  if (typeof e.data === "string") { console.log(JSON.parse(e.data)); return; }
+  const buf = await e.data.arrayBuffer();
+  document.getElementById("screen").src = URL.createObjectURL(new Blob([buf.slice(22)], {type: "image/jpeg"}));
+};
+// нажатие по картинке: доли от её размера
+document.getElementById("screen").onclick = (ev) => {
+  const r = ev.target.getBoundingClientRect(), x = (ev.clientX - r.left) / r.width, y = (ev.clientY - r.top) / r.height;
+  for (const phase of [0, 2]) ws.send(JSON.stringify({op: "TouchEx", phone: 1, cid: 0, phase, x, y, width: null, height: null, pressure: null}));
+};
+</script>
+```

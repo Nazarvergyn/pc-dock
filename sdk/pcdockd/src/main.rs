@@ -218,10 +218,23 @@ fn main() {
     }
 
     log::info!("pcdockd работает, трубки: {:?}", serve.daemon().lock().unwrap().phones());
-    // Воркеры и слушатели живут в своих потоках; главный ждёт вечно.
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(3600));
+    // Воркеры и слушатели живут в своих потоках; главный ждёт сигнала завершения (Ctrl+C, SIGTERM).
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    if let Err(e) = ctrlc::set_handler(move || {
+        let _ = stop_tx.send(());
+    }) {
+        log::warn!("обработчик завершения не встал ({e}): при остановке телефоны не будут возвращены в обычный режим");
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        }
     }
+    let _ = stop_rx.recv();
+    log::info!("завершаюсь: останавливаю телефоны и возвращаю их в обычный режим");
+    // Подменяем ферму пустой и выбрасываем прежнюю: потоки телефонов останавливаются, USB сбрасывается.
+    let farm = serve.daemon().clone();
+    let old = std::mem::replace(&mut *farm.lock().unwrap(), Farm::new());
+    drop(old);
+    log::info!("готово");
 }
 
 #[cfg(test)]
