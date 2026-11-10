@@ -38,6 +38,11 @@ struct Args {
     #[arg(long = "no-serial")]
     no_serial: bool,
 
+    /// Пароль для клиентов (первое сообщение `{"op":"Auth","token":"…"}`). Можно задать переменной
+    /// `PCDOCK_TOKEN`. Без него слушать можно только на localhost.
+    #[arg(long)]
+    token: Option<String>,
+
     /// Слушать TCP (протокол с конвертом). Пусто = не слушать.
     #[arg(long, default_value = "127.0.0.1:9001")]
     tcp: Option<String>,
@@ -69,6 +74,12 @@ struct Args {
     video: bool,
     #[arg(long, default_value_t = false)]
     audio: bool,
+}
+
+/// Адрес только для этого компьютера (`127.0.0.1:…`, `localhost:…`, `[::1]:…`).
+fn is_loopback(addr: &str) -> bool {
+    let host = addr.rsplit_once(':').map_or(addr, |(h, _)| h);
+    matches!(host.trim_matches(['[', ']']), "127.0.0.1" | "localhost" | "::1") || host.starts_with("127.")
 }
 
 fn parse_vid(s: &str) -> Result<u16, String> {
@@ -135,7 +146,20 @@ fn main() {
         }
     };
 
-    let serve = Serve::new(daemon);
+    let token = args.token.clone().or_else(|| std::env::var("PCDOCK_TOKEN").ok()).filter(|t| !t.is_empty());
+    // Без пароля наружу не слушаем: по сокету можно управлять телефоном и смотреть его экран.
+    if token.is_none() {
+        for (name, addr) in [("--tcp", &args.tcp), ("--ws", &args.ws)] {
+            let on = (name == "--tcp" && !args.no_tcp) || (name == "--ws" && !args.no_ws);
+            if let (true, Some(a)) = (on, addr.as_deref()) {
+                if !a.is_empty() && !is_loopback(a) {
+                    log::error!("{name} {a}: слушать не на localhost можно только с паролем (--token или PCDOCK_TOKEN)");
+                    std::process::exit(2);
+                }
+            }
+        }
+    }
+    let serve = Serve::with_token(daemon, token);
     if !args.no_tcp {
         match args.tcp.as_deref().unwrap_or("") {
             "" => {}
@@ -168,5 +192,20 @@ fn main() {
     // Воркеры и слушатели живут в своих потоках; главный ждёт вечно.
     loop {
         std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_loopback;
+
+    #[test]
+    fn loopback_detection() {
+        for a in ["127.0.0.1:9001", "localhost:1", "[::1]:9", "127.0.0.2:5"] {
+            assert!(is_loopback(a), "{a}");
+        }
+        for a in ["0.0.0.0:9001", "192.168.1.5:9001", ":9001", "example.com:1"] {
+            assert!(!is_loopback(a), "{a}");
+        }
     }
 }

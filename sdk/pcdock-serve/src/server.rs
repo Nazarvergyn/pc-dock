@@ -35,6 +35,8 @@ enum OutMsg {
 struct Client {
     tx: SyncSender<OutMsg>,
     watched: HashSet<PhoneId>,
+    /// Прошёл ли клиент проверку токена (без токена демона — всегда да).
+    authed: bool,
 }
 
 type Clients = Arc<Mutex<HashMap<u64, Client>>>;
@@ -46,14 +48,22 @@ pub struct Serve {
     daemon: Arc<Mutex<Farm>>,
     clients: Clients,
     next_id: Arc<Mutex<u64>>,
+    token: Option<Arc<str>>,
 }
 
 impl Serve {
     pub fn new(daemon: Farm) -> Self {
+        Self::with_token(daemon, None)
+    }
+
+    /// С токеном: клиент первым сообщением шлёт `{"op":"Auth","token":"…"}`, до этого ему не отвечают
+    /// и событий не присылают.
+    pub fn with_token(daemon: Farm, token: Option<String>) -> Self {
         let serve = Self {
             daemon: Arc::new(Mutex::new(daemon)),
             clients: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(Mutex::new(1)),
+            token: token.filter(|t| !t.is_empty()).map(Arc::from),
         };
         serve.spawn_pump();
         serve
@@ -68,7 +78,8 @@ impl Serve {
         let mut next = self.next_id.lock().unwrap();
         let id = *next;
         *next += 1;
-        self.clients.lock().unwrap().insert(id, Client { tx, watched: HashSet::new() });
+        let authed = self.token.is_none();
+        self.clients.lock().unwrap().insert(id, Client { tx, watched: HashSet::new(), authed });
         id
     }
 
@@ -78,6 +89,30 @@ impl Serve {
 
     /// Разбирает команду клиента. Отвечает напрямую в его канал.
     fn handle(&self, client: u64, msg: ClientMsg) {
+        if let ClientMsg::Auth { token } = &msg {
+            let ok = match &self.token {
+                Some(want) => constant_time_eq(want.as_bytes(), token.as_bytes()),
+                None => true,
+            };
+            if ok {
+                if let Some(c) = self.clients.lock().unwrap().get_mut(&client) {
+                    c.authed = true;
+                }
+                return self.send_json(client, ServerMsg::Authed);
+            }
+            // Подбор пароля не должен идти быстро.
+            thread::sleep(Duration::from_millis(500));
+            return self.send_json(client, ServerMsg::Error { detail: "неверный токен".into() });
+        }
+        let authed = self.clients.lock().unwrap().get(&client).is_some_and(|c| c.authed);
+        if !authed {
+            return self.send_json(
+                client,
+                ServerMsg::Error {
+                    detail: "нужна авторизация: первым пошлите op=Auth".into()
+                },
+            );
+        }
         let reply = |m: ServerMsg| self.send_json(client, m);
         let err = |detail: String| self.send_json(client, ServerMsg::Error { detail });
         let mut daemon = self.daemon.lock().unwrap();
@@ -369,7 +404,7 @@ fn route(clients: &Clients, ev: FarmEvent) {
             let (_, msg) = map_daemon_event(ev);
             let text =
                 serde_json::to_string(&msg).unwrap_or_else(|_| r#"{"ev":"Error","detail":"encode"}"#.into());
-            for c in map.values() {
+            for c in map.values().filter(|c| c.authed) {
                 let _ = c.tx.send(OutMsg::Json(text.clone()));
             }
         }
@@ -378,7 +413,7 @@ fn route(clients: &Clients, ev: FarmEvent) {
             let text =
                 serde_json::to_string(&msg).unwrap_or_else(|_| r#"{"ev":"Error","detail":"encode"}"#.into());
             for c in map.values() {
-                if c.watched.contains(&phone) {
+                if c.authed && c.watched.contains(&phone) {
                     let _ = c.tx.send(OutMsg::Json(text.clone()));
                 }
             }
@@ -431,6 +466,15 @@ fn map_daemon_event(ev: FarmEvent) -> (PhoneId, ServerMsg) {
 
 /// Команда протокола в команду демона. Коды: kind 0 тач, 1 мышь, 2 клавиатура;
 /// phase 0/1/2/3 down/move/up/cancel; button 0/1/2 левая/правая/средняя.
+/// Сравнение без раннего выхода: время не зависит от того, сколько байт совпало.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = (a.len() ^ b.len()) as u8;
+    for i in 0..a.len().max(b.len()) {
+        diff |= a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0);
+    }
+    diff == 0
+}
+
 fn map_input(msg: ClientMsg) -> Result<(PhoneId, InputCmd), String> {
     let bad = |what: &str| format!("плохая команда: {what}");
     let parse_kind = |k: u32| match k {
@@ -472,7 +516,7 @@ fn map_input(msg: ClientMsg) -> Result<(PhoneId, InputCmd), String> {
         ClientMsg::RequestFrame { phone } => (phone, InputCmd::RequestFrame),
         ClientMsg::Wake { phone } => (phone, InputCmd::Wake),
         ClientMsg::SetStream { phone, video, audio } => (phone, InputCmd::SetStream { video, audio }),
-        ClientMsg::List | ClientMsg::Watch { .. } | ClientMsg::Unwatch { .. } => {
+        ClientMsg::Auth { .. } | ClientMsg::List | ClientMsg::Watch { .. } | ClientMsg::Unwatch { .. } => {
             return Err(bad("не команда ввода"))
         }
     })

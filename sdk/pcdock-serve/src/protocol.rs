@@ -11,6 +11,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "op")]
 pub enum ClientMsg {
+    /// Пароль. Если демон запущен с токеном, это должно быть первое сообщение клиента.
+    Auth {
+        token: String,
+    },
     /// Список трубок.
     List,
     /// Подписаться на кадры трубки / отписаться.
@@ -87,6 +91,8 @@ pub enum ClientMsg {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "ev")]
 pub enum ServerMsg {
+    /// Пароль принят.
+    Authed,
     Phones {
         phones: Vec<u32>,
     },

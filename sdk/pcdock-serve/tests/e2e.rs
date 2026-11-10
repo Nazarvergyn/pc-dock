@@ -123,7 +123,7 @@ fn ws_send<S>(ws: &mut tungstenite::WebSocket<S>, msg: &ClientMsg)
 where
     S: std::io::Read + std::io::Write,
 {
-    ws.send(tungstenite::Message::Text(serde_json::to_string(msg).unwrap().into())).unwrap();
+    ws.send(tungstenite::Message::Text(serde_json::to_string(msg).unwrap())).unwrap();
 }
 
 fn ws_next_json<S>(ws: &mut tungstenite::WebSocket<S>) -> ServerMsg
@@ -239,4 +239,30 @@ fn local_watch_and_frame() {
     assert_eq!(kind, PKG_VIDEO);
     let (phone, seq, _, _, pts, _) = pcdock_serve::protocol::decode_video(&body).unwrap();
     assert_eq!((phone, seq, pts), (5, 1, 30));
+}
+
+#[test]
+fn token_is_required_before_anything_else() {
+    let serve = Serve::with_token(Farm::new(), Some("s3cret".into()));
+    let addr = serve.run_tcp("127.0.0.1:0").unwrap();
+    let mut sock = TcpStream::connect(addr).unwrap();
+    sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+
+    // Без пароля команды не исполняются.
+    send_json(&mut sock, &ClientMsg::List);
+    let (_, body) = read_envelope(&mut sock);
+    assert!(matches!(serde_json::from_slice::<ServerMsg>(&body).unwrap(), ServerMsg::Error { .. }));
+
+    // Неверный пароль отклоняется.
+    send_json(&mut sock, &ClientMsg::Auth { token: "wrong".into() });
+    let (_, body) = read_envelope(&mut sock);
+    assert!(matches!(serde_json::from_slice::<ServerMsg>(&body).unwrap(), ServerMsg::Error { .. }));
+
+    // Верный открывает доступ.
+    send_json(&mut sock, &ClientMsg::Auth { token: "s3cret".into() });
+    let (_, body) = read_envelope(&mut sock);
+    assert_eq!(serde_json::from_slice::<ServerMsg>(&body).unwrap(), ServerMsg::Authed);
+    send_json(&mut sock, &ClientMsg::List);
+    let (_, body) = read_envelope(&mut sock);
+    assert_eq!(serde_json::from_slice::<ServerMsg>(&body).unwrap(), ServerMsg::Phones { phones: vec![] });
 }
