@@ -2,7 +2,7 @@
 //!
 //! Режимы: `--auto` находит всё сам (USB, ADB, serial-трубы),
 //! без него — явный список `--phone`. С `--auto` работают `--except`
-//! и `--no-usb/--no-adb/--no-serial`; без `--auto` `--phone` это «только эти».
+//! и `--no-usb/--no-adb` (serial — только с `--serial`); без `--auto` `--phone` это «только эти».
 
 use clap::Parser;
 use pcdock_farm::{Farm, FarmConfig, PhoneSpec};
@@ -47,8 +47,10 @@ struct Args {
     no_usb: bool,
     #[arg(long = "no-adb")]
     no_adb: bool,
-    #[arg(long = "no-serial")]
-    no_serial: bool,
+    /// Искать serial-трубы (ttyACM, ttyUSB). По умолчанию выключено: порты открываются и получают байты
+    /// протокола, а на них могут сидеть чужие устройства.
+    #[arg(long = "serial")]
+    serial: bool,
 
     /// Пароль для клиентов (первое сообщение `{"op":"Auth","token":"…"}`). Можно задать переменной
     /// `PCDOCK_TOKEN`. Без него слушать можно только на localhost.
@@ -156,7 +158,7 @@ fn main() {
         pinned,
         usb: !args.no_usb,
         adb: !args.no_adb,
-        serial: !args.no_serial,
+        serial: args.serial,
         ..FarmConfig::default()
     };
     // Ферма стартует пустой: телефоны подхватываются по мере появления (plug&play).

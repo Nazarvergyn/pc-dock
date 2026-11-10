@@ -52,6 +52,27 @@ fn main() {
         }
         return;
     }
+    if has("--hotplug") {
+        // Слушает события подключения указанное число секунд и печатает, когда они приходят.
+        use pcdock_core::link::Discovery;
+        let mut d = match pcdock_usb::UsbDiscovery::new(ANDROID_VIDS.to_vec()) {
+            Ok(d) => d,
+            Err(e) => return eprintln!("USB недоступен: {e}"),
+        };
+        println!("события подключения: {}", if d.has_hotplug() { "есть" } else { "нет (только опрос)" });
+        let t0 = std::time::Instant::now();
+        while t0.elapsed().as_secs() < seconds {
+            if d.changed() {
+                println!(
+                    "[{:>5.1} с] изменение: {:?}",
+                    t0.elapsed().as_secs_f32(),
+                    d.scan().iter().map(|s| s.address.to_string()).collect::<Vec<_>>()
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        return;
+    }
     if has("--list") {
         match list_phones(&ANDROID_VIDS, has("--serials")) {
             Ok(phones) if phones.is_empty() => println!("телефонов не видно"),

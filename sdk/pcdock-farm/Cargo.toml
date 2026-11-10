@@ -7,11 +7,12 @@ edition = "2021"
 pcdock-core = { path = "../pcdock-core" }
 pcdock-usb = { path = "../pcdock-usb", optional = true }
 pcdock-adb = { path = "../pcdock-adb", optional = true }
+pcdock-serial = { path = "../pcdock-serial", optional = true }
 serde_json = { version = "1", optional = true }
 
 [features]
 # Готовая настройка с USB и ADB (`FarmConfig`, фабрика каналов). Без неё ферма — только ядро и интерфейсы.
 default = ["transports"]
-transports = ["dep:pcdock-usb", "dep:pcdock-adb"]
+transports = ["dep:pcdock-usb", "dep:pcdock-adb", "dep:pcdock-serial"]
 # Настройка из JSON (`FarmConfig::from_json`): для C ABI и файлов настроек.
 json = ["transports", "dep:serde_json"]

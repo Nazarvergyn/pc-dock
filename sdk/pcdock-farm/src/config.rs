@@ -36,6 +36,8 @@ pub struct FarmConfig {
     pub adb_local_port: u16,
     /// APK серверного процесса для ADB-режима (`server-adb`). Без него ADB-телефоны не подключаются.
     pub server_apk: Option<std::path::PathBuf>,
+    /// Скорость последовательных труб (у USB-CDC не влияет).
+    pub serial_baud: u32,
     pub every: Duration,
     pub lost_after: Duration,
     /// Предпочтение транспортов, если один телефон виден по нескольким.
@@ -58,10 +60,11 @@ impl Default for FarmConfig {
             pinned: Vec::new(),
             usb: true,
             adb: true,
-            serial: true,
+            serial: false,
             vendor_ids: ANDROID_VIDS.to_vec(),
             adb_server: None,
             adb_local_port: 47000,
+            serial_baud: pcdock_serial::DEFAULT_BAUD,
             server_apk: std::env::var_os("PCDOCK_SERVER_APK").map(Into::into),
             every: d.every,
             lost_after: d.lost_after,
@@ -122,6 +125,10 @@ impl FarmConfig {
                         .collect::<Result<_, _>>()?
                 }
                 "adb_server" => cfg.adb_server = Some(str_of(k, v)?),
+                "serial_baud" => {
+                    cfg.serial_baud =
+                        u32::try_from(num_of(k, v)?).map_err(|_| "serial_baud: слишком много".to_string())?
+                }
                 "server_apk" => cfg.server_apk = Some(str_of(k, v)?.into()),
                 "adb_local_port" => {
                     cfg.adb_local_port =
@@ -197,7 +204,7 @@ impl Farm {
             providers.push(Box::new(pcdock_adb::AdbDiscovery::new(adb)));
         }
         if cfg.serial {
-            warnings.push("serial-трубы: транспорт не готов, пропускаю".into());
+            providers.push(Box::new(pcdock_serial::SerialDiscovery));
         }
         let discovery = DiscoveryConfig {
             rules: Rules { auto: cfg.auto, except: cfg.except.clone(), pinned: cfg.pinned.clone() },
@@ -212,6 +219,7 @@ impl Farm {
             next_adb_port: cfg.adb_local_port,
             adb_server: cfg.adb_server.clone(),
             server_apk: cfg.server_apk.clone(),
+            serial_baud: cfg.serial_baud,
         };
         let mut farm = Farm::new();
         farm.enable_discovery(providers, Box::new(factory), discovery);
@@ -225,6 +233,7 @@ struct DefaultFactory {
     next_adb_port: u16,
     adb_server: Option<String>,
     server_apk: Option<std::path::PathBuf>,
+    serial_baud: u32,
 }
 
 impl LinkFactory for DefaultFactory {
@@ -253,7 +262,11 @@ impl LinkFactory for DefaultFactory {
                     .with_server(adb, pcdock_adb::ServerSpec { apk, socket: "pcdock".into() });
                 Ok(Box::new(link))
             }
-            Transport::Serial => Err("serial-транспорт не готов".into()),
+            Transport::Serial => Ok(Box::new(pcdock_serial::SerialLink::open(
+                self.session.clone(),
+                s.address.clone(),
+                self.serial_baud,
+            ))),
         }
     }
 }

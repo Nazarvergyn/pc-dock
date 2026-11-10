@@ -431,7 +431,9 @@ impl Farm {
     fn run_discovery(&mut self, force: bool, out: &mut Vec<FarmEvent>) {
         let Some(mut auto) = self.auto.take() else { return };
         let now = Instant::now();
-        if !force && auto.last_scan.is_some_and(|t| now.duration_since(t) < auto.cfg.every) {
+        // Источник с событиями просит опросить раньше срока (все спрашиваем, чтобы сбросить их признаки).
+        let urgent = auto.providers.iter_mut().fold(false, |acc, p| p.changed() | acc);
+        if !force && !urgent && auto.last_scan.is_some_and(|t| now.duration_since(t) < auto.cfg.every) {
             self.auto = Some(auto);
             return;
         }
@@ -1374,6 +1376,44 @@ mod tests {
         let transports: Vec<Transport> = got.iter().map(|(_, t)| *t).collect();
         assert!(transports.contains(&Transport::Adb) && transports.contains(&Transport::Usb), "{got:?}");
         assert_eq!(f.phones().len(), 2);
+    }
+
+    /// Источник, у которого признак изменения выставляет тест.
+    struct EventScan {
+        seen: Arc<Mutex<Vec<Sighting>>>,
+        changed: Arc<std::sync::atomic::AtomicBool>,
+        scans: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Discovery for EventScan {
+        fn scan(&mut self) -> Vec<Sighting> {
+            self.scans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.seen.lock().unwrap().clone()
+        }
+        fn changed(&mut self) -> bool {
+            self.changed.swap(false, std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[test]
+    fn hotplug_event_triggers_a_scan_before_the_interval() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let changed = Arc::new(AtomicBool::new(false));
+        let scans = Arc::new(AtomicUsize::new(0));
+        let mut f = Farm::new();
+        let cfg = DiscoveryConfig { every: Duration::from_secs(3600), ..Default::default() };
+        let src = EventScan { seen: seen.clone(), changed: changed.clone(), scans: scans.clone() };
+        f.enable_discovery(vec![Box::new(src)], Box::new(FakeFactory), cfg);
+        f.drain(); // первый проход идёт сразу
+        assert_eq!(scans.load(Ordering::SeqCst), 1);
+        f.drain();
+        assert_eq!(scans.load(Ordering::SeqCst), 1, "интервал не прошёл, событий нет");
+        seen.lock().unwrap().push(sight(Transport::Usb, "1-2", Some("AAA")));
+        changed.store(true, Ordering::SeqCst);
+        let evs = f.drain();
+        assert_eq!(scans.load(Ordering::SeqCst), 2, "событие вызвало опрос");
+        assert_eq!(appeared(&evs), vec![(1, Transport::Usb)]);
     }
 
     #[test]

@@ -106,16 +106,93 @@ pub struct UsbDiscovery {
     /// Порт → (серийник, сколько раз пробовали читать). Неудачное чтение повторяется не больше трёх раз;
     /// отсутствие прав не считается попыткой: после правки прав телефон подхватится сам.
     serials: std::collections::HashMap<crate::UsbPort, (Option<String>, u8)>,
+    /// События подключения и отключения от libusb (если платформа их даёт).
+    hotplug: Option<Hotplug>,
+}
+
+/// Подписка на события libusb. Поток обработки живёт, пока жива подписка.
+struct Hotplug {
+    changed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    /// Держит регистрацию колбэка.
+    _registration: rusb::Registration<rusb::Context>,
+}
+
+struct HotplugHandler {
+    vendor_ids: Vec<u16>,
+    changed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl HotplugHandler {
+    fn note<T: rusb::UsbContext>(&self, device: &rusb::Device<T>) {
+        if let Ok(desc) = device.device_descriptor() {
+            if self.vendor_ids.contains(&desc.vendor_id()) {
+                self.changed.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+}
+
+impl<T: rusb::UsbContext> rusb::Hotplug<T> for HotplugHandler {
+    fn device_arrived(&mut self, device: rusb::Device<T>) {
+        self.note(&device);
+    }
+
+    fn device_left(&mut self, device: rusb::Device<T>) {
+        self.note(&device);
+    }
+}
+
+impl Drop for Hotplug {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
 }
 
 impl UsbDiscovery {
     pub fn new(vendor_ids: Vec<u16>) -> Result<Self, String> {
+        use rusb::UsbContext;
         let ctx = rusb::Context::new().map_err(|e| e.to_string())?;
-        Ok(Self { ctx, vendor_ids, serials: Default::default() })
+        let hotplug = if rusb::has_hotplug() {
+            let changed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let handler = HotplugHandler { vendor_ids: vendor_ids.clone(), changed: changed.clone() };
+            match rusb::HotplugBuilder::new().enumerate(false).register(&ctx, Box::new(handler)) {
+                Ok(registration) => {
+                    let (ctx2, stop2) = (ctx.clone(), stop.clone());
+                    let thread = std::thread::Builder::new()
+                        .name("usb-hotplug".into())
+                        .spawn(move || {
+                            while !stop2.load(std::sync::atomic::Ordering::SeqCst) {
+                                let _ = ctx2.handle_events(Some(std::time::Duration::from_millis(250)));
+                            }
+                        })
+                        .ok();
+                    Some(Hotplug { changed, stop, thread, _registration: registration })
+                }
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+        Ok(Self { ctx, vendor_ids, serials: Default::default(), hotplug })
+    }
+
+    /// Работают ли события подключения (иначе остаётся только опрос по таймеру).
+    pub fn has_hotplug(&self) -> bool {
+        self.hotplug.is_some()
     }
 }
 
 impl pcdock_core::link::Discovery for UsbDiscovery {
+    fn changed(&mut self) -> bool {
+        self.hotplug.as_ref().is_some_and(|h| h.changed.swap(false, std::sync::atomic::Ordering::SeqCst))
+    }
+
     fn scan(&mut self) -> Vec<pcdock_core::link::Sighting> {
         use pcdock_core::link::{Sighting, Transport};
         let Ok(found) = crate::scan(&self.ctx, &self.vendor_ids) else { return Vec::new() };
