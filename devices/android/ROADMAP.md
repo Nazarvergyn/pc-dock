@@ -47,7 +47,7 @@
 **ADB-сервер (решение 32)**
 9. Модуль `server-adb` с вводом — `готово`; `InputManager.getInstance()` на Android 15 возвращает null, поэтому ввод идёт через `IInputManager` из `ServiceManager`; сама подача касаний, мыши и клавиш на телефоне ещё не проверена.
 10. Запуск со стороны ПК: загрузка APK, `app_process`, `forward localabstract:pcdock` (`готово`, проверено вживую на Redmi A5, Android 15: ферма → ADB → сервер от uid shell → `ready`, `DisplayInfo` 720×1640; закрытие фермы завершает сервер).
-11. Захват экрана: `ActivityThread`/`FakeContext`, `DisplayManager.createVirtualDisplay`, запасной `SurfaceControl`, JPEG, поворот; ветви по версиям Android (`todo`).
+11. Захват экрана: `ActivityThread`/контекст shell, `DisplayManager.createVirtualDisplay`, JPEG, пересоздание при повороте (`готово`, проверено вживую на Android 15: кадры 560×1280, ~50 КБ, ферма получает `Video`; не проверено: поворот, запасной путь `SurfaceControl` для Android ≤ 12, пауза при выключенном экране).
 12. Захват звука (Android 11+) (`todo`).
 13. Проверка на Redmi A5/HyperOS (включая переключатель безопасности отладки), удаление `app-adb`, Accessibility и TCP-слушателя 47631 (`todo`).
 

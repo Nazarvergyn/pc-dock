@@ -49,6 +49,12 @@ object Main {
     class Server : HostLink.Listener {
         private val screen = ScreenInfo()
         private val injector = Injector(screen)
+        private val capture = Capture(
+            screen,
+            onFrame = { jpeg, pts -> link?.offerVideo(Messages.videoFrame(jpeg, pts).encode()) },
+            onGeometry = { events.add { sendDisplayInfo() } },
+        )
+        private var videoOn = false
 
         // Всё, что трогает ввод и состояние сессии, выполняется одним потоком.
         private val events = LinkedBlockingQueue<() -> Unit>()
@@ -100,7 +106,9 @@ object Main {
                 when (packet.type) {
                     Proto.T_HELLO -> onHello()
                     Proto.T_PING -> link?.sendControl(Messages.pong(packet.payload).encode())
-                    // Видео, звук и остальное — отдельный шаг (захват экрана), пока молча принимаем.
+                    Proto.T_SET_STREAM -> Messages.parseSetStream(packet.payload)?.let { onSetStream(it) }
+                    Proto.T_REQUEST_FRAME -> capture.resend()
+                    // Звук и побудка — отдельные шаги.
                     else -> {}
                 }
             }
@@ -123,18 +131,37 @@ object Main {
             events.add {
                 Log.i(TAG, "Канал закрыт: $reason")
                 injector.releaseAll()
+                capture.stop()
+                videoOn = false
                 link = null
             }
         }
 
+        private fun onSetStream(st: com.device.media.SetStream) {
+            capture.maxLongSide = maxOf(st.maxWidth, st.maxHeight)
+            capture.jpegQuality = st.jpegQuality
+            capture.maxFps = st.maxFps
+            if (st.video && !videoOn) {
+                videoOn = true
+                capture.start()
+            } else if (!st.video && videoOn) {
+                videoOn = false
+                capture.stop()
+            }
+            sendDisplayInfo()
+        }
+
         private fun onHello() {
             val l = link ?: return
-            l.sendControl(Messages.hello(Proto.CAP_ROTATION, NAME).encode())
+            l.sendControl(Messages.hello(Proto.CAP_VIDEO_JPEG or Proto.CAP_ROTATION, NAME).encode())
+            sendDisplayInfo()
+        }
+
+        private fun sendDisplayInfo() {
+            val l = link ?: return
             val d = screen.current()
-            l.sendControl(
-                Messages.displayInfo(d.width / 2 and 1.inv(), d.height / 2 and 1.inv(), d.width, d.height, d.dpi, d.rotation)
-                    .encode(),
-            )
+            val (w, h) = capture.streamSize(d)
+            l.sendControl(Messages.displayInfo(w, h, d.width, d.height, d.dpi, d.rotation).encode())
         }
     }
 }
