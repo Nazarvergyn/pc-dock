@@ -1,10 +1,11 @@
 [package]
 name = "pcdock-serial"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Serial transport: a microcontroller pipe carrying protocol v2 between the PC and a phone."
-license = "MIT OR Apache-2.0"
-
+license.workspace = true
+repository.workspace = true
+publish = false
 [dependencies]
 pcdock-core = { path = "../pcdock-core" }
 serialport = { version = "4", default-features = false }

@@ -1,8 +1,10 @@
 [package]
 name = "pcdock-farm"
-version = "0.1.0"
-edition = "2021"
-
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
 [dependencies]
 pcdock-core = { path = "../pcdock-core" }
 pcdock-usb = { path = "../pcdock-usb", optional = true }

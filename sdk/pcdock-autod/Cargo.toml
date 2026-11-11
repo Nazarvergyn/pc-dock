@@ -1,10 +1,11 @@
 [package]
 name = "pcdock-autod"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "PC Dock automation daemon: Lua scenarios as tests with assertions, logs and a live event stream."
-license = "MIT OR Apache-2.0"
-
+license.workspace = true
+repository.workspace = true
+publish = false
 [lib]
 name = "pcdock_autod"
 path = "src/lib.rs"

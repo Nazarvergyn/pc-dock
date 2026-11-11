@@ -1,10 +1,11 @@
 [package]
 name = "pcdock-check"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Self-test for PC Dock: finds phones, checks video, input and the environment, prints a report."
-license = "MIT OR Apache-2.0"
-
+license.workspace = true
+repository.workspace = true
+publish = false
 [dependencies]
 pcdock-core = { path = "../pcdock-core" }
 pcdock-farm = { path = "../pcdock-farm" }

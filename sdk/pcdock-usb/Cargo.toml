@@ -1,10 +1,15 @@
 [package]
 name = "pcdock-usb"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "USB-адаптер PC Dock: выполняет запросы ядра через libusb."
-license = "MIT OR Apache-2.0"
-
+license.workspace = true
+repository.workspace = true
+publish = false
 [dependencies]
 pcdock-core = { path = "../pcdock-core" }
 rusb = "0.9"
+
+# Windows: libusb собирается из исходников (системной библиотеки там нет).
+[target.'cfg(windows)'.dependencies]
+rusb = { version = "0.9", features = ["vendored"] }

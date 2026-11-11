@@ -1,10 +1,11 @@
 [package]
 name = "pcdockd"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "PC Dock daemon: owns phones on any transport, serves one app protocol."
-license = "MIT OR Apache-2.0"
-
+license.workspace = true
+repository.workspace = true
+publish = false
 [[bin]]
 name = "pcdockd"
 path = "src/main.rs"

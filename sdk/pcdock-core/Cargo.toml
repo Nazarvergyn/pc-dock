@@ -1,8 +1,9 @@
 [package]
 name = "pcdock-core"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Ядро PC Dock: протокол, ввод и сессия. Не знает об ОС и не выполняет ввод-вывод (sans-IO)."
-license = "MIT OR Apache-2.0"
-
+license.workspace = true
+repository.workspace = true
+publish = false
 [dependencies]

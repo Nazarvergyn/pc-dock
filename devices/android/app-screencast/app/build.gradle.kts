@@ -12,7 +12,29 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = 1
-        versionName = "1.0"
+        versionName = (findProperty("pcdockVersion") as String?) ?: "0.1.0-alpha.1"
+    }
+
+
+    // Подпись релиза: ключ берётся из переменных окружения (в репозитории ключей нет). Без них release собирается
+    // без подписи, а debug подписывается отладочным ключом.
+    val keystore = System.getenv("PCDOCK_KEYSTORE")
+    if (keystore != null) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(keystore)
+                storePassword = System.getenv("PCDOCK_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("PCDOCK_KEY_ALIAS")
+                keyPassword = System.getenv("PCDOCK_KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            if (System.getenv("PCDOCK_KEYSTORE") != null) signingConfig = signingConfigs.getByName("release")
+        }
     }
 
     compileOptions {

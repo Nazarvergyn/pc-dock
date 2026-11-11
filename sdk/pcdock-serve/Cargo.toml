@@ -1,10 +1,11 @@
 [package]
 name = "pcdock-serve"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "App protocol and carriers: TCP, WebSocket, Unix socket, named pipe. One message set everywhere."
-license = "MIT OR Apache-2.0"
-
+license.workspace = true
+repository.workspace = true
+publish = false
 [lib]
 name = "pcdock_serve"
 path = "src/lib.rs"
