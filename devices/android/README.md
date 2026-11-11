@@ -10,15 +10,17 @@
 - [`ROADMAP.md`](ROADMAP.md) — план работ
 - [`DECISIONS.md`](DECISIONS.md) — принятые решения и причины
 - [`PROTOCOL.md`](PROTOCOL.md) — спецификация протокола v2 (черновик)
-- [`viewer/README.md`](viewer/README.md) — ПК-сторона
-- [`../../sdk/README.md`](../../sdk/README.md) — SDK на Rust (в разработке)
+- [`TESTING.md`](TESTING.md) — сценарий ручной проверки
+- [`../../sdk/docs/`](../../sdk/docs/README.md) — документация демонов (ПК-сторона)
+- [`../../demos/`](../../demos) — демо-клиенты протокола
 
 ## Из чего состоит
 
 | Часть | Где | Что делает |
 |---|---|---|
 | Приложение «Device Media» (Kotlin) | `app-screencast/` | Захватывает экран, сжимает в JPEG и отправляет по USB |
-| Демон/окно на ПК (Python) | `viewer/` | Переводит телефон в режим аксессуара, принимает кадры, показывает окно, отправляет ввод |
+| Приложение для ADB-режима (сервер) | `app-screencast/server-adb/` | Серверный процесс с правами shell: экран, ввод, звук без диалога записи; запускается с ПК |
+| Демоны на ПК (Rust) | `../../sdk/` | `pcdockd` (ферма телефонов) и `pcdock-autod` (автоматизация): всё, что делает ПК-сторона |
 | Скрипт разработки | `dev.sh` | Собрать, поставить на телефон, запустить, снять логи |
 
 ## Как это работает
@@ -35,7 +37,7 @@ Android Open Accessory. Отладка (adb) для этого не нужна: 
    включена) и **сам запускает приложение**, у которого в манифесте есть фильтр на такую пару
    `manufacturer/model/version` (`app/src/main/res/xml/accessory_filter.xml`).
 
-> Строки `PCDock` / `DeviceMedia` / `1.0` в `viewer/main.py` и в `accessory_filter.xml` **должны совпадать**,
+> Строки `PCDock` / `DeviceMedia` / `1.0` в настройке фермы (`PCDock` / `DeviceMedia` / `1.0` по умолчанию) и в `accessory_filter.xml` **должны совпадать**,
 > иначе система не найдёт приложение для аксессуара.
 
 Интерфейс 0 в режиме аксессуара — bulk-канал для данных (IN `0x81` — кадры с телефона).
@@ -116,14 +118,14 @@ HID **не переживает переподключение** — демон 
 
 ## Запуск
 
-Требования: Linux/WSL2, Python ≥ 3.12 + `uv`, JDK 17 и Android SDK (для сборки), на телефоне Android 8+ (проверено на Android 15, HyperOS).
+Требования: Linux/WSL2, Rust и libusb, JDK 17 и Android SDK (для сборки), на телефоне Android 8+ (проверено на Android 15, HyperOS).
 
 ```bash
 # Один раз: собрать и поставить приложение (нужна отладка по USB только на время установки)
 ./dev.sh install
 
 # Каждый день
-cd viewer && uv run main.py
+../../sdk/target/release/pcdockd --auto --server-apk server-adb/build/outputs/apk/debug/server-adb-debug.apk
 ```
 
 `dev.sh`: `./dev.sh` — полный цикл (сборка, установка, запуск, логи), `./dev.sh install`, `./dev.sh logs`.
