@@ -121,8 +121,11 @@ pub enum ServerMsg {
     Ok,
     /// Пароль принят.
     Authed,
+    /// Список телефонов: номера и подробности (состояние, путь, серийник, имя, экран).
     Phones {
         phones: Vec<u32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        details: Vec<serde_json::Value>,
     },
     Watched {
         phone: u32,

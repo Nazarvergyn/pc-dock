@@ -207,7 +207,16 @@ fn tcp_hello_watch_input_and_frame() {
 
     c.expect_hello();
     c.send(&ClientMsg::List);
-    assert_eq!(c.msg(), ServerMsg::Phones { phones: vec![7] });
+    match c.msg() {
+        ServerMsg::Phones { phones, details } => {
+            assert_eq!(phones, vec![7]);
+            // Подробности: состояние, путь (у добавленного вручную нет), имя после рукопожатия.
+            assert_eq!(details.len(), 1);
+            assert_eq!(details[0]["phone"], 7);
+            assert!(details[0]["state"].is_string());
+        }
+        other => panic!("{other:?}"),
+    }
 
     c.send_raw(r#"{"op":"Watch","phone":7}"#);
     assert_eq!(c.msg(), ServerMsg::Watched { phone: 7, on: true });
@@ -275,7 +284,7 @@ fn ws_watch_and_typed_binary_frame() {
     }
     assert!(matches!(next_json(&mut ws), ServerMsg::Hello { .. }));
     ws.send(tungstenite::Message::Text(r#"{"op":"List"}"#.into())).unwrap();
-    assert_eq!(next_json(&mut ws), ServerMsg::Phones { phones: vec![9] });
+    assert!(matches!(next_json(&mut ws), ServerMsg::Phones { phones, .. } if phones == vec![9]));
     ws.send(tungstenite::Message::Text(r#"{"op":"Watch","phone":9}"#.into())).unwrap();
     assert_eq!(next_json(&mut ws), ServerMsg::Watched { phone: 9, on: true });
 
@@ -355,7 +364,7 @@ fn token_is_required_before_anything_else() {
     c.send(&ClientMsg::Auth { token: "s3cret".into() });
     assert_eq!(c.msg(), ServerMsg::Authed);
     c.send(&ClientMsg::List);
-    assert_eq!(c.msg(), ServerMsg::Phones { phones: vec![] });
+    assert!(matches!(c.msg(), ServerMsg::Phones { phones, .. } if phones.is_empty()));
 }
 
 #[test]

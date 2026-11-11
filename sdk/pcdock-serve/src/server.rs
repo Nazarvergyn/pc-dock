@@ -207,8 +207,10 @@ impl Handler<ClientState> for Handle {
         match msg {
             ClientMsg::Auth { .. } => reply(ServerMsg::Authed),
             ClientMsg::List => {
-                let phones = self.shared.daemon.lock().unwrap().phones();
-                reply(ServerMsg::Phones { phones })
+                let info = self.shared.daemon.lock().unwrap().phones_info();
+                let phones = info.iter().map(|i| i.id).collect();
+                let details = info.iter().map(phone_json).collect();
+                reply(ServerMsg::Phones { phones, details })
             }
             ClientMsg::Watch { phone, fps, on_change, audio } => {
                 if !self.shared.daemon.lock().unwrap().phones().contains(&phone) {
@@ -314,6 +316,22 @@ fn route(hub: &Hub<ClientState>, ev: FarmEvent) {
             hub.broadcast(|c| c.data.watches.contains_key(&phone), &to_value(&msg));
         }
     }
+}
+
+/// Сведения о телефоне для списка.
+fn phone_json(i: &pcdock_farm::PhoneInfo) -> Value {
+    json!({
+        "phone": i.id,
+        "state": state_name(i.state),
+        "transport": i.transport.map(|t| t.to_string()),
+        "address": i.address,
+        "serial": i.serial,
+        "name": i.name,
+        "display": i.display.as_ref().map(|d| json!({
+            "stream_w": d.stream_w, "stream_h": d.stream_h, "screen_w": d.screen_w,
+            "screen_h": d.screen_h, "dpi": d.dpi, "rotation": d.rotation,
+        })),
+    })
 }
 
 fn state_name(s: PhoneState) -> &'static str {

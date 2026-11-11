@@ -117,9 +117,35 @@ struct Worker {
     handle: Option<JoinHandle<()>>,
 }
 
+/// Размер и поворот экрана телефона, как в `Display`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayMeta {
+    pub stream_w: u16,
+    pub stream_h: u16,
+    pub screen_w: u16,
+    pub screen_h: u16,
+    pub dpi: u16,
+    pub rotation: u8,
+}
+
+/// Сведения о телефоне для списка (`Farm::phones_info`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PhoneInfo {
+    pub id: PhoneId,
+    pub state: PhoneState,
+    /// Путь, по которому телефон найден обнаружением (`None` у телефонов, добавленных вручную).
+    pub transport: Option<Transport>,
+    pub address: Option<String>,
+    pub serial: Option<String>,
+    /// Имя приложения или сервера на телефоне из рукопожатия.
+    pub name: Option<String>,
+    pub display: Option<DisplayMeta>,
+}
+
 struct Slot {
     worker: Worker,
     state: PhoneState,
+    meta: PhoneInfo,
     watching: bool,
     last_frame: Option<CachedFrame>,
     frame_seq: u64,
@@ -348,6 +374,15 @@ impl Farm {
             Slot {
                 worker: Worker { cmd_tx, handle: Some(handle) },
                 state: PhoneState::Connecting,
+                meta: PhoneInfo {
+                    id,
+                    state: PhoneState::Connecting,
+                    transport: None,
+                    address: None,
+                    serial: None,
+                    name: None,
+                    display: None,
+                },
                 watching: false,
                 last_frame: None,
                 frame_seq: 0,
@@ -407,6 +442,24 @@ impl Farm {
         });
     }
 
+    /// Сведения обо всех телефонах (по возрастанию номера).
+    pub fn phones_info(&self) -> Vec<PhoneInfo> {
+        let mut v: Vec<PhoneInfo> = self.slots.values().map(|s| s.meta.clone()).collect();
+        v.sort_by_key(|i| i.id);
+        v
+    }
+
+    /// Запоминает, каким путём найден телефон (вызывается при обнаружении).
+    fn note_found(&mut self, id: PhoneId, transport: Transport, address: &str, serial: &Option<String>) {
+        if let Some(slot) = self.slots.get_mut(&id) {
+            slot.meta.transport = Some(transport);
+            slot.meta.address = Some(address.to_string());
+            if serial.is_some() {
+                slot.meta.serial = serial.clone();
+            }
+        }
+    }
+
     /// Состояние телефона.
     pub fn state(&self, id: PhoneId) -> Result<PhoneState, String> {
         self.slots.get(&id).ok_or_else(|| format!("нет трубки {id}")).map(|s| s.state)
@@ -423,6 +476,7 @@ impl Farm {
         if let Some(slot) = self.slots.get_mut(&phone) {
             if slot.state != state {
                 slot.state = state;
+                slot.meta.state = state;
                 out.push(FarmEvent::State { phone, state, detail: state.hint().to_string() });
             }
         }
@@ -514,6 +568,7 @@ impl Farm {
                                                 t.tried.push(t.transport);
                                                 t.transport = alt.transport;
                                                 t.failing_since = None;
+                                                self.note_found(id, alt.transport, &alt.address, &alt.serial);
                                                 out.push(FarmEvent::Appeared {
                                                     phone: id,
                                                     transport: alt.transport,
@@ -540,6 +595,7 @@ impl Farm {
                             let _ = self.remove_phone(id);
                             if self.add_phone(id, link).is_ok() {
                                 t.transport = best.transport;
+                                self.note_found(id, best.transport, &best.address, &best.serial);
                                 out.push(FarmEvent::Appeared {
                                     phone: id,
                                     transport: best.transport,
@@ -579,6 +635,7 @@ impl Farm {
                                         tried: Vec::new(),
                                     },
                                 );
+                                self.note_found(id, best.transport, &best.address, &best.serial);
                                 out.push(FarmEvent::Appeared {
                                     phone: id,
                                     transport: best.transport,
@@ -645,7 +702,24 @@ impl Farm {
             }
             let watching = self.slots.get(&phone).map(|s| s.watching).unwrap_or(false);
             match &ev {
-                FarmEvent::Connected { .. } => self.set_state(phone, PhoneState::Ready, &mut out),
+                FarmEvent::Display { stream_w, stream_h, screen_w, screen_h, dpi, rotation, .. } => {
+                    if let Some(slot) = self.slots.get_mut(&phone) {
+                        slot.meta.display = Some(DisplayMeta {
+                            stream_w: *stream_w,
+                            stream_h: *stream_h,
+                            screen_w: *screen_w,
+                            screen_h: *screen_h,
+                            dpi: *dpi,
+                            rotation: *rotation,
+                        });
+                    }
+                }
+                FarmEvent::Connected { name, .. } => {
+                    if let Some(slot) = self.slots.get_mut(&phone) {
+                        slot.meta.name = Some(name.clone());
+                    }
+                    self.set_state(phone, PhoneState::Ready, &mut out)
+                }
                 FarmEvent::Status { code, .. } if *code == STATUS_PROJECTION_STOPPED => {
                     self.set_state(phone, PhoneState::NeedsPermission, &mut out)
                 }

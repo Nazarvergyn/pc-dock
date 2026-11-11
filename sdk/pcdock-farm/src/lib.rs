@@ -10,7 +10,7 @@
 //! видит пропуск при заторе.
 
 pub mod runtime;
-pub use runtime::{CachedFrame, DiscoveryConfig, Farm, FarmEvent, PhoneSpec, Rules};
+pub use runtime::{CachedFrame, DiscoveryConfig, DisplayMeta, Farm, FarmEvent, PhoneInfo, PhoneSpec, Rules};
 
 #[cfg(feature = "transports")]
 mod config;
