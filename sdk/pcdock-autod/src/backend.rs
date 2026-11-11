@@ -51,7 +51,16 @@ pub trait Backend: Send + Sync {
     fn phone(&self, id: u32) -> Option<PhoneInfo> {
         self.phones().into_iter().find(|p| p.id == id)
     }
-    fn touch(&self, phone: u32, phase: Phase, x: f32, y: f32, pressure: Option<f32>, size: Option<f32>, finger: u8) -> Result<(), String>;
+    fn touch(
+        &self,
+        phone: u32,
+        phase: Phase,
+        x: f32,
+        y: f32,
+        pressure: Option<f32>,
+        size: Option<f32>,
+        finger: u8,
+    ) -> Result<(), String>;
     fn key(&self, phone: u32, usage: u16, down: bool) -> Result<(), String>;
     fn scroll(&self, phone: u32, ticks: f32, horizontal: bool) -> Result<(), String>;
     fn wake(&self, phone: u32) -> Result<(), String>;
@@ -108,7 +117,14 @@ impl FarmBackend {
         let alive = Arc::new(AtomicBool::new(true));
         let events = client.take_events().ok_or("события уже забраны")?;
         let binary = client.take_binary().ok_or("бинарные пакеты уже забраны")?;
-        let me = Arc::new(Self { client: client.clone(), phones: phones.clone(), frames: frames.clone(), watches: Mutex::new(HashMap::new()), fps, alive: alive.clone() });
+        let me = Arc::new(Self {
+            client: client.clone(),
+            phones: phones.clone(),
+            frames: frames.clone(),
+            watches: Mutex::new(HashMap::new()),
+            fps,
+            alive: alive.clone(),
+        });
         me.refresh()?;
 
         // События о телефонах: обновляют состояние.
@@ -123,20 +139,23 @@ impl FarmBackend {
                         let mut map = phones.lock().unwrap();
                         match v["ev"].as_str() {
                             Some("Appeared") => {
-                                let e = map.entry(id).or_insert_with(|| PhoneInfo { id, ..Default::default() });
+                                let e =
+                                    map.entry(id).or_insert_with(|| PhoneInfo { id, ..Default::default() });
                                 e.transport = v["transport"].as_str().map(String::from);
                                 e.address = v["address"].as_str().map(String::from);
                                 e.serial = v["serial"].as_str().map(String::from);
                             }
                             Some("State") => {
-                                let e = map.entry(id).or_insert_with(|| PhoneInfo { id, ..Default::default() });
+                                let e =
+                                    map.entry(id).or_insert_with(|| PhoneInfo { id, ..Default::default() });
                                 e.state = v["state"].as_str().unwrap_or("").to_string();
                             }
                             Some("Lost") => {
                                 map.remove(&id);
                             }
                             Some("Display") => {
-                                let e = map.entry(id).or_insert_with(|| PhoneInfo { id, ..Default::default() });
+                                let e =
+                                    map.entry(id).or_insert_with(|| PhoneInfo { id, ..Default::default() });
                                 if let (Some(w), Some(h)) = (v["screen_w"].as_u64(), v["screen_h"].as_u64()) {
                                     e.screen = Some((w as u32, h as u32));
                                 }
@@ -205,7 +224,16 @@ impl Backend for FarmBackend {
         v
     }
 
-    fn touch(&self, phone: u32, phase: Phase, x: f32, y: f32, pressure: Option<f32>, size: Option<f32>, finger: u8) -> Result<(), String> {
+    fn touch(
+        &self,
+        phone: u32,
+        phase: Phase,
+        x: f32,
+        y: f32,
+        pressure: Option<f32>,
+        size: Option<f32>,
+        finger: u8,
+    ) -> Result<(), String> {
         self.op(json!({"op": "TouchEx", "phone": phone, "cid": finger, "phase": phase, "x": x, "y": y,
                        "width": size, "height": size, "pressure": pressure}))
     }
@@ -268,5 +296,139 @@ impl Backend for FarmBackend {
             }
             map = self.frames.changed.wait_timeout(map, left.min(Duration::from_millis(200))).unwrap().0;
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+
+/// Куда подключаться: `pcdockd` по TCP или по локальной трубе.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FarmTarget {
+    Tcp(String),
+    Local(String),
+}
+
+impl FarmTarget {
+    /// `host:port`, `tcp://host:port`, `local:имя` или `pipe:имя`.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        if let Some(a) = s.strip_prefix("tcp://") {
+            return Ok(Self::Tcp(a.to_string()));
+        }
+        if let Some(n) = s.strip_prefix("local:").or_else(|| s.strip_prefix("pipe:")) {
+            return if n.is_empty() {
+                Err("пустое имя трубы".into())
+            } else {
+                Ok(Self::Local(n.to_string()))
+            };
+        }
+        if s.contains(':') {
+            return Ok(Self::Tcp(s.to_string()));
+        }
+        Err(format!("{s:?}: нужно host:port, tcp://host:port или local:имя"))
+    }
+
+    fn connect(&self, token: Option<&str>) -> Result<Client, String> {
+        match self {
+            Self::Tcp(a) => Client::connect_tcp(a, token),
+            Self::Local(n) => Client::connect_local(n, token),
+        }
+        .map_err(|e| e.to_string())
+    }
+}
+
+/// Связь с `pcdockd`, которая переподключается сама: пока связи нет, телефонов не видно и команды отказывают.
+pub struct ReconnectBackend {
+    inner: std::sync::RwLock<Option<Arc<FarmBackend>>>,
+}
+
+impl ReconnectBackend {
+    /// Запускает поток подключения и переподключения.
+    pub fn start(target: FarmTarget, token: Option<String>, fps: f32) -> Arc<Self> {
+        let me = Arc::new(Self { inner: std::sync::RwLock::new(None) });
+        let weak = Arc::downgrade(&me);
+        thread::Builder::new()
+            .name("autod-farm-link".into())
+            .spawn(move || {
+                let mut warned = false;
+                loop {
+                    let Some(me) = weak.upgrade() else { return };
+                    let alive = me.inner.read().unwrap().as_ref().is_some_and(|b| b.is_alive());
+                    if !alive {
+                        if me.inner.read().unwrap().is_some() {
+                            log::warn!("связь с pcdockd потеряна, переподключаюсь");
+                            *me.inner.write().unwrap() = None;
+                        }
+                        match target.connect(token.as_deref()).and_then(|c| FarmBackend::new(c, fps)) {
+                            Ok(b) => {
+                                log::info!("подключён к pcdockd ({target:?})");
+                                *me.inner.write().unwrap() = Some(b);
+                                warned = false;
+                            }
+                            Err(e) => {
+                                if !warned {
+                                    log::warn!("pcdockd недоступен ({e}); повторяю");
+                                    warned = true;
+                                }
+                            }
+                        }
+                    }
+                    drop(me);
+                    thread::sleep(Duration::from_secs(2));
+                }
+            })
+            .expect("не встал поток связи с pcdockd");
+        me
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.inner.read().unwrap().as_ref().is_some_and(|b| b.is_alive())
+    }
+
+    fn get(&self) -> Result<Arc<FarmBackend>, String> {
+        self.inner.read().unwrap().clone().ok_or_else(|| "нет связи с pcdockd".to_string())
+    }
+}
+
+impl Backend for ReconnectBackend {
+    fn phones(&self) -> Vec<PhoneInfo> {
+        self.get().map(|b| b.phones()).unwrap_or_default()
+    }
+    fn touch(
+        &self,
+        phone: u32,
+        phase: Phase,
+        x: f32,
+        y: f32,
+        pressure: Option<f32>,
+        size: Option<f32>,
+        finger: u8,
+    ) -> Result<(), String> {
+        self.get()?.touch(phone, phase, x, y, pressure, size, finger)
+    }
+    fn key(&self, phone: u32, usage: u16, down: bool) -> Result<(), String> {
+        self.get()?.key(phone, usage, down)
+    }
+    fn scroll(&self, phone: u32, ticks: f32, horizontal: bool) -> Result<(), String> {
+        self.get()?.scroll(phone, ticks, horizontal)
+    }
+    fn wake(&self, phone: u32) -> Result<(), String> {
+        self.get()?.wake(phone)
+    }
+    fn enable(&self, phone: u32, kind: u32, on: bool) -> Result<(), String> {
+        self.get()?.enable(phone, kind, on)
+    }
+    fn acquire(&self, phone: u32) -> Result<(), String> {
+        self.get()?.acquire(phone)
+    }
+    fn release(&self, phone: u32) {
+        if let Ok(b) = self.get() {
+            b.release(phone)
+        }
+    }
+    fn latest_frame(&self, phone: u32) -> Option<Frame> {
+        self.get().ok()?.latest_frame(phone)
+    }
+    fn wait_frame(&self, phone: u32, after: Option<u64>, timeout: Duration) -> Option<Frame> {
+        self.get().ok()?.wait_frame(phone, after, timeout)
     }
 }

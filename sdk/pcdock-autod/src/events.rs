@@ -118,10 +118,13 @@ mod tests {
         log.emit("log", json!({"text": "b"}));
         let got = Arc::new(Mutex::new(Vec::new()));
         let g = got.clone();
-        log.subscribe(1, Box::new(move |e| {
-            g.lock().unwrap().push(e["text"].as_str().unwrap().to_string());
-            true
-        }));
+        log.subscribe(
+            1,
+            Box::new(move |e| {
+                g.lock().unwrap().push(e["text"].as_str().unwrap().to_string());
+                true
+            }),
+        );
         log.emit("log", json!({"text": "c"}));
         assert_eq!(*got.lock().unwrap(), vec!["b", "c"], "история с номера 1 и живое событие");
         assert_eq!(log.events()[2]["seq"], 2);
@@ -133,10 +136,13 @@ mod tests {
         let log = RunLog::new("r", None);
         let calls = Arc::new(Mutex::new(0));
         let c = calls.clone();
-        log.subscribe(0, Box::new(move |_| {
-            *c.lock().unwrap() += 1;
-            false
-        }));
+        log.subscribe(
+            0,
+            Box::new(move |_| {
+                *c.lock().unwrap() += 1;
+                false
+            }),
+        );
         log.emit("log", json!({}));
         log.emit("log", json!({}));
         assert_eq!(*calls.lock().unwrap(), 1, "после отказа больше не вызывается");

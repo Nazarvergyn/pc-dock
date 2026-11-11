@@ -24,8 +24,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use mlua::{
-    Function, HookTriggers, Lua, LuaOptions, MultiValue, RegistryKey, StdLib, Table, UserData, UserDataFields,
-    UserDataMethods, Value, VmState,
+    Function, HookTriggers, Lua, LuaOptions, MultiValue, RegistryKey, StdLib, Table, UserData,
+    UserDataFields, UserDataMethods, Value, VmState,
 };
 use serde_json::{json, Value as Json};
 
@@ -139,7 +139,15 @@ impl State {
 
     /// Результат проверки: событие `assert`, счётчики и, для `assert`, прерывание теста.
     #[allow(clippy::too_many_arguments)]
-    fn record(&self, mode: &str, op: &str, ok: bool, message: &str, expected: Option<String>, actual: Option<String>) -> mlua::Result<()> {
+    fn record(
+        &self,
+        mode: &str,
+        op: &str,
+        ok: bool,
+        message: &str,
+        expected: Option<String>,
+        actual: Option<String>,
+    ) -> mlua::Result<()> {
         if ok {
             *self.passed.lock().unwrap() += 1;
         } else {
@@ -175,7 +183,10 @@ impl State {
             if let Some(f) = self.backend.latest_frame(*id) {
                 let name = format!("fail_{}_{}_{}.jpg", sanitize(&test), id, f.seq);
                 if std::fs::write(dir.join(&name), f.jpeg.as_slice()).is_ok() {
-                    self.emit("artifact", json!({"name": name, "kind": "frame", "phone": id, "seq": f.seq, "reason": "assert"}));
+                    self.emit(
+                        "artifact",
+                        json!({"name": name, "kind": "frame", "phone": id, "seq": f.seq, "reason": "assert"}),
+                    );
                 }
             }
         }
@@ -265,7 +276,9 @@ fn opt_f32(t: &Option<Table>, key: &str) -> Option<f32> {
 }
 
 fn opt_secs(t: &Option<Table>, key: &str, default: f64) -> Duration {
-    Duration::from_secs_f64(t.as_ref().and_then(|t| t.get::<Option<f64>>(key).ok().flatten()).unwrap_or(default).max(0.0))
+    Duration::from_secs_f64(
+        t.as_ref().and_then(|t| t.get::<Option<f64>>(key).ok().flatten()).unwrap_or(default).max(0.0),
+    )
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -372,11 +385,17 @@ impl UserData for FrameHandle {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         // Сохраняет кадр во вложения прогона; возвращает имя файла.
         methods.add_method("save", |_, t, name: Option<String>| {
-            let Some(dir) = &t.st.artifacts else { return Err(mlua::Error::runtime("вложения выключены")) };
+            let Some(dir) = &t.st.artifacts else {
+                return Err(mlua::Error::runtime("вложения выключены"));
+            };
             let base = sanitize(&name.unwrap_or_else(|| format!("frame_{}_{}", t.phone, t.f.seq)));
             let file = format!("{base}.jpg");
-            std::fs::write(dir.join(&file), t.f.jpeg.as_slice()).map_err(|e| mlua::Error::runtime(format!("запись кадра: {e}")))?;
-            t.st.emit("artifact", json!({"name": file, "kind": "frame", "phone": t.phone, "seq": t.f.seq, "reason": "script"}));
+            std::fs::write(dir.join(&file), t.f.jpeg.as_slice())
+                .map_err(|e| mlua::Error::runtime(format!("запись кадра: {e}")))?;
+            t.st.emit(
+                "artifact",
+                json!({"name": file, "kind": "frame", "phone": t.phone, "seq": t.f.seq, "reason": "script"}),
+            );
             Ok(file)
         });
     }
@@ -399,7 +418,9 @@ impl UserData for PhoneHandle {
     }
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("state", |_, t, ()| Ok(t.st.backend.phone(t.id).map(|p| p.state).unwrap_or_else(|| "lost".into())));
+        methods.add_method("state", |_, t, ()| {
+            Ok(t.st.backend.phone(t.id).map(|p| p.state).unwrap_or_else(|| "lost".into()))
+        });
         methods.add_method("info", |lua, t, ()| match t.st.backend.phone(t.id) {
             Some(i) => Ok(Some(info_table(lua, &i)?)),
             None => Ok(None),
@@ -430,15 +451,22 @@ impl UserData for PhoneHandle {
                     "move" => 1,
                     "up" => 2,
                     "cancel" => 3,
-                    other => return Err(mlua::Error::runtime(format!("неизвестная фаза касания {other:?} (down, move, up, cancel)"))),
+                    other => {
+                        return Err(mlua::Error::runtime(format!(
+                            "неизвестная фаза касания {other:?} (down, move, up, cancel)"
+                        )))
+                    }
                 },
-                other => num(other).map(|n| n as u32).ok_or_else(|| mlua::Error::runtime("фаза касания: строка или число"))?,
+                other => num(other)
+                    .map(|n| n as u32)
+                    .ok_or_else(|| mlua::Error::runtime("фаза касания: строка или число"))?,
             };
             t.touch(phase, x, y, &o)
         });
         methods.add_method("swipe", |_, t, (x1, y1, x2, y2, o): (f32, f32, f32, f32, Option<Table>)| {
             let total = opt_secs(&o, "duration", 0.3);
-            let steps = o.as_ref().and_then(|t| t.get::<Option<u32>>("steps").ok().flatten()).unwrap_or(10).max(1);
+            let steps =
+                o.as_ref().and_then(|t| t.get::<Option<u32>>("steps").ok().flatten()).unwrap_or(10).max(1);
             t.touch(0, x1, y1, &o)?;
             for i in 1..=steps {
                 t.st.sleep(total / steps)?;
@@ -449,7 +477,8 @@ impl UserData for PhoneHandle {
         });
         methods.add_method("key", |_, t, (k, o): (Value, Option<Table>)| {
             t.st.check_alive()?;
-            let usage = key_usage(&k).ok_or_else(|| mlua::Error::runtime(format!("неизвестная клавиша {}", show(&k))))?;
+            let usage = key_usage(&k)
+                .ok_or_else(|| mlua::Error::runtime(format!("неизвестная клавиша {}", show(&k))))?;
             t.st.backend.key(t.id, usage, true).map_err(mlua::Error::runtime)?;
             t.st.sleep(opt_secs(&o, "hold", 0.03))?;
             t.st.backend.key(t.id, usage, false).map_err(mlua::Error::runtime)
@@ -490,7 +519,11 @@ impl UserData for PhoneHandle {
                 "touch" => 0,
                 "mouse" => 1,
                 "keyboard" => 2,
-                other => return Err(mlua::Error::runtime(format!("неизвестное устройство {other:?} (touch, mouse, keyboard)"))),
+                other => {
+                    return Err(mlua::Error::runtime(format!(
+                        "неизвестное устройство {other:?} (touch, mouse, keyboard)"
+                    )))
+                }
             };
             t.st.backend.enable(t.id, k, on).map_err(mlua::Error::runtime)
         });
@@ -498,7 +531,8 @@ impl UserData for PhoneHandle {
         methods.add_method("frame", |_, t, o: Option<Table>| {
             t.st.acquire(t.id)?;
             let timeout = opt_secs(&o, "timeout", 5.0);
-            let fresh = o.as_ref().and_then(|t| t.get::<Option<bool>>("fresh").ok().flatten()).unwrap_or(false);
+            let fresh =
+                o.as_ref().and_then(|t| t.get::<Option<bool>>("fresh").ok().flatten()).unwrap_or(false);
             let after = if fresh { t.st.backend.latest_frame(t.id).map(|f| f.seq) } else { None };
             let end = Instant::now() + timeout;
             loop {
@@ -516,7 +550,9 @@ impl UserData for PhoneHandle {
         methods.add_method("wait_change", |_, t, timeout: Option<f64>| {
             t.st.acquire(t.id)?;
             let end = Instant::now() + Duration::from_secs_f64(timeout.unwrap_or(5.0));
-            let Some(first) = t.st.backend.wait_frame(t.id, None, Duration::from_secs(5)) else { return Ok(None) };
+            let Some(first) = t.st.backend.wait_frame(t.id, None, Duration::from_secs(5)) else {
+                return Ok(None);
+            };
             let (mut seq, hash) = (first.seq, first.hash);
             loop {
                 t.st.check_alive()?;
@@ -589,7 +625,14 @@ fn checks(lua: &Lua, st: &Arc<State>, mode: &'static str) -> mlua::Result<Table>
         "eq",
         lua.create_function(move |_, (a, b, m): (Value, Value, Option<String>)| {
             let ok = equal(&a, &b, 0);
-            s.record(mode, "eq", ok, &msg(m, format!("{} == {}", show(&a), show(&b))), Some(show(&b)), Some(show(&a)))
+            s.record(
+                mode,
+                "eq",
+                ok,
+                &msg(m, format!("{} == {}", show(&a), show(&b))),
+                Some(show(&b)),
+                Some(show(&a)),
+            )
         })?,
     )?;
     let s = st.clone();
@@ -597,21 +640,42 @@ fn checks(lua: &Lua, st: &Arc<State>, mode: &'static str) -> mlua::Result<Table>
         "ne",
         lua.create_function(move |_, (a, b, m): (Value, Value, Option<String>)| {
             let ok = !equal(&a, &b, 0);
-            s.record(mode, "ne", ok, &msg(m, format!("{} != {}", show(&a), show(&b))), Some(format!("не {}", show(&b))), Some(show(&a)))
+            s.record(
+                mode,
+                "ne",
+                ok,
+                &msg(m, format!("{} != {}", show(&a), show(&b))),
+                Some(format!("не {}", show(&b))),
+                Some(show(&a)),
+            )
         })?,
     )?;
     let s = st.clone();
     t.set(
         "truthy",
         lua.create_function(move |_, (v, m): (Value, Option<String>)| {
-            s.record(mode, "truthy", truthy(&v), &msg(m, format!("{} истинно", show(&v))), Some("истина".into()), Some(show(&v)))
+            s.record(
+                mode,
+                "truthy",
+                truthy(&v),
+                &msg(m, format!("{} истинно", show(&v))),
+                Some("истина".into()),
+                Some(show(&v)),
+            )
         })?,
     )?;
     let s = st.clone();
     t.set(
         "falsy",
         lua.create_function(move |_, (v, m): (Value, Option<String>)| {
-            s.record(mode, "falsy", !truthy(&v), &msg(m, format!("{} ложно", show(&v))), Some("ложь".into()), Some(show(&v)))
+            s.record(
+                mode,
+                "falsy",
+                !truthy(&v),
+                &msg(m, format!("{} ложно", show(&v))),
+                Some("ложь".into()),
+                Some(show(&v)),
+            )
         })?,
     )?;
     let s = st.clone();
@@ -619,14 +683,28 @@ fn checks(lua: &Lua, st: &Arc<State>, mode: &'static str) -> mlua::Result<Table>
         "near",
         lua.create_function(move |_, (a, b, eps, m): (f64, f64, Option<f64>, Option<String>)| {
             let eps = eps.unwrap_or(1e-6);
-            s.record(mode, "near", (a - b).abs() <= eps, &msg(m, format!("{a} ≈ {b} (±{eps})")), Some(format!("{b} ± {eps}")), Some(a.to_string()))
+            s.record(
+                mode,
+                "near",
+                (a - b).abs() <= eps,
+                &msg(m, format!("{a} ≈ {b} (±{eps})")),
+                Some(format!("{b} ± {eps}")),
+                Some(a.to_string()),
+            )
         })?,
     )?;
     let s = st.clone();
     t.set(
         "contains",
         lua.create_function(move |_, (text, sub, m): (String, String, Option<String>)| {
-            s.record(mode, "contains", text.contains(&sub), &msg(m, format!("{text:?} содержит {sub:?}")), Some(format!("содержит {sub:?}")), Some(format!("{text:?}")))
+            s.record(
+                mode,
+                "contains",
+                text.contains(&sub),
+                &msg(m, format!("{text:?} содержит {sub:?}")),
+                Some(format!("содержит {sub:?}")),
+                Some(format!("{text:?}")),
+            )
         })?,
     )?;
     // Проверка по шаблону Lua (`string.find`).
@@ -636,7 +714,14 @@ fn checks(lua: &Lua, st: &Arc<State>, mode: &'static str) -> mlua::Result<Table>
         lua.create_function(move |lua, (text, pattern, m): (String, String, Option<String>)| {
             let find: Function = lua.globals().get::<Table>("string")?.get("find")?;
             let found: Value = find.call((text.clone(), pattern.clone()))?;
-            s.record(mode, "matches", truthy(&found), &msg(m, format!("{text:?} подходит под {pattern:?}")), Some(format!("шаблон {pattern:?}")), Some(format!("{text:?}")))
+            s.record(
+                mode,
+                "matches",
+                truthy(&found),
+                &msg(m, format!("{text:?} подходит под {pattern:?}")),
+                Some(format!("шаблон {pattern:?}")),
+                Some(format!("{text:?}")),
+            )
         })?,
     )?;
     Ok(t)
@@ -685,14 +770,27 @@ pub fn run_script(
         Ok(()) if results.iter().any(|t| t.status == "stopped") => "stopped",
         Ok(()) => "passed",
     };
-    let report = Report { status: status.to_string(), tests: results, duration_ms: started.elapsed().as_millis() as u64 };
+    let report = Report {
+        status: status.to_string(),
+        tests: results,
+        duration_ms: started.elapsed().as_millis() as u64,
+    };
     sink.emit("run_end", report.to_json());
     report
 }
 
-fn execute(source: &str, script_name: &str, cfg: &RunConfig, st: &Arc<State>, results: &mut Vec<TestResult>) -> Result<(), String> {
-    let lua = Lua::new_with(StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8 | StdLib::COROUTINE, LuaOptions::new())
-        .map_err(|e| e.to_string())?;
+fn execute(
+    source: &str,
+    script_name: &str,
+    cfg: &RunConfig,
+    st: &Arc<State>,
+    results: &mut Vec<TestResult>,
+) -> Result<(), String> {
+    let lua = Lua::new_with(
+        StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8 | StdLib::COROUTINE,
+        LuaOptions::new(),
+    )
+    .map_err(|e| e.to_string())?;
     {
         let stop = st.stop.clone();
         let deadline = st.deadline;
@@ -782,7 +880,12 @@ fn run_test(lua: &Lua, hooks: &Rc<RefCell<Hooks>>, index: usize) -> mlua::Result
     result
 }
 
-fn finish_test(st: &Arc<State>, name: &str, t0: Instant, outcome: Result<(), String>) -> (String, TestResult) {
+fn finish_test(
+    st: &Arc<State>,
+    name: &str,
+    t0: Instant,
+    outcome: Result<(), String>,
+) -> (String, TestResult) {
     let passed = *st.passed.lock().unwrap();
     let failed = *st.failed.lock().unwrap();
     let (status, error) = match outcome {
@@ -834,15 +937,21 @@ fn install(lua: &Lua, st: &Arc<State>, cfg: &RunConfig, hooks: &Rc<RefCell<Hooks
         })?,
     )?;
     let h = hooks.clone();
-    g.set("before_each", lua.create_function(move |lua, f: Function| {
-        h.borrow_mut().before.push(lua.create_registry_value(f)?);
-        Ok(())
-    })?)?;
+    g.set(
+        "before_each",
+        lua.create_function(move |lua, f: Function| {
+            h.borrow_mut().before.push(lua.create_registry_value(f)?);
+            Ok(())
+        })?,
+    )?;
     let h = hooks.clone();
-    g.set("after_each", lua.create_function(move |lua, f: Function| {
-        h.borrow_mut().after.push(lua.create_registry_value(f)?);
-        Ok(())
-    })?)?;
+    g.set(
+        "after_each",
+        lua.create_function(move |lua, f: Function| {
+            h.borrow_mut().after.push(lua.create_registry_value(f)?);
+            Ok(())
+        })?,
+    )?;
 
     // Проверки: `assert` вызывается как функция и как таблица.
     let assert_t = checks(lua, st, "assert")?;
@@ -851,7 +960,14 @@ fn install(lua: &Lua, st: &Arc<State>, cfg: &RunConfig, hooks: &Rc<RefCell<Hooks
     meta.set(
         "__call",
         lua.create_function(move |_, (_this, v, m): (Value, Value, Option<String>)| {
-            s.record("assert", "truthy", truthy(&v), &m.unwrap_or_else(|| "assert".into()), Some("истина".into()), Some(show(&v)))
+            s.record(
+                "assert",
+                "truthy",
+                truthy(&v),
+                &m.unwrap_or_else(|| "assert".into()),
+                Some("истина".into()),
+                Some(show(&v)),
+            )
         })?,
     )?;
     assert_t.set_metatable(Some(meta));
@@ -860,7 +976,9 @@ fn install(lua: &Lua, st: &Arc<State>, cfg: &RunConfig, hooks: &Rc<RefCell<Hooks
     let s = st.clone();
     g.set(
         "fail",
-        lua.create_function(move |_, m: Option<String>| s.record("assert", "fail", false, &m.unwrap_or_else(|| "fail".into()), None, None))?,
+        lua.create_function(move |_, m: Option<String>| {
+            s.record("assert", "fail", false, &m.unwrap_or_else(|| "fail".into()), None, None)
+        })?,
     )?;
 
     // Шаги, логи, время.
@@ -885,7 +1003,10 @@ fn install(lua: &Lua, st: &Arc<State>, cfg: &RunConfig, hooks: &Rc<RefCell<Hooks
     }
     g.set("log", log)?;
     let s = st.clone();
-    g.set("sleep", lua.create_function(move |_, secs: f64| s.sleep(Duration::from_secs_f64(secs.max(0.0))))?)?;
+    g.set(
+        "sleep",
+        lua.create_function(move |_, secs: f64| s.sleep(Duration::from_secs_f64(secs.max(0.0))))?,
+    )?;
     let s = st.clone();
     g.set("now", lua.create_function(move |_, ()| Ok(s.started.elapsed().as_secs_f64()))?)?;
     let s = st.clone();
@@ -967,10 +1088,28 @@ mod tests {
 
     impl Backend for Fake {
         fn phones(&self) -> Vec<PhoneInfo> {
-            vec![PhoneInfo { id: 1, state: self.state.lock().unwrap().clone(), serial: Some("SER1".into()), screen: Some((720, 1640)), ..Default::default() }]
+            vec![PhoneInfo {
+                id: 1,
+                state: self.state.lock().unwrap().clone(),
+                serial: Some("SER1".into()),
+                screen: Some((720, 1640)),
+                ..Default::default()
+            }]
         }
-        fn touch(&self, phone: u32, phase: Phase, x: f32, y: f32, pressure: Option<f32>, size: Option<f32>, finger: u8) -> Result<(), String> {
-            self.log.lock().unwrap().push(format!("touch {phone} {phase} {x:.2} {y:.2} p={pressure:?} s={size:?} f={finger}"));
+        fn touch(
+            &self,
+            phone: u32,
+            phase: Phase,
+            x: f32,
+            y: f32,
+            pressure: Option<f32>,
+            size: Option<f32>,
+            finger: u8,
+        ) -> Result<(), String> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("touch {phone} {phase} {x:.2} {y:.2} p={pressure:?} s={size:?} f={finger}"));
             Ok(())
         }
         fn key(&self, phone: u32, usage: u16, down: bool) -> Result<(), String> {
@@ -1016,7 +1155,13 @@ mod tests {
     }
 
     fn cfg() -> RunConfig {
-        RunConfig { phones: vec![1], args: json!({"level": 3, "name": "x"}), only: None, timeout: Some(Duration::from_secs(20)), artifacts: None }
+        RunConfig {
+            phones: vec![1],
+            args: json!({"level": 3, "name": "x"}),
+            only: None,
+            timeout: Some(Duration::from_secs(20)),
+            artifacts: None,
+        }
     }
 
     fn run(src: &str, fake: &Arc<Fake>) -> (Report, Arc<Collect>) {
@@ -1047,11 +1192,17 @@ mod tests {
             &fake,
         );
         assert_eq!(r.status, "failed");
-        assert_eq!(r.tests.iter().map(|t| (t.name.as_str(), t.status.as_str())).collect::<Vec<_>>(), vec![("ok", "passed"), ("bad", "failed")]);
+        assert_eq!(
+            r.tests.iter().map(|t| (t.name.as_str(), t.status.as_str())).collect::<Vec<_>>(),
+            vec![("ok", "passed"), ("bad", "failed")]
+        );
         assert_eq!((r.tests[0].asserts_passed, r.tests[1].asserts_failed), (3, 1));
         let asserts = sink.of("assert");
         let bad = asserts.iter().find(|a| a["ok"] == false).unwrap();
-        assert_eq!((bad["op"].as_str(), bad["message"].as_str(), bad["expected"].as_str(), bad["actual"].as_str()), (Some("eq"), Some("один не два"), Some("2"), Some("1")));
+        assert_eq!(
+            (bad["op"].as_str(), bad["message"].as_str(), bad["expected"].as_str(), bad["actual"].as_str()),
+            (Some("eq"), Some("один не два"), Some("2"), Some("1"))
+        );
         assert!(sink.of("log").is_empty(), "после провала assert тест не продолжается");
         let kinds = sink.kinds();
         assert_eq!(kinds.first().map(String::as_str), Some("run_start"));
@@ -1120,7 +1271,8 @@ mod tests {
             &fake,
         );
         assert_eq!(r.status, "failed");
-        let steps: Vec<String> = sink.of("step").iter().map(|s| s["text"].as_str().unwrap().to_string()).collect();
+        let steps: Vec<String> =
+            sink.of("step").iter().map(|s| s["text"].as_str().unwrap().to_string()).collect();
         assert_eq!(steps, vec!["before", "after", "before", "after"]);
     }
 
@@ -1129,7 +1281,8 @@ mod tests {
         let fake = Fake::new();
         let mut c = cfg();
         c.only = Some(vec!["two".into()]);
-        let (r, _) = run_with("test('one', function() fail('нет') end)\ntest('two', function() end)", &fake, c);
+        let (r, _) =
+            run_with("test('one', function() fail('нет') end)\ntest('two', function() end)", &fake, c);
         assert_eq!((r.status.as_str(), r.tests.len()), ("passed", 1));
     }
 
@@ -1144,7 +1297,8 @@ mod tests {
         });
         let sink = Arc::new(Collect::default());
         let t0 = Instant::now();
-        let r = run_script("test('loop', function() while true do end end)", "demo", &cfg(), fake, sink, stop);
+        let r =
+            run_script("test('loop', function() while true do end end)", "demo", &cfg(), fake, sink, stop);
         t.join().unwrap();
         assert_eq!(r.status, "stopped");
         assert!(t0.elapsed() < Duration::from_secs(5), "бесконечный цикл остановлен");
@@ -1187,11 +1341,21 @@ mod tests {
         assert_eq!(log[0], "touch 1 0 0.50 0.25 p=Some(0.7) s=Some(0.05) f=0");
         assert_eq!(log[1], "touch 1 2 0.50 0.25 p=Some(0.7) s=Some(0.05) f=0");
         // Свайп: нажатие, два промежуточных шага, отпускание.
-        assert_eq!(log[2..6].iter().map(|l| l.split(' ').nth(2).unwrap()).collect::<Vec<_>>(), vec!["0", "1", "1", "2"]);
-        assert!(log.contains(&"key 1 0x29 true".to_string()) && log.contains(&"key 1 0x29 false".to_string()), "Esc");
+        assert_eq!(
+            log[2..6].iter().map(|l| l.split(' ').nth(2).unwrap()).collect::<Vec<_>>(),
+            vec!["0", "1", "1", "2"]
+        );
+        assert!(
+            log.contains(&"key 1 0x29 true".to_string()) && log.contains(&"key 1 0x29 false".to_string()),
+            "Esc"
+        );
         // Заглавная H набирается через Shift (0xE1), потом h (0x0B).
-        let typed: Vec<&String> = log.iter().filter(|l| l.starts_with("key") && l.ends_with("true")).collect();
-        assert!(typed.iter().any(|l| l.contains("0xe1")) && typed.iter().any(|l| l.contains("0xb")), "{typed:?}");
+        let typed: Vec<&String> =
+            log.iter().filter(|l| l.starts_with("key") && l.ends_with("true")).collect();
+        assert!(
+            typed.iter().any(|l| l.contains("0xe1")) && typed.iter().any(|l| l.contains("0xb")),
+            "{typed:?}"
+        );
         assert!(log.contains(&"scroll 1 -2 false".to_string()));
         assert!(log.contains(&"wake 1".to_string()));
         assert!(log.contains(&"enable 1 1 false".to_string()));
@@ -1212,7 +1376,10 @@ mod tests {
     fn frames_are_acquired_once_released_at_the_end_and_saved_as_artifacts() {
         let fake = Fake::new();
         // Минимальный JPEG с размером 560x1280 в заголовке.
-        let jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x04, 0x00, 0x00, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x05, 0x00, 0x02, 0x30, 0x01, 0x01, 0x11, 0x00];
+        let jpeg = vec![
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x04, 0x00, 0x00, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x05, 0x00, 0x02,
+            0x30, 0x01, 0x01, 0x11, 0x00,
+        ];
         fake.push_frame(jpeg);
         let dir = std::env::temp_dir().join(format!("pcdock-lua-art-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1269,7 +1436,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
             f2.push_frame(vec![2]); // другой
         });
-        let (r, _) = run("local f = phones()[1]:wait_change(5)\nassert.truthy(f ~= nil)\nassert.eq(f.seq, 3)", &fake);
+        let (r, _) =
+            run("local f = phones()[1]:wait_change(5)\nassert.truthy(f ~= nil)\nassert.eq(f.seq, 3)", &fake);
         t.join().unwrap();
         assert_eq!(r.status, "passed", "{r:?}");
     }
@@ -1314,7 +1482,10 @@ mod tests {
         let fake = Fake::new();
         let (r, sink) = run("test('a', function() end)\ntest('b', function() assert.eq(1,2) end)", &fake);
         let j = r.to_json();
-        assert_eq!((j["passed"].as_u64(), j["failed"].as_u64(), j["errors"].as_u64()), (Some(1), Some(1), Some(0)));
+        assert_eq!(
+            (j["passed"].as_u64(), j["failed"].as_u64(), j["errors"].as_u64()),
+            (Some(1), Some(1), Some(0))
+        );
         assert_eq!(j["tests"][1]["name"], "b");
         assert_eq!(sink.of("run_end")[0]["status"], "failed");
     }

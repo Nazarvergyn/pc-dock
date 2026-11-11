@@ -4,4 +4,6 @@ pub mod backend;
 pub mod events;
 pub mod jpeg;
 pub mod lua;
+pub mod runs;
+pub mod service;
 pub mod store;

@@ -83,7 +83,8 @@ impl ScriptStore {
     fn write_index(&self, list: &[ScriptMeta]) -> Result<(), String> {
         let v = json!({"scripts": list.iter().map(ScriptMeta::to_json).collect::<Vec<_>>()});
         let tmp = self.dir.join("index.json.tmp");
-        fs::write(&tmp, serde_json::to_string_pretty(&v).unwrap()).map_err(|e| format!("запись индекса: {e}"))?;
+        fs::write(&tmp, serde_json::to_string_pretty(&v).unwrap())
+            .map_err(|e| format!("запись индекса: {e}"))?;
         fs::rename(&tmp, self.index_path()).map_err(|e| format!("запись индекса: {e}"))
     }
 
@@ -97,7 +98,11 @@ impl ScriptStore {
         if !valid_id(id) {
             return Err(format!("плохой id сценария: {id:?}"));
         }
-        let meta = self.read_index()?.into_iter().find(|m| m.id == id).ok_or_else(|| format!("нет сценария {id}"))?;
+        let meta = self
+            .read_index()?
+            .into_iter()
+            .find(|m| m.id == id)
+            .ok_or_else(|| format!("нет сценария {id}"))?;
         let source = fs::read_to_string(self.file(id)).map_err(|e| format!("сценарий {id}: {e}"))?;
         Ok((meta, source))
     }
@@ -134,7 +139,13 @@ impl ScriptStore {
                     }
                     n += 1;
                 };
-                let m = ScriptMeta { id: new_id, name: name.to_string(), created_ms: now, updated_ms: now, size: source.len() };
+                let m = ScriptMeta {
+                    id: new_id,
+                    name: name.to_string(),
+                    created_ms: now,
+                    updated_ms: now,
+                    size: source.len(),
+                };
                 list.push(m.clone());
                 m
             }
