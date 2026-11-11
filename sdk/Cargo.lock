@@ -508,6 +508,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pcdock-net"
+version = "0.1.0"
+dependencies = [
+ "interprocess",
+ "serde_json",
+ "tungstenite",
+]
+
+[[package]]
 name = "pcdock-serial"
 version = "0.1.0"
 dependencies = [
@@ -522,6 +531,7 @@ dependencies = [
  "interprocess",
  "pcdock-core",
  "pcdock-farm",
+ "pcdock-net",
  "serde",
  "serde_json",
  "tungstenite",

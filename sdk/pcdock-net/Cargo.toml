@@ -1,0 +1,11 @@
+[package]
+name = "pcdock-net"
+version = "0.1.0"
+edition = "2021"
+description = "Shared server side of the PC Dock daemons: TCP, WebSocket and local-pipe carriers, per-client outbox, token auth."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+serde_json = "1"
+tungstenite = "0.24"
+interprocess = "2"
