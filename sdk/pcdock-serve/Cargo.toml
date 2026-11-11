@@ -13,6 +13,7 @@ path = "src/lib.rs"
 pcdock-core = { path = "../pcdock-core" }
 pcdock-net = { path = "../pcdock-net" }
 pcdock-farm = { path = "../pcdock-farm" }
+pcdock-adb = { path = "../pcdock-adb" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

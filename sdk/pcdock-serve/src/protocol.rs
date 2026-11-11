@@ -33,6 +33,34 @@ pub enum ClientMsg {
     Snapshot {
         phone: u32,
     },
+    /// Записать файл на телефон: после `FileReady` клиент шлёт `size` байт пакетами типа 3
+    /// (`[номер передачи u32 LE][данные]`). `media` — сообщить галерее о новом файле.
+    FilePut {
+        phone: u32,
+        dest: String,
+        size: u64,
+        #[serde(default)]
+        media: bool,
+    },
+    /// Прочитать файл с телефона: после `FileInfo` сервер шлёт данные пакетами типа 3, затем `FileDone`.
+    FileGet {
+        phone: u32,
+        src: String,
+    },
+    /// Имена в папке на телефоне.
+    FileList {
+        phone: u32,
+        path: String,
+    },
+    /// Удалить файл на телефоне.
+    FileDelete {
+        phone: u32,
+        path: String,
+    },
+    /// Прервать передачу.
+    FileCancel {
+        transfer: u32,
+    },
     Unwatch {
         phone: u32,
     },
@@ -119,6 +147,33 @@ pub enum ServerMsg {
     },
     /// Команда выполнена (ответ на команду с `id`, у которой нет своего ответа).
     Ok,
+    /// Можно слать данные файла (`FilePut`).
+    FileReady {
+        transfer: u32,
+    },
+    /// Размер файла, который сейчас придёт (`FileGet`).
+    FileInfo {
+        transfer: u32,
+        size: u64,
+    },
+    FileProgress {
+        transfer: u32,
+        bytes: u64,
+    },
+    FileDone {
+        transfer: u32,
+        size: u64,
+    },
+    FileFailed {
+        transfer: u32,
+        detail: String,
+    },
+    /// Имена в папке (у папок на конце `/`).
+    Files {
+        phone: u32,
+        path: String,
+        names: Vec<String>,
+    },
     /// Пароль принят.
     Authed,
     /// Список телефонов: номера и подробности (состояние, путь, серийник, имя, экран).
@@ -202,6 +257,7 @@ pub enum ServerMsg {
 pub const PKG_JSON: u8 = 0;
 pub const PKG_VIDEO: u8 = 1;
 pub const PKG_AUDIO: u8 = 2;
+pub const PKG_FILE: u8 = 3;
 
 /// Шапка видеопакета: phone u32 LE, seq u64 LE, codec u8, key u8, pts u64 LE.
 pub const VIDEO_HEADER_LEN: usize = 4 + 8 + 1 + 1 + 8;

@@ -690,6 +690,7 @@ name = "pcdock-serve"
 version = "0.1.0"
 dependencies = [
  "interprocess",
+ "pcdock-adb",
  "pcdock-core",
  "pcdock-farm",
  "pcdock-net",

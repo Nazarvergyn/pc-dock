@@ -30,6 +30,19 @@ struct Args {
     #[arg(long = "server-apk")]
     server_apk: Option<std::path::PathBuf>,
 
+    /// Включить передачу файлов на телефоны и с них (по ADB). Без этого файловые команды отключены.
+    #[arg(long = "files")]
+    files: bool,
+
+    /// Папка на телефоне, доступная для файлов (можно несколько раз). По умолчанию: /sdcard,
+    /// /storage/emulated/0, /data/local/tmp.
+    #[arg(long = "files-root")]
+    files_roots: Vec<String>,
+
+    /// Адрес сервера ADB (по умолчанию локальный 127.0.0.1:5037).
+    #[arg(long = "adb-server")]
+    adb_server: Option<String>,
+
     /// Дополнительный производитель USB (VID, шестнадцатеричный, например `0x2a70`). Можно несколько раз.
     #[arg(long = "vid", value_parser = parse_vid)]
     vids: Vec<u16>,
@@ -148,6 +161,7 @@ fn main() {
     let cfg = FarmConfig {
         vendor_ids,
         server_apk: args.server_apk.clone(),
+        adb_server: args.adb_server.clone(),
         prefer: args.prefer.iter().cloned().collect(),
         fallback_after: if args.no_fallback { None } else { FarmConfig::default().fallback_after },
         name: args.name.clone(),
@@ -188,7 +202,16 @@ fn main() {
             }
         }
     }
-    let serve = Serve::with_token(daemon, token);
+    let files = args.files.then(|| {
+        pcdock_serve::FileOptions::adb(
+            args.adb_server.clone(),
+            (!args.files_roots.is_empty()).then(|| args.files_roots.clone()),
+        )
+    });
+    if let Some(f) = &files {
+        log::info!("передача файлов включена, папки: {}", f.roots.join(", "));
+    }
+    let serve = Serve::with_options(daemon, token, files);
     if !args.no_tcp {
         match args.tcp.as_deref().unwrap_or("") {
             "" => {}

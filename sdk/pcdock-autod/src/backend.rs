@@ -7,7 +7,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use pcdock_client::{Client, VideoFrame, KIND_VIDEO};
+use pcdock_client::{Client, VideoFrame, KIND_FILE, KIND_VIDEO};
 use serde_json::{json, Value};
 
 /// Сведения о телефоне.
@@ -51,6 +51,7 @@ pub trait Backend: Send + Sync {
     fn phone(&self, id: u32) -> Option<PhoneInfo> {
         self.phones().into_iter().find(|p| p.id == id)
     }
+    #[allow(clippy::too_many_arguments)]
     fn touch(
         &self,
         phone: u32,
@@ -72,6 +73,34 @@ pub trait Backend: Send + Sync {
     fn latest_frame(&self, phone: u32) -> Option<Frame>;
     /// Ждёт кадр: самый свежий, но не старше номера `after` (если задан), не дольше `timeout`.
     fn wait_frame(&self, phone: u32, after: Option<u64>, timeout: Duration) -> Option<Frame>;
+
+    /// Записывает файл на телефон. `media` — сообщить галерее.
+    fn file_put(&self, _phone: u32, _dest: &str, _data: &[u8], _media: bool) -> Result<(), String> {
+        Err("передача файлов не поддерживается".into())
+    }
+    /// Читает файл с телефона целиком, не больше `max` байт.
+    fn file_get(&self, _phone: u32, _src: &str, _max: usize) -> Result<Vec<u8>, String> {
+        Err("передача файлов не поддерживается".into())
+    }
+    fn file_list(&self, _phone: u32, _path: &str) -> Result<Vec<String>, String> {
+        Err("передача файлов не поддерживается".into())
+    }
+    fn file_delete(&self, _phone: u32, _path: &str) -> Result<(), String> {
+        Err("передача файлов не поддерживается".into())
+    }
+}
+
+/// Приёмник данных и итога передачи файла: данные и событие `FileDone`/`FileFailed` могут прийти в любом порядке.
+#[derive(Default)]
+struct Route {
+    data: Vec<u8>,
+    done: Option<Result<(), String>>,
+}
+
+#[derive(Default)]
+struct Routes {
+    map: Mutex<HashMap<u32, Route>>,
+    changed: Condvar,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -90,6 +119,7 @@ pub struct FarmBackend {
     /// Частота кадров, которую автоматизация просит у телефона.
     fps: f32,
     alive: Arc<AtomicBool>,
+    routes: Arc<Routes>,
 }
 
 fn info_from(v: &Value) -> Option<PhoneInfo> {
@@ -117,6 +147,7 @@ impl FarmBackend {
         let alive = Arc::new(AtomicBool::new(true));
         let events = client.take_events().ok_or("события уже забраны")?;
         let binary = client.take_binary().ok_or("бинарные пакеты уже забраны")?;
+        let routes = Arc::new(Routes::default());
         let me = Arc::new(Self {
             client: client.clone(),
             phones: phones.clone(),
@@ -124,16 +155,29 @@ impl FarmBackend {
             watches: Mutex::new(HashMap::new()),
             fps,
             alive: alive.clone(),
+            routes: routes.clone(),
         });
         me.refresh()?;
 
         // События о телефонах: обновляют состояние.
         {
-            let (phones, alive) = (phones.clone(), alive.clone());
+            let (phones, alive, routes) = (phones.clone(), alive.clone(), routes.clone());
             thread::Builder::new()
                 .name("autod-farm-events".into())
                 .spawn(move || {
                     while let Ok(v) = events.recv() {
+                        if let (Some(t), Some(ev)) = (v["transfer"].as_u64(), v["ev"].as_str()) {
+                            let result = match ev {
+                                "FileDone" => Some(Ok(())),
+                                "FileFailed" => Some(Err(v["detail"].as_str().unwrap_or("").to_string())),
+                                _ => None,
+                            };
+                            if let Some(r) = result {
+                                routes.map.lock().unwrap().entry(t as u32).or_default().done = Some(r);
+                                routes.changed.notify_all();
+                            }
+                            continue;
+                        }
                         let id = v["phone"].as_u64().map(|x| x as u32);
                         let Some(id) = id else { continue };
                         let mut map = phones.lock().unwrap();
@@ -170,11 +214,24 @@ impl FarmBackend {
         }
         // Кадры: последний кадр каждого телефона.
         {
-            let (frames, alive) = (frames.clone(), alive.clone());
+            let (frames, alive, routes) = (frames.clone(), alive.clone(), routes.clone());
             thread::Builder::new()
                 .name("autod-farm-frames".into())
                 .spawn(move || {
                     while let Ok((kind, payload)) = binary.recv() {
+                        if kind == KIND_FILE && payload.len() >= 4 {
+                            let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                            routes
+                                .map
+                                .lock()
+                                .unwrap()
+                                .entry(id)
+                                .or_default()
+                                .data
+                                .extend_from_slice(&payload[4..]);
+                            routes.changed.notify_all();
+                            continue;
+                        }
                         if kind != KIND_VIDEO {
                             continue;
                         }
@@ -210,6 +267,25 @@ impl FarmBackend {
             }
         }
         Ok(())
+    }
+
+    /// Ждёт итога передачи `t`.
+    fn wait_route(&self, t: u32, _ready: impl Fn(&Route) -> bool, timeout: Duration) -> Result<(), String> {
+        let end = Instant::now() + timeout;
+        let mut map = self.routes.map.lock().unwrap();
+        loop {
+            if let Some(done) = map.get(&t).and_then(|r| r.done.clone()) {
+                return done;
+            }
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err("передача файла не завершилась вовремя".into());
+            }
+            if !self.alive.load(Ordering::SeqCst) {
+                return Err("связь с pcdockd потеряна".into());
+            }
+            map = self.routes.changed.wait_timeout(map, left.min(Duration::from_millis(200))).unwrap().0;
+        }
     }
 
     fn op(&self, msg: Value) -> Result<(), String> {
@@ -279,6 +355,57 @@ impl Backend for FarmBackend {
 
     fn latest_frame(&self, phone: u32) -> Option<Frame> {
         self.frames.frames.lock().unwrap().get(&phone).cloned()
+    }
+
+    fn file_put(&self, phone: u32, dest: &str, data: &[u8], media: bool) -> Result<(), String> {
+        let r = self
+            .client
+            .request(
+                json!({"op": "FilePut", "phone": phone, "dest": dest, "size": data.len(), "media": media}),
+            )
+            .map_err(|e| e.to_string())?;
+        let t = r["transfer"].as_u64().ok_or("нет номера передачи")? as u32;
+        for part in data.chunks(60_000) {
+            let mut p = t.to_le_bytes().to_vec();
+            p.extend_from_slice(part);
+            self.client.send_binary(KIND_FILE, &p).map_err(|e| e.to_string())?;
+        }
+        let res = self.wait_route(t, |_| true, Duration::from_secs(120));
+        self.routes.map.lock().unwrap().remove(&t);
+        res.map(|_| ())
+    }
+
+    fn file_get(&self, phone: u32, src: &str, max: usize) -> Result<Vec<u8>, String> {
+        let r = self
+            .client
+            .request(json!({"op": "FileGet", "phone": phone, "src": src}))
+            .map_err(|e| e.to_string())?;
+        let t = r["transfer"].as_u64().ok_or("нет номера передачи")? as u32;
+        let size = r["size"].as_u64().unwrap_or(0) as usize;
+        if size > max {
+            let _ = self.client.request(json!({"op": "FileCancel", "transfer": t}));
+            self.routes.map.lock().unwrap().remove(&t);
+            return Err(format!("файл {size} байт больше предела {max}"));
+        }
+        let res = self.wait_route(t, |_| true, Duration::from_secs(120));
+        let data = self.routes.map.lock().unwrap().remove(&t).map(|r| r.data).unwrap_or_default();
+        res?;
+        if data.len() != size {
+            return Err(format!("получено {} из {size} байт", data.len()));
+        }
+        Ok(data)
+    }
+
+    fn file_list(&self, phone: u32, path: &str) -> Result<Vec<String>, String> {
+        let r = self
+            .client
+            .request(json!({"op": "FileList", "phone": phone, "path": path}))
+            .map_err(|e| e.to_string())?;
+        Ok(r["names"].as_array().into_iter().flatten().filter_map(|n| n.as_str().map(String::from)).collect())
+    }
+
+    fn file_delete(&self, phone: u32, path: &str) -> Result<(), String> {
+        self.op(json!({"op": "FileDelete", "phone": phone, "path": path}))
     }
 
     fn wait_frame(&self, phone: u32, after: Option<u64>, timeout: Duration) -> Option<Frame> {
@@ -430,5 +557,17 @@ impl Backend for ReconnectBackend {
     }
     fn wait_frame(&self, phone: u32, after: Option<u64>, timeout: Duration) -> Option<Frame> {
         self.get().ok()?.wait_frame(phone, after, timeout)
+    }
+    fn file_put(&self, phone: u32, dest: &str, data: &[u8], media: bool) -> Result<(), String> {
+        self.get()?.file_put(phone, dest, data, media)
+    }
+    fn file_get(&self, phone: u32, src: &str, max: usize) -> Result<Vec<u8>, String> {
+        self.get()?.file_get(phone, src, max)
+    }
+    fn file_list(&self, phone: u32, path: &str) -> Result<Vec<String>, String> {
+        self.get()?.file_list(phone, path)
+    }
+    fn file_delete(&self, phone: u32, path: &str) -> Result<(), String> {
+        self.get()?.file_delete(phone, path)
     }
 }

@@ -527,6 +527,36 @@ impl UserData for PhoneHandle {
             };
             t.st.backend.enable(t.id, k, on).map_err(mlua::Error::runtime)
         });
+        // Файлы на телефоне (нужен `pcdockd --files`): запись строки байт, чтение, список, удаление.
+        methods.add_method("push", |lua, t, (dest, data, o): (String, mlua::String, Option<Table>)| {
+            t.st.check_alive()?;
+            let media = o.as_ref().and_then(|t| t.get::<Option<bool>>("media").ok().flatten()).unwrap_or(false);
+            t.st.backend.file_put(t.id, &dest, &data.as_bytes(), media).map_err(mlua::Error::runtime)?;
+            t.st.emit("log", json!({"test": *t.st.current.lock().unwrap(), "level": "debug", "text": format!("файл записан: {dest} ({} байт)", data.as_bytes().len())}));
+            let _ = lua;
+            Ok(())
+        });
+        methods.add_method("pull", |lua, t, (src, max): (String, Option<usize>)| {
+            t.st.check_alive()?;
+            let data =
+                t.st.backend
+                    .file_get(t.id, &src, max.unwrap_or(16 * 1024 * 1024))
+                    .map_err(mlua::Error::runtime)?;
+            lua.create_string(&data)
+        });
+        methods.add_method("ls", |lua, t, path: String| {
+            t.st.check_alive()?;
+            let names = t.st.backend.file_list(t.id, &path).map_err(mlua::Error::runtime)?;
+            let out = lua.create_table()?;
+            for (i, n) in names.iter().enumerate() {
+                out.set(i + 1, n.as_str())?;
+            }
+            Ok(out)
+        });
+        methods.add_method("rm", |_, t, path: String| {
+            t.st.check_alive()?;
+            t.st.backend.file_delete(t.id, &path).map_err(mlua::Error::runtime)
+        });
         // Последний кадр экрана; `{fresh = true}` — дождаться нового, `{timeout = N}` — срок ожидания.
         methods.add_method("frame", |_, t, o: Option<Table>| {
             t.st.acquire(t.id)?;
@@ -1066,6 +1096,7 @@ mod tests {
         frames: Mutex<Vec<Frame>>,
         seq: AtomicU64,
         state: Mutex<String>,
+        files: Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
     }
 
     impl Fake {
@@ -1134,6 +1165,27 @@ mod tests {
         }
         fn release(&self, phone: u32) {
             self.log.lock().unwrap().push(format!("release {phone}"));
+        }
+        fn file_put(&self, _phone: u32, dest: &str, data: &[u8], _media: bool) -> Result<(), String> {
+            self.files.lock().unwrap().insert(dest.to_string(), data.to_vec());
+            Ok(())
+        }
+        fn file_get(&self, _phone: u32, src: &str, _max: usize) -> Result<Vec<u8>, String> {
+            self.files.lock().unwrap().get(src).cloned().ok_or_else(|| format!("нет файла {src}"))
+        }
+        fn file_list(&self, _phone: u32, path: &str) -> Result<Vec<String>, String> {
+            let prefix = format!("{path}/");
+            Ok(self
+                .files
+                .lock()
+                .unwrap()
+                .keys()
+                .filter_map(|k| k.strip_prefix(&prefix).map(String::from))
+                .collect())
+        }
+        fn file_delete(&self, _phone: u32, path: &str) -> Result<(), String> {
+            self.files.lock().unwrap().remove(path);
+            Ok(())
         }
         fn latest_frame(&self, _phone: u32) -> Option<Frame> {
             self.frames.lock().unwrap().last().cloned()
@@ -1471,6 +1523,26 @@ mod tests {
             assert.contains("hello world", "lo wo")
             assert.matches("abc123", "%d+")
             assert.falsy(nil)
+            "#,
+            &fake,
+        );
+        assert_eq!(r.status, "passed", "{r:?}");
+    }
+
+    #[test]
+    fn files_can_be_pushed_pulled_listed_and_removed() {
+        let fake = Fake::new();
+        let (r, _) = run(
+            r#"
+            local p = phones()[1]
+            p:push("/sdcard/Download/a.txt", "привет\0мир", {media = true})
+            assert.eq(p:pull("/sdcard/Download/a.txt"), "привет\0мир")
+            assert.eq(p:ls("/sdcard/Download"), {"a.txt"})
+            p:rm("/sdcard/Download/a.txt")
+            assert.eq(#p:ls("/sdcard/Download"), 0)
+            local ok, err = pcall(function() return p:pull("/sdcard/none") end)
+            assert.falsy(ok)
+            assert.contains(tostring(err), "нет файла")
             "#,
             &fake,
         );

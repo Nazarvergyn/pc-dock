@@ -103,6 +103,26 @@ impl Outbox {
         true
     }
 
+    /// Ждёт, пока все надёжные пакеты будут выданы писателю (после этого событие JSON уйдёт строго за ними).
+    /// `false` — ящик закрыт или время вышло.
+    pub fn wait_bulk_drained(&self, timeout: std::time::Duration) -> bool {
+        let end = std::time::Instant::now() + timeout;
+        let mut st = self.state.lock().unwrap();
+        loop {
+            if st.closed {
+                return false;
+            }
+            if st.bulk.is_empty() {
+                return true;
+            }
+            let left = end.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            st = self.space.wait_timeout(st, left).unwrap().0;
+        }
+    }
+
     pub fn close(&self) {
         self.state.lock().unwrap().closed = true;
         self.ready.notify_all();
@@ -119,7 +139,7 @@ impl Outbox {
             return Some(Out::Json(j));
         }
         if let Some((kind, payload)) = st.bulk.pop_front() {
-            self.space.notify_one();
+            self.space.notify_all();
             return Some(Out::Binary { kind, payload });
         }
         if let Some((kind, payload)) = st.latest.take() {
@@ -193,6 +213,18 @@ mod tests {
         assert!(!o.json("x".into()), "переполнение отключает клиента");
         assert!(o.is_closed());
         assert_eq!(o.pop_now(), None);
+    }
+
+    #[test]
+    fn wait_bulk_drained_returns_after_the_queue_is_emptied() {
+        let o = std::sync::Arc::new(Outbox::new());
+        assert!(o.bulk(3, vec![1]));
+        let o2 = o.clone();
+        let t = std::thread::spawn(move || o2.wait_bulk_drained(std::time::Duration::from_secs(2)));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!t.is_finished());
+        assert!(o.pop_now().is_some());
+        assert!(t.join().unwrap());
     }
 
     #[test]

@@ -72,6 +72,11 @@ impl Adb {
         Self::new("127.0.0.1:5037")
     }
 
+    /// Адрес сервера ADB.
+    pub fn addr(&self) -> &str {
+        &self.addr
+    }
+
     fn open(&self) -> std::io::Result<TcpStream> {
         let addr = self.addr.to_socket_addrs()?.next().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "плохой адрес ADB-сервера")
@@ -157,23 +162,87 @@ impl Adb {
 
     /// Кладёт файл на телефон (`cat > путь`). Путь без пробелов и кавычек.
     pub fn push(&self, serial: &str, remote_path: &str, data: &[u8]) -> Result<(), String> {
-        if remote_path.chars().any(|c| c.is_whitespace() || "'\"$`;&|<>".contains(c)) {
-            return Err(format!("плохой путь на телефоне: {remote_path:?}"));
-        }
-        let mut s = self.open_service(serial, &format!("exec:cat > {remote_path}"))?;
+        let mut w = self.open_push(serial, remote_path)?;
+        w.write(data)?;
+        w.finish().map(|_| ())
+    }
+
+    /// Открывает запись файла на телефоне: данные пишутся кусками, `finish` завершает и сообщает вывод команды.
+    pub fn open_push(&self, serial: &str, remote_path: &str) -> Result<PushWriter, String> {
+        check_remote_path(remote_path)?;
+        let s = self.open_service(serial, &format!("exec:cat > {remote_path}"))?;
         s.set_write_timeout(Some(Duration::from_secs(30))).map_err(|e| e.to_string())?;
-        s.write_all(data).map_err(|e| format!("загрузка {remote_path}: {e}"))?;
-        s.shutdown(std::net::Shutdown::Write).map_err(|e| e.to_string())?;
-        // Ждём, пока `cat` закончит: поток закроется со стороны телефона.
+        Ok(PushWriter { stream: s, path: remote_path.to_string() })
+    }
+
+    /// Открывает чтение файла с телефона (`cat путь`): читайте поток до конца. Ошибки команды приходят в том же
+    /// потоке текстом, поэтому проверяйте размер заранее (`file_size`) и после чтения.
+    pub fn open_pull(&self, serial: &str, remote_path: &str) -> Result<TcpStream, String> {
+        check_remote_path(remote_path)?;
+        let s = self.open_service(serial, &format!("exec:cat {remote_path}"))?;
         s.set_read_timeout(Some(Duration::from_secs(30))).map_err(|e| e.to_string())?;
-        let mut sink = [0u8; 256];
+        Ok(s)
+    }
+
+    /// Выполняет команду на телефоне и возвращает её вывод (stdout вместе со stderr).
+    pub fn exec_text(&self, serial: &str, command: &str) -> Result<String, String> {
+        let mut s = self.open_service(serial, &format!("exec:{command}"))?;
+        s.set_read_timeout(Some(Duration::from_secs(30))).map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        let mut buf = [0u8; 4096];
         loop {
-            match s.read(&mut sink) {
-                Ok(0) => return Ok(()),
-                Ok(_) => {}
-                Err(e) => return Err(format!("загрузка {remote_path}: {e}")),
+            match s.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(e) => return Err(format!("{command}: {e}")),
+            }
+            if out.len() > 8 * 1024 * 1024 {
+                return Err(format!("{command}: слишком длинный вывод"));
             }
         }
+        Ok(String::from_utf8_lossy(&out).into_owned())
+    }
+
+    /// Размер файла на телефоне в байтах; ошибка, если файла нет.
+    pub fn file_size(&self, serial: &str, remote_path: &str) -> Result<u64, String> {
+        check_remote_path(remote_path)?;
+        let out = self.exec_text(serial, &format!("stat -c %s {remote_path}"))?;
+        out.trim().parse::<u64>().map_err(|_| format!("нет файла {remote_path}: {}", out.trim()))
+    }
+
+    /// Имена в папке на телефоне (у папок на конце `/`).
+    pub fn list_dir(&self, serial: &str, remote_path: &str) -> Result<Vec<String>, String> {
+        check_remote_path(remote_path)?;
+        let out = self.exec_text(serial, &format!("ls -1p {remote_path}"))?;
+        if out.contains("No such file")
+            || out.contains("Permission denied")
+            || out.contains("Not a directory")
+        {
+            return Err(format!("{remote_path}: {}", out.trim()));
+        }
+        Ok(out.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect())
+    }
+
+    /// Удаляет файл на телефоне.
+    pub fn remove_file(&self, serial: &str, remote_path: &str) -> Result<(), String> {
+        check_remote_path(remote_path)?;
+        let out = self.exec_text(serial, &format!("rm -f {remote_path}"))?;
+        if out.trim().is_empty() {
+            Ok(())
+        } else {
+            Err(format!("{remote_path}: {}", out.trim()))
+        }
+    }
+
+    /// Просит галерею и системные приложения заметить файл (рассылка `MEDIA_SCANNER_SCAN_FILE`; на новых
+    /// версиях Android действует не везде).
+    pub fn media_scan(&self, serial: &str, remote_path: &str) -> Result<(), String> {
+        check_remote_path(remote_path)?;
+        self.exec_text(
+            serial,
+            &format!("am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://{remote_path}"),
+        )
+        .map(|_| ())
     }
 
     /// Запускает команду на телефоне и держит её поток: пока он открыт, процесс живёт; закрытие потока
@@ -195,6 +264,57 @@ fn is_alive(s: &TcpStream) -> bool {
         Ok(0) => false,
         Ok(_) => true,
         Err(e) => matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut),
+    }
+}
+
+/// Путь на телефоне: абсолютный, без `..`, пробелов и символов, которые оболочка поймёт по-своему.
+pub fn check_remote_path(path: &str) -> Result<(), String> {
+    let bad = |why: &str| Err(format!("плохой путь на телефоне {path:?}: {why}"));
+    if !path.starts_with('/') {
+        return bad("нужен абсолютный путь");
+    }
+    if path.len() > 512 {
+        return bad("слишком длинный");
+    }
+    if path.split('/').any(|p| p == "..") {
+        return bad("«..» не допускается");
+    }
+    if path.chars().any(|c| c.is_whitespace() || c.is_control() || "'\"\\$`;&|<>*?()[]{}!#~".contains(c)) {
+        return bad("пробелы и спецсимволы не поддерживаются");
+    }
+    Ok(())
+}
+
+/// Запись файла на телефон куском за куском (см. [`Adb::open_push`]).
+pub struct PushWriter {
+    stream: TcpStream,
+    path: String,
+}
+
+impl PushWriter {
+    pub fn write(&mut self, data: &[u8]) -> Result<(), String> {
+        self.stream.write_all(data).map_err(|e| format!("загрузка {}: {e}", self.path))
+    }
+
+    /// Завершает запись и возвращает вывод команды (пустой, если всё прошло гладко).
+    pub fn finish(mut self) -> Result<String, String> {
+        self.stream.shutdown(std::net::Shutdown::Write).map_err(|e| e.to_string())?;
+        self.stream.set_read_timeout(Some(Duration::from_secs(30))).map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        let mut buf = [0u8; 256];
+        loop {
+            match self.stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(e) => return Err(format!("загрузка {}: {e}", self.path)),
+            }
+        }
+        let text = String::from_utf8_lossy(&out).trim().to_string();
+        if text.is_empty() {
+            Ok(text)
+        } else {
+            Err(format!("{}: {text}", self.path))
+        }
     }
 }
 
@@ -497,6 +617,8 @@ mod tests {
     struct Seen {
         services: Vec<String>,
         pushed: Vec<usize>,
+        /// Файлы «телефона»: путь → содержимое.
+        files: std::collections::HashMap<String, Vec<u8>>,
         /// Соединения запущенного сервера, которые ещё открыты.
         spawned_open: usize,
     }
@@ -531,17 +653,62 @@ mod tests {
                             return;
                         } else if svc.starts_with("host:transport:") {
                             let _ = s.write_all(b"OKAY");
-                        } else if svc.starts_with("exec:cat >") {
+                        } else if let Some(path) = svc.strip_prefix("exec:cat > ") {
                             let _ = s.write_all(b"OKAY");
-                            let mut total = 0;
+                            let mut data = Vec::new();
                             let mut buf = [0u8; 4096];
                             while let Ok(n) = s.read(&mut buf) {
                                 if n == 0 {
                                     break;
                                 }
-                                total += n;
+                                data.extend_from_slice(&buf[..n]);
                             }
-                            seen.lock().unwrap().pushed.push(total);
+                            let mut st = seen.lock().unwrap();
+                            st.pushed.push(data.len());
+                            st.files.insert(path.to_string(), data);
+                            return;
+                        } else if let Some(path) = svc.strip_prefix("exec:cat ") {
+                            let _ = s.write_all(b"OKAY");
+                            let content = seen.lock().unwrap().files.get(path).cloned();
+                            let _ = match content {
+                                Some(c) => s.write_all(&c),
+                                None => s.write_all(
+                                    format!("cat: {path}: No such file or directory\n").as_bytes(),
+                                ),
+                            };
+                            return;
+                        } else if let Some(path) = svc.strip_prefix("exec:stat -c %s ") {
+                            let _ = s.write_all(b"OKAY");
+                            let size = seen.lock().unwrap().files.get(path).map(|c| c.len());
+                            let _ = match size {
+                                Some(n) => s.write_all(format!("{n}\n").as_bytes()),
+                                None => s.write_all(
+                                    format!("stat: '{path}': No such file or directory\n").as_bytes(),
+                                ),
+                            };
+                            return;
+                        } else if let Some(dir) = svc.strip_prefix("exec:ls -1p ") {
+                            let _ = s.write_all(b"OKAY");
+                            let prefix = format!("{}/", dir.trim_end_matches('/'));
+                            let names: Vec<String> = seen
+                                .lock()
+                                .unwrap()
+                                .files
+                                .keys()
+                                .filter_map(|k| k.strip_prefix(&prefix).map(String::from))
+                                .collect();
+                            let _ = if names.is_empty() {
+                                s.write_all(format!("ls: {dir}: No such file or directory\n").as_bytes())
+                            } else {
+                                s.write_all((names.join("\n") + "\n").as_bytes())
+                            };
+                            return;
+                        } else if let Some(path) = svc.strip_prefix("exec:rm -f ") {
+                            let _ = s.write_all(b"OKAY");
+                            seen.lock().unwrap().files.remove(path);
+                            return;
+                        } else if svc.starts_with("exec:am broadcast") {
+                            let _ = s.write_all(b"OKAYBroadcasting: Intent\n");
                             return;
                         } else if svc.starts_with("exec:") {
                             let _ = s.write_all(b"OKAY");
@@ -598,6 +765,57 @@ mod tests {
         drop(st);
         assert!(adb.push("ABC", "/tmp/a b", &data).is_err());
         assert!(adb.push("ABC", "/tmp/a;rm -rf x", &data).is_err());
+    }
+
+    #[test]
+    fn files_round_trip_through_push_pull_stat_list_and_remove() {
+        let (addr, seen) = fake_adb("");
+        let adb = Adb::new(addr);
+        let data: Vec<u8> = (0..50_000u32).map(|i| (i % 251) as u8).collect();
+
+        // Запись кусками.
+        let mut w = adb.open_push("S", "/sdcard/Pictures/a.bin").unwrap();
+        for chunk in data.chunks(7000) {
+            w.write(chunk).unwrap();
+        }
+        assert_eq!(w.finish().unwrap(), "");
+        assert_eq!(adb.file_size("S", "/sdcard/Pictures/a.bin").unwrap(), 50_000);
+
+        // Чтение.
+        let mut r = adb.open_pull("S", "/sdcard/Pictures/a.bin").unwrap();
+        let mut got = Vec::new();
+        r.read_to_end(&mut got).unwrap();
+        assert_eq!(got, data);
+
+        assert_eq!(adb.list_dir("S", "/sdcard/Pictures").unwrap(), vec!["a.bin"]);
+        adb.media_scan("S", "/sdcard/Pictures/a.bin").unwrap();
+        adb.remove_file("S", "/sdcard/Pictures/a.bin").unwrap();
+        assert!(adb.file_size("S", "/sdcard/Pictures/a.bin").is_err());
+        assert!(seen.lock().unwrap().files.is_empty());
+    }
+
+    #[test]
+    fn remote_paths_are_checked() {
+        for ok in ["/sdcard/a.png", "/storage/emulated/0/DCIM/x_1-2.jpg", "/data/local/tmp/pcdock-server.apk"]
+        {
+            assert!(check_remote_path(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "sdcard/a",
+            "/sdcard/../data",
+            "/sdcard/a b",
+            "/sdcard/a;rm",
+            "/sdcard/$HOME",
+            "/sdcard/`x`",
+            "/sdcard/a\nb",
+            "/sdcard/*",
+            "",
+        ] {
+            assert!(check_remote_path(bad).is_err(), "{bad:?}");
+        }
+        let adb = Adb::new("127.0.0.1:1");
+        assert!(adb.open_push("S", "/sdcard/a b").is_err());
+        assert!(adb.file_size("S", "../x").is_err());
     }
 
     #[test]

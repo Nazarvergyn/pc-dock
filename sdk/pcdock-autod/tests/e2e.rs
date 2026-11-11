@@ -10,10 +10,10 @@ use pcdock_autod::runs::Runs;
 use pcdock_autod::service;
 use pcdock_autod::store::ScriptStore;
 use pcdock_client::Client;
-use pcdock_core::link::{InputCmd, LinkError, PhoneLink};
+use pcdock_core::link::{Discovery, InputCmd, LinkError, LinkFactory, PhoneLink, Sighting, Transport};
 use pcdock_core::session::Event;
-use pcdock_farm::Farm;
-use pcdock_serve::Serve;
+use pcdock_farm::{DiscoveryConfig, Farm};
+use pcdock_serve::{FileBackend, FileOptions, FileWriter, Serve};
 use serde_json::{json, Value};
 
 struct FakeLink {
@@ -349,4 +349,141 @@ fn phones_list_comes_from_the_farm() {
     let r = c.request(json!({"op": "Phones"})).unwrap();
     assert_eq!(r["phones"], json!([1]));
     assert_eq!(r["details"][0]["state"], "ready");
+}
+
+// ---- файлы: сценарий Lua → автоматизация → pcdockd → «телефон» ----------------------------------
+
+#[derive(Default)]
+struct MemFs(Mutex<std::collections::BTreeMap<String, Vec<u8>>>);
+
+struct MemWriter(Arc<MemFs>, String, Vec<u8>);
+
+impl FileWriter for MemWriter {
+    fn write(&mut self, data: &[u8]) -> Result<(), String> {
+        self.2.extend_from_slice(data);
+        Ok(())
+    }
+    fn finish(self: Box<Self>, size: u64, _media: bool) -> Result<(), String> {
+        if self.2.len() as u64 != size {
+            return Err("размер не сошёлся".into());
+        }
+        self.0 .0.lock().unwrap().insert(self.1, self.2);
+        Ok(())
+    }
+}
+
+struct Files(Arc<MemFs>);
+
+impl FileBackend for Files {
+    fn put(&self, _s: &str, dest: &str) -> Result<Box<dyn FileWriter>, String> {
+        Ok(Box::new(MemWriter(self.0.clone(), dest.to_string(), Vec::new())))
+    }
+    fn get(&self, _s: &str, src: &str) -> Result<(u64, Box<dyn std::io::Read + Send>), String> {
+        let d = self.0 .0.lock().unwrap().get(src).cloned().ok_or_else(|| format!("нет файла {src}"))?;
+        Ok((d.len() as u64, Box::new(std::io::Cursor::new(d))))
+    }
+    fn list(&self, _s: &str, path: &str) -> Result<Vec<String>, String> {
+        let prefix = format!("{path}/");
+        Ok(self
+            .0
+             .0
+            .lock()
+            .unwrap()
+            .keys()
+            .filter_map(|k| k.strip_prefix(&prefix).map(String::from))
+            .collect())
+    }
+    fn delete(&self, _s: &str, path: &str) -> Result<(), String> {
+        self.0 .0.lock().unwrap().remove(path);
+        Ok(())
+    }
+}
+
+struct Scan;
+impl Discovery for Scan {
+    fn scan(&mut self) -> Vec<Sighting> {
+        vec![Sighting {
+            transport: Transport::Adb,
+            address: "A".into(),
+            serial: Some("SER1".into()),
+            issue: None,
+        }]
+    }
+}
+struct Factory(Arc<Mutex<VecDeque<Event>>>);
+impl LinkFactory for Factory {
+    fn make(&mut self, _: &Sighting) -> Result<Box<dyn PhoneLink>, String> {
+        Ok(Box::new(FakeLink {
+            connected: false,
+            events: self.0.clone(),
+            inputs: Arc::new(Mutex::new(Vec::new())),
+        }))
+    }
+}
+
+#[test]
+fn lua_scripts_move_files_through_the_whole_chain() {
+    let fs = Arc::new(MemFs::default());
+    let events = Arc::new(Mutex::new(VecDeque::new()));
+    events.lock().unwrap().push_back(Event::Connected {
+        version: 2,
+        capabilities: 0,
+        peer_name: "fake".into(),
+    });
+    let mut farm = Farm::new();
+    farm.enable_discovery(
+        vec![Box::new(Scan)],
+        Box::new(Factory(events)),
+        DiscoveryConfig { every: Duration::ZERO, ..Default::default() },
+    );
+    farm.discover_now();
+    let opts = FileOptions { backend: Arc::new(Files(fs.clone())), roots: vec!["/sdcard".into()] };
+    let serve = Serve::with_options(farm, None, Some(opts));
+    let farm_addr = serve.run_tcp("127.0.0.1:0").unwrap();
+
+    let dir = std::env::temp_dir().join(format!("pcdock-autod-e2e-files-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let backend = FarmBackend::new(Client::connect_tcp(&farm_addr.to_string(), None).unwrap(), 5.0).unwrap();
+    let t0 = Instant::now();
+    while backend.refresh().is_ok()
+        && !pcdock_autod::backend::Backend::phones(&*backend).iter().any(|p| p.state == "ready")
+    {
+        assert!(t0.elapsed() < Duration::from_secs(5), "телефон не стал ready");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let store = Arc::new(ScriptStore::open(&dir).unwrap());
+    let runs = Runs::new(&dir, store.clone(), backend.clone()).unwrap();
+    let hub = service::build(store, runs.clone(), backend, None);
+    let addr = hub.run_tcp("127.0.0.1:0").unwrap();
+    let c = Client::connect_tcp(&addr.to_string(), None).unwrap();
+
+    let big = "x".repeat(200_000);
+    let id = c
+        .request(json!({"op": "ScriptPut", "name": "files", "source": r#"
+        local p = phones()[1]
+        p:push("/sdcard/Download/note.txt", "привет")
+        p:push("/sdcard/Download/big.txt", string.rep("x", 200000), {media = true})
+        assert.eq(p:pull("/sdcard/Download/note.txt"), "привет")
+        assert.eq(#p:pull("/sdcard/Download/big.txt"), 200000)
+        local names = p:ls("/sdcard/Download")
+        table.sort(names)
+        assert.eq(names, {"big.txt", "note.txt"})
+        p:rm("/sdcard/Download/note.txt")
+        assert.eq(p:ls("/sdcard/Download"), {"big.txt"})
+        local ok = pcall(function() p:push("/system/x", "no") end)
+        assert.falsy(ok)
+        "#}))
+        .unwrap()["script"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let run = c.request(json!({"op": "Run", "script": id, "follow": false})).unwrap()["run"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(runs.wait(&run, Duration::from_secs(30)));
+    let info = c.request(json!({"op": "RunInfo", "run": run})).unwrap();
+    assert_eq!(info["report"]["status"], "passed", "{info}");
+    assert_eq!(fs.0.lock().unwrap().get("/sdcard/Download/big.txt").map(Vec::len), Some(big.len()));
+    let _ = std::fs::remove_dir_all(&dir);
 }

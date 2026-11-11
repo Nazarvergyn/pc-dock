@@ -11,6 +11,9 @@
 //!   задержать остальных.
 
 use std::collections::HashMap;
+use std::io::Read;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -21,7 +24,8 @@ use pcdock_farm::{Farm, FarmEvent};
 use pcdock_net::{Handler, Hub};
 use serde_json::{json, Value};
 
-use super::protocol::{encode_audio, encode_video, ClientMsg, ServerMsg, PKG_AUDIO, PKG_VIDEO};
+use super::files::{FileOptions, MAX_FILE};
+use super::protocol::{encode_audio, encode_video, ClientMsg, ServerMsg, PKG_AUDIO, PKG_FILE, PKG_VIDEO};
 
 /// Версия протокола приложения (приходит клиенту в `Hello`).
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -36,10 +40,18 @@ struct Watch {
     last_hash: Option<u64>,
 }
 
-/// Данные клиента фермы: его подписки.
+/// Передача файла клиента.
+struct Transfer {
+    /// Куда клиент шлёт данные (для записи на телефон).
+    tx: Option<SyncSender<Vec<u8>>>,
+    cancel: Arc<AtomicBool>,
+}
+
+/// Данные клиента фермы: его подписки и передачи файлов.
 #[derive(Default)]
 pub struct ClientState {
     watches: HashMap<PhoneId, Watch>,
+    transfers: HashMap<u32, Transfer>,
 }
 
 /// Что сейчас запрошено у телефона: видео, звук и частота (0 — без ограничения).
@@ -49,6 +61,8 @@ type Demand = (bool, bool, u8);
 struct Shared {
     daemon: Arc<Mutex<Farm>>,
     demand: Mutex<HashMap<PhoneId, Demand>>,
+    files: Option<FileOptions>,
+    next_transfer: AtomicU32,
 }
 
 /// Сервер поверх фермы. Потокобезопасен через `Arc`: слушатели и клиенты живут в своих потоках,
@@ -80,8 +94,17 @@ impl Serve {
     /// С токеном: клиент первым сообщением шлёт `{"op":"Auth","token":"…"}`, до этого ему не отвечают
     /// и событий не присылают.
     pub fn with_token(daemon: Farm, token: Option<String>) -> Self {
-        let shared =
-            Arc::new(Shared { daemon: Arc::new(Mutex::new(daemon)), demand: Mutex::new(HashMap::new()) });
+        Self::with_options(daemon, token, None)
+    }
+
+    /// С паролем и передачей файлов (`files`: `None` — файлы выключены).
+    pub fn with_options(daemon: Farm, token: Option<String>, files: Option<FileOptions>) -> Self {
+        let shared = Arc::new(Shared {
+            daemon: Arc::new(Mutex::new(daemon)),
+            demand: Mutex::new(HashMap::new()),
+            files,
+            next_transfer: AtomicU32::new(1),
+        });
         let hub = Hub::new(Handle { shared: shared.clone() }, token);
         let serve = Self { shared, hub };
         serve.spawn_pump();
@@ -190,7 +213,24 @@ impl Handler<ClientState> for Handle {
         })
     }
 
+    fn on_binary(&self, _hub: &Hub<ClientState>, client: u64, kind: u8, payload: Vec<u8>) {
+        if kind != PKG_FILE || payload.len() < 4 {
+            return;
+        }
+        let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+        let tx = _hub.with_clients(|m| {
+            m.get(&client).and_then(|c| c.data.transfers.get(&id)).and_then(|t| t.tx.clone())
+        });
+        // Отправка вне замка: если запись на телефон медленная, чтение клиента ждёт, но остальные клиенты работают.
+        if let Some(tx) = tx {
+            let _ = tx.send(payload[4..].to_vec());
+        }
+    }
+
     fn on_close(&self, hub: &Hub<ClientState>, _client: u64, data: ClientState) {
+        for t in data.transfers.values() {
+            t.cancel.store(true, Ordering::SeqCst);
+        }
         // Подписки ушедшего клиента снимаются: если смотреть больше некому, видео на телефоне выключается.
         for phone in data.watches.keys() {
             self.shared.refresh_demand(hub, *phone, false);
@@ -248,6 +288,37 @@ impl Handler<ClientState> for Handle {
                     reply(ServerMsg::Ok);
                 }
             }
+            ClientMsg::FilePut { phone, dest, size, media } => {
+                self.file_put(hub, client, id, phone, dest, size, media)
+            }
+            ClientMsg::FileGet { phone, src } => self.file_get(hub, client, id, phone, src),
+            ClientMsg::FileList { phone, path } => match self.file_target(phone, &path) {
+                Ok((files, serial)) => match files.backend.list(&serial, &path) {
+                    Ok(names) => reply(ServerMsg::Files { phone, path, names }),
+                    Err(e) => fail(e),
+                },
+                Err(e) => fail(e),
+            },
+            ClientMsg::FileDelete { phone, path } => match self.file_target(phone, &path) {
+                Ok((files, serial)) => match files.backend.delete(&serial, &path) {
+                    Ok(()) => reply(ServerMsg::Ok),
+                    Err(e) => fail(e),
+                },
+                Err(e) => fail(e),
+            },
+            ClientMsg::FileCancel { transfer } => {
+                let found = hub.with_clients(|m| {
+                    m.get(&client)
+                        .and_then(|c| c.data.transfers.get(&transfer))
+                        .map(|t| t.cancel.store(true, Ordering::SeqCst))
+                        .is_some()
+                });
+                if found {
+                    reply(ServerMsg::Ok)
+                } else {
+                    fail(format!("нет передачи {transfer}"))
+                }
+            }
             other => {
                 let (phone, cmd) = match map_input(other) {
                     Ok(v) => v,
@@ -265,6 +336,191 @@ impl Handler<ClientState> for Handle {
             }
         }
     }
+}
+
+impl Handle {
+    /// Передача файлов включена, путь разрешён, у телефона известен серийник.
+    fn file_target(&self, phone: PhoneId, path: &str) -> Result<(&FileOptions, String), String> {
+        let files = self.shared.files.as_ref().ok_or("передача файлов выключена (pcdockd --files)")?;
+        files.check(path)?;
+        let serial = self
+            .shared
+            .daemon
+            .lock()
+            .unwrap()
+            .phones_info()
+            .into_iter()
+            .find(|i| i.id == phone)
+            .ok_or_else(|| format!("нет трубки {phone}"))?
+            .serial
+            .ok_or("у телефона неизвестен серийник: файлы недоступны")?;
+        Ok((files, serial))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn file_put(
+        &self,
+        hub: &Hub<ClientState>,
+        client: u64,
+        id: Option<u64>,
+        phone: PhoneId,
+        dest: String,
+        size: u64,
+        media: bool,
+    ) {
+        let fail = |detail: String| hub.error(client, id, detail);
+        if size > MAX_FILE {
+            return fail(format!("файл больше {MAX_FILE} байт"));
+        }
+        let (files, serial) = match self.file_target(phone, &dest) {
+            Ok(v) => v,
+            Err(e) => return fail(e),
+        };
+        let writer = match files.backend.put(&serial, &dest) {
+            Ok(w) => w,
+            Err(e) => return fail(e),
+        };
+        let transfer = self.shared.next_transfer.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(16);
+        let cancel = Arc::new(AtomicBool::new(false));
+        hub.with_clients(|m| {
+            if let Some(c) = m.get_mut(&client) {
+                c.data.transfers.insert(transfer, Transfer { tx: Some(tx), cancel: cancel.clone() });
+            }
+        });
+        hub.reply(client, id, to_value(&ServerMsg::FileReady { transfer }));
+        let hub = hub.clone();
+        thread::Builder::new()
+            .name(format!("file-put-{transfer}"))
+            .spawn(move || {
+                let result = pump_put(&hub, client, transfer, size, media, writer, rx, &cancel);
+                hub.with_clients(|m| {
+                    if let Some(c) = m.get_mut(&client) {
+                        c.data.transfers.remove(&transfer);
+                    }
+                });
+                let msg = match result {
+                    Ok(()) => ServerMsg::FileDone { transfer, size },
+                    Err(detail) => ServerMsg::FileFailed { transfer, detail },
+                };
+                hub.reply(client, None, to_value(&msg));
+            })
+            .expect("не встал поток записи файла");
+    }
+
+    fn file_get(&self, hub: &Hub<ClientState>, client: u64, id: Option<u64>, phone: PhoneId, src: String) {
+        let fail = |detail: String| hub.error(client, id, detail);
+        let (files, serial) = match self.file_target(phone, &src) {
+            Ok(v) => v,
+            Err(e) => return fail(e),
+        };
+        let (size, reader) = match files.backend.get(&serial, &src) {
+            Ok(v) => v,
+            Err(e) => return fail(e),
+        };
+        let transfer = self.shared.next_transfer.fetch_add(1, Ordering::SeqCst);
+        let cancel = Arc::new(AtomicBool::new(false));
+        hub.with_clients(|m| {
+            if let Some(c) = m.get_mut(&client) {
+                c.data.transfers.insert(transfer, Transfer { tx: None, cancel: cancel.clone() });
+            }
+        });
+        hub.reply(client, id, to_value(&ServerMsg::FileInfo { transfer, size }));
+        let hub = hub.clone();
+        thread::Builder::new()
+            .name(format!("file-get-{transfer}"))
+            .spawn(move || {
+                let result = pump_get(&hub, client, transfer, size, reader, &cancel);
+                hub.with_clients(|m| {
+                    if let Some(c) = m.get_mut(&client) {
+                        c.data.transfers.remove(&transfer);
+                    }
+                });
+                let msg = match result {
+                    Ok(()) => ServerMsg::FileDone { transfer, size },
+                    Err(detail) => ServerMsg::FileFailed { transfer, detail },
+                };
+                hub.reply(client, None, to_value(&msg));
+            })
+            .expect("не встал поток чтения файла");
+    }
+}
+
+/// Принимает данные от клиента и пишет их на телефон до заявленного размера.
+#[allow(clippy::too_many_arguments)]
+fn pump_put(
+    hub: &Hub<ClientState>,
+    client: u64,
+    transfer: u32,
+    size: u64,
+    media: bool,
+    mut writer: Box<dyn super::files::FileWriter>,
+    rx: Receiver<Vec<u8>>,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    let mut received = 0u64;
+    let mut next_report = 1024 * 1024;
+    while received < size {
+        if cancel.load(Ordering::SeqCst) {
+            return Err("передача отменена".into());
+        }
+        match rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(chunk) => {
+                received += chunk.len() as u64;
+                if received > size {
+                    return Err("получено больше заявленного размера".into());
+                }
+                writer.write(&chunk)?;
+                if received >= next_report {
+                    next_report = received + 1024 * 1024;
+                    hub.reply(client, None, to_value(&ServerMsg::FileProgress { transfer, bytes: received }));
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => return Err("клиент перестал присылать данные".into()),
+            Err(RecvTimeoutError::Disconnected) => return Err("соединение с клиентом закрыто".into()),
+        }
+    }
+    writer.finish(size, media)
+}
+
+/// Читает файл с телефона и отдаёт клиенту пакетами; медленный клиент притормаживает чтение.
+fn pump_get(
+    hub: &Hub<ClientState>,
+    client: u64,
+    transfer: u32,
+    size: u64,
+    mut reader: Box<dyn Read + Send>,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    let out = hub.with_clients(|m| m.get(&client).map(|c| c.out.clone())).ok_or("клиент ушёл")?;
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut sent = 0u64;
+    let mut next_report = 1024 * 1024;
+    while sent < size {
+        if cancel.load(Ordering::SeqCst) {
+            return Err("передача отменена".into());
+        }
+        let n = reader.read(&mut buf).map_err(|e| format!("чтение файла: {e}"))?;
+        if n == 0 {
+            return Err("файл прочитан не полностью".into());
+        }
+        let mut payload = Vec::with_capacity(4 + n);
+        payload.extend_from_slice(&transfer.to_le_bytes());
+        payload.extend_from_slice(&buf[..n]);
+        if !out.bulk(PKG_FILE, payload) {
+            return Err("клиент отключился".into());
+        }
+        sent += n as u64;
+        if sent >= next_report {
+            next_report = sent + 1024 * 1024;
+            hub.reply(client, None, to_value(&ServerMsg::FileProgress { transfer, bytes: sent }));
+        }
+    }
+    // `FileDone` (JSON) обгоняет данные, если они ещё ждут в очереди: дожидаемся, пока клиент всё получит.
+    if !out.wait_bulk_drained(Duration::from_secs(60)) {
+        return Err("клиент не забрал данные".into());
+    }
+    Ok(())
 }
 
 /// Маршрутизация события фермы по подпискам.
@@ -426,6 +682,11 @@ fn map_input(msg: ClientMsg) -> Result<(PhoneId, InputCmd), String> {
         | ClientMsg::List
         | ClientMsg::Watch { .. }
         | ClientMsg::Unwatch { .. }
-        | ClientMsg::Snapshot { .. } => return Err(bad("не команда ввода")),
+        | ClientMsg::Snapshot { .. }
+        | ClientMsg::FilePut { .. }
+        | ClientMsg::FileGet { .. }
+        | ClientMsg::FileList { .. }
+        | ClientMsg::FileDelete { .. }
+        | ClientMsg::FileCancel { .. } => return Err(bad("не команда ввода")),
     })
 }
