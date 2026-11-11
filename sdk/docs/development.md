@@ -9,11 +9,15 @@ sdk/
   pcdock-adb/      ADB: клиент сервера ADB, запуск серверного процесса
   pcdock-serial/   serial-труба
   pcdock-farm/     Farm, FarmConfig, Registry; examples/minimal.rs
-  pcdock-ffi/      C ABI; include/pcdock.h (генерируется)
-  pcdock-serve/    протокол приложения и носители
-  pcdockd/         демон
+  pcdock-net/      общая основа демонов: носители, ящик клиента, пароль
+  pcdock-client/   клиент протокола демонов для Rust
+  pcdock-autod/    демон автоматизации: Lua, прогоны, отчёты
+  pcdock-check/    самопроверка (Windows, macOS, Linux)
+  pcdock-serve/    протокол фермы (поверх pcdock-net), файлы
+  pcdockd/         демон фермы
   docs/            эта документация
-tools/gen_header.py  генератор pcdock.h
+demos/             демо-клиенты протокола: web (WebSocket) и gui (pygame)
+.github/workflows/ CI и релиз
 devices/android/   протокол (PROTOCOL.md), решения (DECISIONS.md), приложение и сервер для телефона, сценарий проверки
 ```
 
@@ -22,10 +26,9 @@ devices/android/   протокол (PROTOCOL.md), решения (DECISIONS.md)
 ```bash
 cd sdk
 cargo build                       # всё
-cargo test                        # все тесты (около 115)
+cargo test                        # все тесты (около 180)
 cargo clippy --all-targets        # без предупреждений
 cargo fmt --check
-python3 ../tools/gen_header.py --check    # заголовок pcdock.h актуален
 ```
 
 Тесты `pcdock-usb`, которым нужен libusb (`Dock::new`), пропускаются, если контекст USB недоступен (CI, контейнер). Тесты фермы и
@@ -39,7 +42,7 @@ python3 ../tools/gen_header.py --check    # заголовок pcdock.h акту
 - Ядро (`pcdock-core`) не делает ввод-вывод, не читает часы и не содержит `unsafe` (`#![forbid(unsafe_code)]`). Время приходит параметром.
 - Решения принимает ферма, а не транспорт и не демон. Транспорт сообщает факты и выполняет байты.
 - Демон тонкий: никакой логики про телефоны.
-- `unsafe` допускается только на границе C ABI (`pcdock-ffi`), с комментарием `SAFETY`.
+- `unsafe` в проекте не используется (в ядре запрещён).
 - Решения и их причины записываются в `devices/android/DECISIONS.md`.
 
 ## Как добавить транспорт
@@ -59,7 +62,8 @@ python3 ../tools/gen_header.py --check    # заголовок pcdock.h акту
 возврат, закрепление, исключения, состояния с причинами, запасной переход, предпочтение, hotplug. Добавляйте сценарии
 туда же, на фейках.
 
-## C ABI
+## Релиз
 
-После изменения `#[no_mangle]`-функций или констант в `pcdock-ffi` перегенерируйте заголовок: `python3 tools/gen_header.py`.
-Новые типы параметров нужно добавить в таблицу `SCALARS` генератора.
+Версия задаётся в `sdk/Cargo.toml` (`[workspace.package]`). Тег `vX.Y.Z` запускает `.github/workflows/release.yml`: бинарники для Linux, Windows и macOS, APK
+приложения и сервера (подпись из секретов репозитория `ANDROID_KEYSTORE_B64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`), `SHA256SUMS`.
+Ключ подписи в репозиторий не кладётся.

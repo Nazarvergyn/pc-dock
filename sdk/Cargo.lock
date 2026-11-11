@@ -672,15 +672,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pcdock-ffi"
-version = "0.1.0-alpha.1"
-dependencies = [
- "pcdock-core",
- "pcdock-farm",
- "serde_json",
-]
-
-[[package]]
 name = "pcdock-net"
 version = "0.1.0-alpha.1"
 dependencies = [

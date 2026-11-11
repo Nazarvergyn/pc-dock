@@ -45,3 +45,9 @@ for ev in d.drain() { /* FarmEvent::... */ }
 `pcdock-farm/examples/minimal.rs`.
 
 Прямая зависимость только от `pcdock-core` продолжает работать: сессия, HID и пакеты не менялись.
+
+## Удалён C ABI (2026-11-12)
+
+Продукт теперь только демоны (решение 34). Крейт `pcdock-ffi`, заголовок `pcdock.h`, `docs/c-abi.md` и старый Python-viewer удалены.
+Вместо них: протокол демонов ([protocol.md](protocol.md)) и демо-клиенты в `demos/` (веб и pygame-GUI). Для Python есть готовый
+клиент без зависимостей: `demos/gui/client.py`.
