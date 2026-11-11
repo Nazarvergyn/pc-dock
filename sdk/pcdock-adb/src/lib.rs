@@ -463,8 +463,13 @@ impl AdbLink {
                 s.wake();
                 Ok(())
             }
-            InputCmd::SetStream { video, audio } => {
-                s.set_stream(SetStream { video: *video, audio: *audio, ..SetStream::default() });
+            InputCmd::SetStream { video, audio, max_fps } => {
+                s.set_stream(SetStream {
+                    video: *video,
+                    audio: *audio,
+                    max_fps: *max_fps,
+                    ..SetStream::default()
+                });
                 Ok(())
             }
         };

@@ -47,11 +47,14 @@ class Capture(
     private var lastJpeg: ByteArray? = null
     private var lastPts = 0L
 
-    /** Размер потока для дисплея `d`: сторона не больше заданной, размеры чётные. */
+    /**
+     * Размер потока для дисплея `d`. По умолчанию оригинальный (решение 34); масштаб только по явному
+     * запросу `max_width`/`max_height` в SET_STREAM. Размеры чётные.
+     */
     fun streamSize(d: DisplayState): Pair<Int, Int> {
-        val limit = if (maxLongSide > 0) maxLongSide else DEFAULT_LONG_SIDE
+        val limit = maxLongSide
         val long = maxOf(d.width, d.height).toFloat()
-        val k = if (long > limit) limit / long else 1f
+        val k = if (limit > 0 && long > limit) limit / long else 1f
         val w = ((d.width * k).toInt() and 1.inv()).coerceAtLeast(2)
         val h = ((d.height * k).toInt() and 1.inv()).coerceAtLeast(2)
         return Pair(w, h)
@@ -167,7 +170,6 @@ class Capture(
     }
 
     companion object {
-        const val DEFAULT_LONG_SIDE = 1280
         const val DEFAULT_QUALITY = 70
         private const val WATCH_MS = 500L
     }

@@ -17,8 +17,20 @@ pub enum ClientMsg {
     },
     /// Список трубок.
     List,
-    /// Подписаться на кадры трубки / отписаться.
+    /// Подписаться на кадры телефона. `fps` — не чаще стольких кадров в секунду (без него: все кадры),
+    /// `on_change` — только кадры, отличающиеся от предыдущего, `audio` — присылать и звук. Повторный
+    /// `Watch` меняет условия подписки.
     Watch {
+        phone: u32,
+        #[serde(default)]
+        fps: Option<f32>,
+        #[serde(default)]
+        on_change: bool,
+        #[serde(default)]
+        audio: bool,
+    },
+    /// Один последний кадр телефона, только этому клиенту (подписка не нужна).
+    Snapshot {
         phone: u32,
     },
     Unwatch {
@@ -87,10 +99,26 @@ pub enum ClientMsg {
     },
 }
 
+/// Запрос клиента: команда и необязательный номер `id`. Если `id` есть, ответ на эту команду несёт тот же `id`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Request {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<u64>,
+    #[serde(flatten)]
+    pub msg: ClientMsg,
+}
+
 /// Событие сервера в JSON. Видео и звук идут бинарными пакетами, не здесь.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "ev")]
 pub enum ServerMsg {
+    /// Первое сообщение после подключения: версия протокола и имя сервера.
+    Hello {
+        protocol: u32,
+        server: String,
+    },
+    /// Команда выполнена (ответ на команду с `id`, у которой нет своего ответа).
+    Ok,
     /// Пароль принят.
     Authed,
     Phones {
@@ -242,7 +270,7 @@ mod tests {
     fn json_commands_roundtrip() {
         let msgs = vec![
             ClientMsg::List,
-            ClientMsg::Watch { phone: 7 },
+            ClientMsg::Watch { phone: 7, fps: Some(5.0), on_change: true, audio: false },
             ClientMsg::TouchEx {
                 phone: 7,
                 cid: 0,

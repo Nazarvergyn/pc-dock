@@ -439,7 +439,7 @@ pub extern "C" fn pcdock_farm_wake(p: *mut PcdockFarm, id: u32) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn pcdock_farm_set_stream(p: *mut PcdockFarm, id: u32, video: bool, audio: bool) -> i32 {
-    command(p, id, InputCmd::SetStream { video, audio })
+    command(p, id, InputCmd::SetStream { video, audio, max_fps: 0 })
 }
 
 #[cfg(test)]

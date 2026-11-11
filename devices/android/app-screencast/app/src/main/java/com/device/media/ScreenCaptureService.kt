@@ -234,8 +234,9 @@ class ScreenCaptureService : Service(), HostLink.Listener {
         var w: Int
         var h: Int
         if (cfg.maxWidth == 0 && cfg.maxHeight == 0) {
-            w = m.widthPixels / 2
-            h = m.heightPixels / 2
+            // Разрешение по умолчанию всегда оригинальное (решение 34): масштаб задаёт только явный SET_STREAM.
+            w = m.widthPixels
+            h = m.heightPixels
         } else {
             var scale = 1.0
             if (cfg.maxWidth > 0) scale = minOf(scale, cfg.maxWidth.toDouble() / m.widthPixels)

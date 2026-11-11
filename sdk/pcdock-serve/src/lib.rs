@@ -7,4 +7,4 @@ pub mod protocol;
 pub mod server;
 
 pub use protocol::{ClientMsg, ServerMsg};
-pub use server::Serve;
+pub use server::{Serve, PROTOCOL_VERSION};

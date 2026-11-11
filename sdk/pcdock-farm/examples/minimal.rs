@@ -32,7 +32,10 @@ fn main() -> Result<(), String> {
         if !tapped {
             if let Some(&id) = farm.phones().first() {
                 if farm.state(id) == Ok(PhoneState::Ready) {
-                    farm.command(id, InputCmd::DeviceEnable { kind: pcdock_core::input::DeviceKind::Touch, on: true })?;
+                    farm.command(
+                        id,
+                        InputCmd::DeviceEnable { kind: pcdock_core::input::DeviceKind::Touch, on: true },
+                    )?;
                     farm.command(id, InputCmd::touch_ex(0, TouchPhase::Down, 0.5, 0.5, None, None, None))?;
                     farm.command(id, InputCmd::touch_ex(0, TouchPhase::Up, 0.5, 0.5, None, None, None))?;
                     tapped = true;

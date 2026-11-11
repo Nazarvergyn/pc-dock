@@ -52,9 +52,11 @@ pub enum InputCmd {
     ReleaseAll,
     RequestFrame,
     Wake,
+    /// Включить или выключить видео и звук; `max_fps` — не чаще стольких кадров в секунду (0 — без ограничения).
     SetStream {
         video: bool,
         audio: bool,
+        max_fps: u8,
     },
 }
 
