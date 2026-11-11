@@ -1,0 +1,22 @@
+[package]
+name = "pcdock-check"
+version = "0.1.0"
+edition = "2021"
+description = "Self-test for PC Dock: finds phones, checks video, input and the environment, prints a report."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+pcdock-core = { path = "../pcdock-core" }
+pcdock-farm = { path = "../pcdock-farm" }
+pcdock-usb = { path = "../pcdock-usb" }
+pcdock-adb = { path = "../pcdock-adb" }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+
+[lib]
+name = "pcdock_check"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pcdock-check"
+path = "src/main.rs"

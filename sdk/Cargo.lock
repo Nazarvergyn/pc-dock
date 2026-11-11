@@ -633,6 +633,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pcdock-check"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "pcdock-adb",
+ "pcdock-core",
+ "pcdock-farm",
+ "pcdock-usb",
+ "serde_json",
+]
+
+[[package]]
 name = "pcdock-client"
 version = "0.1.0"
 dependencies = [
