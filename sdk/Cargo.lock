@@ -484,6 +484,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pcdock-client"
+version = "0.1.0"
+dependencies = [
+ "interprocess",
+ "pcdock-core",
+ "pcdock-farm",
+ "pcdock-net",
+ "pcdock-serve",
+ "serde_json",
+]
+
+[[package]]
 name = "pcdock-core"
 version = "0.1.0"
 

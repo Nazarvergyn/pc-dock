@@ -1,0 +1,16 @@
+[package]
+name = "pcdock-client"
+version = "0.1.0"
+edition = "2021"
+description = "Rust client for the PC Dock daemon protocol (TCP and local pipe)."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+pcdock-net = { path = "../pcdock-net" }
+serde_json = "1"
+interprocess = "2"
+
+[dev-dependencies]
+pcdock-serve = { path = "../pcdock-serve" }
+pcdock-farm = { path = "../pcdock-farm", default-features = false }
+pcdock-core = { path = "../pcdock-core" }
