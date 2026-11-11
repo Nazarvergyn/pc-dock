@@ -1,0 +1,6 @@
+[project]
+name = "pcdock-demo-gui"
+version = "0.1.0"
+description = "Демо-GUI PC Dock: плитки телефонов поверх протокола pcdockd"
+requires-python = ">=3.10"
+dependencies = ["pygame-ce>=2.5"]

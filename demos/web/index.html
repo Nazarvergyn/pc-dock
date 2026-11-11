@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>PC Dock: веб-демо</title>
+<!--
+  Демо-клиент протокола PC Dock в одном файле, без сборки и зависимостей. Открывается прямо с диска.
+  Говорит с двумя демонами по WebSocket:
+    pcdockd     (ферма: телефоны, кадры, ввод, файлы)   ws://127.0.0.1:9002
+    pcdock-autod (сценарии Lua, прогоны, прямой эфир)    ws://127.0.0.1:9102
+  Протокол: sdk/docs/protocol.md. Здесь он весь на виду: ищите «send(» и «onmessage».
+-->
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 0; display: grid; grid-template-columns: 300px 1fr 420px; height: 100vh; }
+  section { padding: 10px; overflow: auto; border-right: 1px solid #ccc; }
+  h3 { margin: 4px 0 8px; font-size: 14px; }
+  input, button, select, textarea { font: inherit; }
+  .phone { padding: 6px; border: 1px solid #ccc; border-radius: 6px; margin-bottom: 6px; cursor: pointer; }
+  .phone.sel { border-color: #06c; background: #eef5ff; }
+  .badge { padding: 1px 6px; border-radius: 8px; color: #fff; font-size: 12px; }
+  .ready { background: #2a8a2a } .connecting, .appeared { background: #888 } .lost { background: #555 }
+  .needs_app, .needs_access, .needs_auth, .needs_permission { background: #c60 }
+  .hint { color: #a50; font-size: 12px; margin-top: 4px }
+  canvas { max-width: 100%; max-height: 80vh; background: #111; touch-action: none; cursor: crosshair; }
+  #log { font: 12px ui-monospace, monospace; background: #111; color: #ddd; padding: 6px; height: 240px; overflow: auto; white-space: pre-wrap; }
+  .ok { color: #6c6 } .bad { color: #f66 } .step { color: #6af } .dim { color: #999 }
+  textarea { width: 100%; height: 150px; font: 12px ui-monospace, monospace; }
+  .row { display: flex; gap: 6px; margin: 4px 0; align-items: center; flex-wrap: wrap }
+</style>
+</head>
+<body>
+<section>
+  <h3>pcdockd</h3>
+  <div class="row"><input id="farmUrl" value="ws://127.0.0.1:9002" size="22"><input id="farmToken" placeholder="токен" size="8"><button onclick="connectFarm()">Подключить</button></div>
+  <div id="farmStatus" class="dim">не подключено</div>
+  <div id="phones"></div>
+</section>
+<section>
+  <div class="row">
+    Видео: <select id="fps"><option value="">все кадры</option><option value="15">15 к/с</option><option value="5">5 к/с</option><option value="1">1 к/с</option></select>
+    <label><input type="checkbox" id="devTouch" checked> касание</label>
+    <label><input type="checkbox" id="devKeyboard" checked> клавиатура</label>
+    <button onclick="wake()">Разбудить</button>
+    <label>Файл на телефон: <input type="file" id="file" onchange="pushFile(this.files[0])"></label>
+  </div>
+  <div id="info" class="dim"></div>
+  <canvas id="screen" width="360" height="640" tabindex="0"></canvas>
+</section>
+<section style="border-right:0">
+  <h3>pcdock-autod: сценарии</h3>
+  <div class="row"><input id="autoUrl" value="ws://127.0.0.1:9102" size="22"><input id="autoToken" placeholder="токен" size="8"><button onclick="connectAuto()">Подключить</button></div>
+  <div id="autoStatus" class="dim">не подключено</div>
+  <div class="row"><select id="scripts" onchange="loadScript()" style="flex:1"></select><button onclick="newScript()">Новый</button></div>
+  <textarea id="source" spellcheck="false">test("пример", function()
+  local p = phones()[1]
+  assert.truthy(p:wait_ready(10), "телефон готов")
+  step("открываем шторку")
+  p:swipe(0.5, 0.01, 0.5, 0.5)
+  expect.truthy(p:wait_change(3), "экран изменился")
+  p:key("esc")
+  log.info("готово")
+end)</textarea>
+  <div class="row"><input id="name" placeholder="имя сценария" value="Демо"><button onclick="saveScript()">Сохранить</button><button onclick="runScript()">Запустить</button><button onclick="stopRun()">Стоп</button></div>
+  <div id="log"></div>
+</section>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+
+// ---------- Общее: соединение с демоном (JSON с id запросов, бинарные фреймы [тип][нагрузка]) ----------
+class Daemon {
+  constructor(url, token, onEvent, onBinary, onState) {
+    this.nextId = 1; this.pending = new Map(); this.onEvent = onEvent; this.onBinary = onBinary;
+    this.ws = new WebSocket(url); this.ws.binaryType = "arraybuffer";
+    this.ws.onopen = () => { onState("подключено"); if (token) this.request({op: "Auth", token}).catch((e) => onState("пароль: " + e)); };
+    this.ws.onclose = () => onState("отключено");
+    this.ws.onerror = () => onState("ошибка соединения");
+    this.ws.onmessage = (m) => {
+      if (typeof m.data !== "string") { const b = new Uint8Array(m.data); this.onBinary(b[0], b.subarray(1)); return; }
+      const v = JSON.parse(m.data);
+      if (v.id !== undefined && this.pending.has(v.id)) {
+        const p = this.pending.get(v.id); this.pending.delete(v.id);
+        v.ev === "Error" ? p.reject(v.detail) : p.resolve(v);
+      } else this.onEvent(v);
+    };
+  }
+  send(msg) { this.ws.send(JSON.stringify(msg)); }                       // без ответа
+  request(msg) {                                                         // с ответом: добавляем id
+    const id = this.nextId++; msg.id = id;
+    return new Promise((resolve, reject) => { this.pending.set(id, {resolve, reject}); this.send(msg); });
+  }
+  sendBinary(kind, bytes) { const b = new Uint8Array(1 + bytes.length); b[0] = kind; b.set(bytes, 1); this.ws.send(b); }
+}
+
+// ---------- Ферма ----------
+let farm = null, phones = new Map(), current = null;
+
+function connectFarm() {
+  farm = new Daemon($("farmUrl").value, $("farmToken").value, onFarmEvent, onFarmBinary, (s) => { $("farmStatus").textContent = s; if (s === "подключено") refreshPhones(); });
+}
+async function refreshPhones() {
+  const r = await farm.request({op: "List"});
+  phones = new Map((r.details || []).map((d) => [d.phone, d]));
+  drawPhones();
+}
+function onFarmEvent(v) {
+  if (v.ev === "Appeared") { phones.set(v.phone, {...(phones.get(v.phone) || {}), phone: v.phone, transport: v.transport, serial: v.serial, state: "appeared"}); }
+  else if (v.ev === "State") { const p = phones.get(v.phone) || {phone: v.phone}; p.state = v.state; p.hint = v.detail; phones.set(v.phone, p); }
+  else if (v.ev === "Lost") { phones.delete(v.phone); if (current === v.phone) current = null; }
+  else if (v.ev === "Display" && v.phone === current) { $("info").textContent = `экран ${v.screen_w}x${v.screen_h}, поток ${v.stream_w}x${v.stream_h}, поворот ${v.rotation}`; }
+  else if (["FileDone", "FileFailed", "FileReady", "FileProgress"].includes(v.ev)) { handleFileEvent(v); return; }
+  drawPhones();
+}
+function drawPhones() {
+  $("phones").innerHTML = [...phones.values()].map((p) =>
+    `<div class="phone ${p.phone === current ? "sel" : ""}" onclick="selectPhone(${p.phone})">
+       <b>Телефон ${p.phone}</b> <span class="badge ${p.state}">${p.state}</span><br>
+       <span class="dim">${p.transport || ""} ${p.serial || ""}</span>
+       ${p.hint ? `<div class="hint">${p.hint}</div>` : ""}</div>`).join("") || '<div class="dim">телефонов нет</div>';
+}
+async function selectPhone(id) {
+  if (current !== null) farm.send({op: "Unwatch", phone: current});
+  current = id; drawPhones();
+  const fps = $("fps").value;
+  await farm.request({op: "Watch", phone: id, ...(fps ? {fps: Number(fps)} : {})});
+}
+$("fps").onchange = () => current !== null && selectPhone(current);
+
+// Кадр: [тип=1] + телефон u32, номер u64, кодек u8, ключевой u8, метка u64, затем JPEG
+function onFarmBinary(kind, body) {
+  if (kind !== 1) return;
+  const phone = new DataView(body.buffer, body.byteOffset).getUint32(0, true);
+  if (phone !== current) return;
+  const img = new Image();
+  img.onload = () => { const c = $("screen"); if (c.width !== img.width) { c.width = img.width; c.height = img.height; } c.getContext("2d").drawImage(img, 0, 0); URL.revokeObjectURL(img.src); };
+  img.src = URL.createObjectURL(new Blob([body.subarray(22)], {type: "image/jpeg"}));
+}
+
+// ---------- Ввод: мышь превращается в касание, клавиатура в клавиши ----------
+const canvas = $("screen");
+function frac(e) { const r = canvas.getBoundingClientRect(); return [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height]; }
+let down = false;
+function touch(phase, e) { if (current === null) return; const [x, y] = frac(e); farm.send({op: "TouchEx", phone: current, cid: 0, phase, x, y, width: null, height: null, pressure: 0.7}); }
+canvas.onpointerdown = (e) => { down = true; canvas.setPointerCapture(e.pointerId); touch(0, e); };
+canvas.onpointermove = (e) => { if (down) touch(1, e); };
+canvas.onpointerup = (e) => { if (down) { down = false; touch(2, e); } };
+canvas.onkeydown = (e) => { const u = usage(e); if (u && current !== null) { farm.send({op: "Key", phone: current, usage: u, down: true}); e.preventDefault(); } };
+canvas.onkeyup = (e) => { const u = usage(e); if (u && current !== null) farm.send({op: "Key", phone: current, usage: u, down: false}); };
+function usage(e) {                                           // коды USB HID (страница Keyboard)
+  if (/^Key[A-Z]$/.test(e.code)) return 0x04 + e.code.charCodeAt(3) - 65;
+  if (/^Digit[1-9]$/.test(e.code)) return 0x1E + Number(e.code[5]) - 1;
+  return ({Digit0: 0x27, Enter: 0x28, Escape: 0x29, Backspace: 0x2A, Tab: 0x2B, Space: 0x2C, ArrowRight: 0x4F, ArrowLeft: 0x50, ArrowDown: 0x51, ArrowUp: 0x52})[e.code];
+}
+$("devTouch").onchange = (e) => current !== null && farm.send({op: "DeviceEnable", phone: current, kind: 0, on: e.target.checked});
+$("devKeyboard").onchange = (e) => current !== null && farm.send({op: "DeviceEnable", phone: current, kind: 2, on: e.target.checked});
+function wake() { if (current !== null) farm.send({op: "Wake", phone: current}); }
+
+// ---------- Файлы: FilePut, затем данные пакетами [тип=3][номер передачи u32][данные] ----------
+let uploads = new Map();
+async function pushFile(file) {
+  if (!file || current === null) return;
+  const dest = "/sdcard/Download/" + file.name.replace(/[^A-Za-z0-9._-]/g, "_");
+  const r = await farm.request({op: "FilePut", phone: current, dest, size: file.size, media: true}).catch((e) => { alert("Файл: " + e); });
+  if (!r) return;
+  const data = new Uint8Array(await file.arrayBuffer());
+  for (let off = 0; off < data.length; off += 60000) {
+    const part = data.subarray(off, off + 60000), pkt = new Uint8Array(4 + part.length);
+    new DataView(pkt.buffer).setUint32(0, r.transfer, true); pkt.set(part, 4);
+    farm.sendBinary(3, pkt);
+  }
+  uploads.set(r.transfer, dest);
+}
+function handleFileEvent(v) {
+  if (v.ev === "FileDone") alert("Файл записан на телефон: " + (uploads.get(v.transfer) || ""));
+  if (v.ev === "FileFailed") alert("Файл не записан: " + v.detail);
+}
+
+// ---------- Автоматизация ----------
+let auto = null, scriptId = null, runId = null;
+
+function connectAuto() {
+  auto = new Daemon($("autoUrl").value, $("autoToken").value, onAutoEvent, () => {}, (s) => { $("autoStatus").textContent = s; if (s === "подключено") refreshScripts(); });
+}
+async function refreshScripts() {
+  const r = await auto.request({op: "ScriptList"});
+  $("scripts").innerHTML = '<option value="">— сценарии —</option>' + r.scripts.map((s) => `<option value="${s.script}">${s.name}</option>`).join("");
+  if (scriptId) $("scripts").value = scriptId;
+}
+async function loadScript() {
+  const id = $("scripts").value; if (!id) return;
+  const r = await auto.request({op: "ScriptGet", script: id});
+  scriptId = id; $("source").value = r.source; $("name").value = r.name;
+}
+function newScript() { scriptId = null; $("scripts").value = ""; $("name").value = "Новый сценарий"; }
+async function saveScript() {
+  const r = await auto.request({op: "ScriptPut", ...(scriptId ? {script: scriptId} : {}), name: $("name").value, source: $("source").value});
+  scriptId = r.script; await refreshScripts(); return r.script;
+}
+async function runScript() {
+  const id = await saveScript(); $("log").innerHTML = "";
+  const r = await auto.request({op: "Run", script: id, ...(current !== null ? {phones: [current]} : {})}).catch((e) => { logLine("bad", "запуск: " + e); });
+  if (r) runId = r.run;                               // сервер сам подписывает запустившего на события прогона
+}
+function stopRun() { if (runId) auto.request({op: "Stop", run: runId}).catch(() => {}); }
+function onAutoEvent(v) {
+  if (v.ev !== "RunEvent") return;
+  const t = v.kind;
+  if (t === "assert") logLine(v.ok ? "ok" : "bad", `${v.ok ? "✓" : "✗"} [${v.mode}] ${v.message}${v.ok ? "" : `  (ожидалось ${v.expected}, получено ${v.actual})`}`);
+  else if (t === "step") logLine("step", "▸ " + v.text);
+  else if (t === "log") logLine("dim", `[${v.level}] ${v.text}`);
+  else if (t === "test_start") logLine("dim", "— тест: " + v.test);
+  else if (t === "test_end") logLine(v.status === "passed" ? "ok" : "bad", `= ${v.test}: ${v.status}${v.error ? " (" + v.error + ")" : ""}`);
+  else if (t === "artifact") logLine("dim", "вложение: " + v.name);
+  else if (t === "run_end") logLine(v.status === "passed" ? "ok" : "bad", `ПРОГОН: ${v.status}, прошло ${v.passed}, провалов ${v.failed}, ошибок ${v.errors}`);
+}
+function logLine(cls, text) { const d = document.createElement("div"); d.className = cls; d.textContent = text; $("log").appendChild(d); $("log").scrollTop = 1e9; }
+
+connectFarm(); connectAuto();
+</script>
+</body>
+</html>
