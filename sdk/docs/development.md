@@ -26,7 +26,7 @@ devices/android/   протокол (PROTOCOL.md), решения (DECISIONS.md)
 ```bash
 cd sdk
 cargo build                       # всё
-cargo test                        # все тесты (около 180)
+cargo test                        # все тесты (около 170)
 cargo clippy --all-targets        # без предупреждений
 cargo fmt --check
 ```

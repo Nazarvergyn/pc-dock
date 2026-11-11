@@ -14,5 +14,5 @@
 
 ```bash
 cargo build --release     # бинарники в target/release/
-cargo test                # около 180 тестов (телефоны заменены фейками)
+cargo test                # около 170 тестов (телефоны заменены фейками)
 ```
