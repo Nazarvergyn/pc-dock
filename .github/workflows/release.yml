@@ -1,0 +1,115 @@
+name: Release
+
+# Релиз по тегу v*: бинарники для трёх систем, APK сервера и приложения, контрольные суммы.
+# Подпись APK: секреты репозитория
+#   ANDROID_KEYSTORE_B64 (keystore в base64), ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD.
+# Без секретов APK собираются без подписи (установить их нельзя, пока они не подписаны).
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  binaries:
+    name: Binaries (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, name: linux-x86_64, ext: "" }
+          - { os: windows-latest, name: windows-x86_64, ext: ".exe" }
+          - { os: macos-latest, name: macos-arm64, ext: "" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sdk
+      - name: libusb (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev pkg-config
+      - name: libusb (macOS)
+        if: runner.os == 'macOS'
+        run: brew install libusb pkg-config
+      - name: Build
+        working-directory: sdk
+        run: cargo build --release -p pcdockd -p pcdock-autod -p pcdock-check -p pcdock-usb
+      - name: Package
+        shell: bash
+        run: |
+          set -e
+          dir="pcdock-${{ github.ref_name }}-${{ matrix.name }}"
+          mkdir "$dir"
+          for b in pcdockd pcdock-autod pcdock-check pcdock-probe; do
+            cp "sdk/target/release/$b${{ matrix.ext }}" "$dir/"
+          done
+          cp -r sdk/docs "$dir/docs"
+          cp LICENSE-MIT LICENSE-APACHE README.md CHANGELOG.md "$dir/"
+          if [ "${{ runner.os }}" = "Windows" ]; then 7z a "$dir.zip" "$dir"; else tar czf "$dir.tar.gz" "$dir"; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.name }}
+          path: |
+            pcdock-*.zip
+            pcdock-*.tar.gz
+          if-no-files-found: error
+
+  android:
+    name: Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - name: Keystore
+        id: ks
+        env:
+          B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$B64" ]; then
+            echo "$B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "path=$RUNNER_TEMP/release.jks" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build
+        working-directory: devices/android/app-screencast
+        env:
+          PCDOCK_KEYSTORE: ${{ steps.ks.outputs.path }}
+          PCDOCK_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          PCDOCK_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          PCDOCK_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew -PpcdockVersion=${GITHUB_REF_NAME#v} :app:assembleRelease :server-adb:assembleRelease
+      - name: Collect
+        run: |
+          mkdir out
+          cp devices/android/app-screencast/app/build/outputs/apk/release/*.apk "out/pcdock-app-${{ github.ref_name }}.apk"
+          cp devices/android/app-screencast/server-adb/build/outputs/apk/release/*.apk "out/pcdock-server-${{ github.ref_name }}.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: out/*.apk
+
+  publish:
+    needs: [binaries, android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
