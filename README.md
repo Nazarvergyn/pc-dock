@@ -17,6 +17,16 @@ pcdock-check   самопроверка на вашей машине (Linux, mac
 Единственный внешний интерфейс это протокол демонов (JSON и бинарные пакеты; TCP, WebSocket, локальная труба): [`sdk/docs/protocol.md`](sdk/docs/protocol.md).
 Телефон подключается тремя путями: USB-аксессуар (AOA, нужно приложение), ADB (ничего не устанавливается, диалога записи экрана нет), serial.
 
+## Установка
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/toxic-sunflower/pc-dock/main/install.sh | sh     # Linux, macOS
+irm https://raw.githubusercontent.com/toxic-sunflower/pc-dock/main/install.ps1 | iex           # Windows (PowerShell)
+```
+
+Установщик скачивает последний релиз, проверяет `SHA256SUMS`, ставит `pcdockd`, `pcdock-autod`, `pcdock-check` в `~/.pcdock/bin` и добавляет каталог в PATH
+(на Linux и macOS подскажет строку для `~/.profile`). Версию можно задать: `sh install.sh v0.1.0-alpha.2`.
+
 ## Быстрый старт
 
 ```bash
