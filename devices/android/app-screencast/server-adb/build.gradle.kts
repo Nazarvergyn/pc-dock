@@ -20,14 +20,14 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            if (System.getenv("PCDOCK_KEYSTORE") != null) signingConfig = signingConfigs.getByName("release")
+            if (!System.getenv("PCDOCK_KEYSTORE").isNullOrEmpty()) signingConfig = signingConfigs.getByName("release")
         }
     }
 
 
     // Подпись релиза: ключ берётся из переменных окружения (в репозитории ключей нет). Без них release собирается
     // без подписи, а debug подписывается отладочным ключом.
-    val keystore = System.getenv("PCDOCK_KEYSTORE")
+    val keystore = System.getenv("PCDOCK_KEYSTORE")?.takeIf { it.isNotEmpty() }
     if (keystore != null) {
         signingConfigs {
             create("release") {
