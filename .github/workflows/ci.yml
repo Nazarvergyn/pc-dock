@@ -56,7 +56,6 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - uses: android-actions/setup-android@v3
       - name: Verify the Gradle wrapper
         uses: gradle/actions/wrapper-validation@v4
       - name: Build and test

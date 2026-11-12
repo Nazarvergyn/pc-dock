@@ -388,6 +388,15 @@ impl Backend for FarmBackend {
             return Err(format!("файл {size} байт больше предела {max}"));
         }
         let res = self.wait_route(t, |_| true, Duration::from_secs(120));
+        // Итог (`FileDone`) и данные приходят разными потоками клиента и могут разойтись по времени:
+        // после итога дожидаемся последних кусков.
+        if res.is_ok() {
+            let end = Instant::now() + Duration::from_secs(10);
+            let mut map = self.routes.map.lock().unwrap();
+            while map.get(&t).map_or(0, |r| r.data.len()) < size && Instant::now() < end {
+                map = self.routes.changed.wait_timeout(map, Duration::from_millis(50)).unwrap().0;
+            }
+        }
         let data = self.routes.map.lock().unwrap().remove(&t).map(|r| r.data).unwrap_or_default();
         res?;
         if data.len() != size {
