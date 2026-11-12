@@ -14,7 +14,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = 1
-        versionName = (findProperty("pcdockVersion") as String?) ?: "0.1.0-alpha.1"
+        versionName = (findProperty("pcdockVersion") as String?) ?: "0.1.0-alpha.2"
     }
 
     buildTypes {
