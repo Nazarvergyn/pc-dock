@@ -217,6 +217,12 @@ function onAutoEvent(v) {
 function logLine(cls, text) { const d = document.createElement("div"); d.className = cls; d.textContent = text; $("log").appendChild(d); $("log").scrollTop = 1e9; }
 
 connectFarm(); connectAuto();
+
+// Самопроверка для автоматического прогона страницы (`index.html?selftest`): сценарий без телефонов, результат в журнале.
+if (location.search.includes("selftest")) setTimeout(() => {
+  $("source").value = 'test("самопроверка", function() step("шаг"); log.info("привет"); assert.eq(1 + 1, 2, "арифметика") end)';
+  $("name").value = "Самопроверка"; scriptId = null; runScript();
+}, 1500);
 </script>
 </body>
 </html>
