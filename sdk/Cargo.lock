@@ -610,14 +610,14 @@ dependencies = [
 
 [[package]]
 name = "pcdock-adb"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "pcdock-core",
 ]
 
 [[package]]
 name = "pcdock-autod"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "clap",
  "ctrlc",
@@ -634,7 +634,7 @@ dependencies = [
 
 [[package]]
 name = "pcdock-check"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "clap",
  "pcdock-adb",
@@ -646,7 +646,7 @@ dependencies = [
 
 [[package]]
 name = "pcdock-client"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "interprocess",
  "pcdock-core",
@@ -658,11 +658,11 @@ dependencies = [
 
 [[package]]
 name = "pcdock-core"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 
 [[package]]
 name = "pcdock-farm"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "pcdock-adb",
  "pcdock-core",
@@ -673,7 +673,7 @@ dependencies = [
 
 [[package]]
 name = "pcdock-net"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "interprocess",
  "serde_json",
@@ -682,7 +682,7 @@ dependencies = [
 
 [[package]]
 name = "pcdock-serial"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "pcdock-core",
  "serialport",
@@ -690,7 +690,7 @@ dependencies = [
 
 [[package]]
 name = "pcdock-serve"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "interprocess",
  "pcdock-adb",
@@ -704,7 +704,7 @@ dependencies = [
 
 [[package]]
 name = "pcdock-usb"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "pcdock-core",
  "rusb",
@@ -712,7 +712,7 @@ dependencies = [
 
 [[package]]
 name = "pcdockd"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "clap",
  "ctrlc",

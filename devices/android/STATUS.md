@@ -1,6 +1,6 @@
 # Статус — PC Dock
 
-Обновлено: 2026-11-12, версия 0.1.0-alpha.2. Проверено на: Redmi A5 (`25028RN03A`, HyperOS) и Oppo CPH2505 (ColorOS), оба Android 15; ПК Linux в WSL2 (USB через `usbipd`).
+Обновлено: 2026-11-12, версия 0.1.0-alpha.3. Проверено на: Redmi A5 (`25028RN03A`, HyperOS) и Oppo CPH2505 (ColorOS), оба Android 15; ПК Linux в WSL2 (USB через `usbipd`).
 
 ## Работает (проверено на телефонах)
 
