@@ -41,6 +41,8 @@
     <label><input type="checkbox" id="devTouch" checked> касание</label>
     <label><input type="checkbox" id="devKeyboard" checked> клавиатура</label>
     <button onclick="wake()">Разбудить</button>
+    Путь: <select id="transport"><option>usb</option><option>adb</option><option>serial</option></select>
+    <button onclick="switchTransport()">Переключить</button>
     <label>Файл на телефон: <input type="file" id="file" onchange="pushFile(this.files[0])"></label>
   </div>
   <div id="info" class="dim"></div>
@@ -107,6 +109,7 @@ async function refreshPhones() {
 function onFarmEvent(v) {
   if (v.ev === "Appeared") { phones.set(v.phone, {...(phones.get(v.phone) || {}), phone: v.phone, transport: v.transport, serial: v.serial, state: "appeared"}); }
   else if (v.ev === "State") { const p = phones.get(v.phone) || {phone: v.phone}; p.state = v.state; p.hint = v.detail; phones.set(v.phone, p); }
+  else if (v.ev === "Warning") { $("info").textContent = "Предупреждение: " + v.detail; }
   else if (v.ev === "Lost") { phones.delete(v.phone); if (current === v.phone) current = null; }
   else if (v.ev === "Display" && v.phone === current) { $("info").textContent = `экран ${v.screen_w}x${v.screen_h}, поток ${v.stream_w}x${v.stream_h}, поворот ${v.rotation}`; }
   else if (["FileDone", "FileFailed", "FileReady", "FileProgress"].includes(v.ev)) { handleFileEvent(v); return; }
@@ -154,6 +157,9 @@ function usage(e) {                                           // коды USB HI
 }
 $("devTouch").onchange = (e) => current !== null && farm.send({op: "DeviceEnable", phone: current, kind: 0, on: e.target.checked});
 $("devKeyboard").onchange = (e) => current !== null && farm.send({op: "DeviceEnable", phone: current, kind: 2, on: e.target.checked});
+function switchTransport() {                          // ответ Ok значит «принято»; итог придёт событием Appeared или Warning
+  if (current !== null) farm.request({op: "SetTransport", phone: current, transport: $("transport").value}).catch((e) => alert(e));
+}
 function wake() { if (current !== null) farm.send({op: "Wake", phone: current}); }
 
 // ---------- Файлы: FilePut, затем данные пакетами [тип=3][номер передачи u32][данные] ----------

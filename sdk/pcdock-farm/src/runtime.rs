@@ -339,6 +339,8 @@ struct Auto {
     good: HashMap<String, Transport>,
     /// Ключи, на которых фабрика уже ошиблась: предупреждаем один раз.
     failed: std::collections::HashSet<String>,
+    /// Запрошенные вручную переключения пути (`Farm::set_transport`): выполняются при ближайшем обнаружении.
+    switch: HashMap<PhoneId, Transport>,
 }
 
 impl Farm {
@@ -439,7 +441,20 @@ impl Farm {
             ids: HashMap::new(),
             failed: Default::default(),
             good: HashMap::new(),
+            switch: HashMap::new(),
         });
+    }
+
+    /// Перевести телефон на другой путь (например, с ADB на USB-аксессуар). Выполняется при ближайшем обнаружении:
+    /// успех приходит событием `Appeared`, невозможность (путь телефона не виден) — `Warning`.
+    pub fn set_transport(&mut self, id: PhoneId, transport: Transport) -> Result<(), String> {
+        let auto = self.auto.as_mut().ok_or("обнаружение не включено")?;
+        if !auto.tracked.values().any(|t| t.id == id) {
+            return Err(format!("телефон {id} не найден обнаружением"));
+        }
+        auto.switch.insert(id, transport);
+        auto.last_scan = None;
+        Ok(())
     }
 
     /// Сведения обо всех телефонах (по возрастанию номера).
@@ -520,6 +535,37 @@ impl Farm {
                 Some(t) => {
                     t.last_seen = now;
                     let id = t.id;
+                    if let Some(want) = auto.switch.remove(&id) {
+                        if want != t.transport {
+                            match group.iter().find(|s| s.transport == want && s.issue.is_none()) {
+                                Some(alt) => match auto.factory.make(alt) {
+                                    Ok(link) => {
+                                        let _ = self.remove_phone(id);
+                                        if self.add_phone(id, link).is_ok() {
+                                            t.transport = want;
+                                            t.parked = None;
+                                            t.failing_since = None;
+                                            t.tried.clear();
+                                            auto.good.insert(key.clone(), want);
+                                            self.note_found(id, want, &alt.address, &alt.serial);
+                                            out.push(FarmEvent::Appeared {
+                                                phone: id,
+                                                transport: want,
+                                                address: alt.address.clone(),
+                                                serial: alt.serial.clone(),
+                                            });
+                                        }
+                                    }
+                                    Err(e) => out.push(FarmEvent::Warning { phone: id, detail: e }),
+                                },
+                                None => out.push(FarmEvent::Warning {
+                                    phone: id,
+                                    detail: format!("путь {want} сейчас недоступен"),
+                                }),
+                            }
+                            continue;
+                        }
+                    }
                     if let Some(issue) = best.issue {
                         // Помеха появилась (или осталась): работающий канал заменяем заглушкой с подсказкой.
                         if t.parked != Some(issue) {
@@ -1098,6 +1144,28 @@ mod tests {
         let evs = f.discover_now();
         assert_eq!(appeared(&evs), vec![(1, Transport::Usb)]);
         assert_eq!(f.phones().len(), 1);
+    }
+
+    #[test]
+    fn set_transport_moves_a_phone_to_another_path_and_reports_unavailable_ones() {
+        let (mut f, seen) = auto_farm(Duration::from_secs(3600));
+        *seen.lock().unwrap() =
+            vec![sight(Transport::Usb, "1-2", Some("AAA")), sight(Transport::Adb, "AAA", Some("AAA"))];
+        f.discover_now();
+        assert_eq!(f.phones_info()[0].transport, Some(Transport::Usb));
+        // Оба пути видны: переводим на ADB под тем же номером.
+        f.set_transport(1, Transport::Adb).unwrap();
+        let evs = f.discover_now();
+        assert_eq!(appeared(&evs), vec![(1, Transport::Adb)]);
+        assert_eq!(f.phones(), vec![1]);
+        // Выбор запомнен: следующий обзор не возвращает на USB.
+        assert!(appeared(&f.discover_now()).is_empty());
+        // Пути serial у телефона нет: предупреждение, путь не меняется.
+        f.set_transport(1, Transport::Serial).unwrap();
+        let evs = f.discover_now();
+        assert!(evs.iter().any(|e| matches!(e, FarmEvent::Warning { phone: 1, .. })));
+        assert_eq!(f.phones_info()[0].transport, Some(Transport::Adb));
+        assert!(f.set_transport(9, Transport::Usb).is_err());
     }
 
     #[test]

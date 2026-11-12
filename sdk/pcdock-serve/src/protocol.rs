@@ -120,6 +120,11 @@ pub enum ClientMsg {
     Wake {
         phone: u32,
     },
+    /// Перевести телефон на другой путь: `usb`, `adb`, `serial`. Результат: `Appeared` или `Warning`.
+    SetTransport {
+        phone: u32,
+        transport: String,
+    },
     SetStream {
         phone: u32,
         video: bool,

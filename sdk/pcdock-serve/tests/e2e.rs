@@ -257,6 +257,14 @@ fn request_ids_are_echoed_in_replies() {
     let v = c.json();
     assert_eq!((v["ev"].as_str(), v["id"].as_u64()), (Some("Error"), Some(43)));
 
+    // Выбор пути: неизвестное имя и телефон без обнаружения дают ошибку с номером запроса.
+    c.send_raw(r#"{"op":"SetTransport","phone":3,"transport":"wifi","id":44}"#);
+    let v = c.json();
+    assert_eq!((v["ev"].as_str(), v["id"].as_u64()), (Some("Error"), Some(44)));
+    c.send_raw(r#"{"op":"SetTransport","phone":3,"transport":"adb","id":45}"#);
+    let v = c.json();
+    assert_eq!((v["ev"].as_str(), v["id"].as_u64()), (Some("Error"), Some(45)));
+
     // Без номера всё как раньше: ответа `Ok` нет, ошибка без `id`.
     c.send_raw(r#"{"op":"Wake","phone":99}"#);
     let v = c.json();

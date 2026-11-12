@@ -81,6 +81,7 @@
 | `Key` | `phone, usage, down` | `usage`: код USB HID |
 | `DeviceEnable` | `phone, kind, on` | `kind`: 0 касание, 1 мышь, 2 клавиатура |
 | `ReleaseAll`, `RequestFrame`, `Wake` | `phone` | |
+| `SetTransport` | `phone`, `transport` (`usb`, `adb`, `serial`) | перевести телефон на другой путь; `Ok` значит «принято», итог придёт событием `Appeared` (успех) или `Warning` (путь недоступен) |
 | `SetStream` | `phone, video, audio` | |
 | `FilePut` | `phone, dest, size, media?` | `FileReady {transfer}`, затем данные клиента (тип 3), итог `FileDone`/`FileFailed` |
 | `FileGet` | `phone, src` | `FileInfo {transfer, size}`, данные сервера (тип 3), итог `FileDone`/`FileFailed` |

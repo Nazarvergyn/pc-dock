@@ -319,6 +319,22 @@ impl Handler<ClientState> for Handle {
                     fail(format!("нет передачи {transfer}"))
                 }
             }
+            ClientMsg::SetTransport { phone, transport } => {
+                let t = match transport.as_str() {
+                    "usb" => pcdock_core::link::Transport::Usb,
+                    "adb" => pcdock_core::link::Transport::Adb,
+                    "serial" => pcdock_core::link::Transport::Serial,
+                    _ => return fail("transport: usb, adb или serial".into()),
+                };
+                match self.shared.daemon.lock().unwrap().set_transport(phone, t) {
+                    Ok(()) => {
+                        if id.is_some() {
+                            reply(ServerMsg::Ok);
+                        }
+                    }
+                    Err(e) => fail(e),
+                }
+            }
             other => {
                 let (phone, cmd) = match map_input(other) {
                     Ok(v) => v,
@@ -687,6 +703,7 @@ fn map_input(msg: ClientMsg) -> Result<(PhoneId, InputCmd), String> {
         | ClientMsg::FileGet { .. }
         | ClientMsg::FileList { .. }
         | ClientMsg::FileDelete { .. }
-        | ClientMsg::FileCancel { .. } => return Err(bad("не команда ввода")),
+        | ClientMsg::FileCancel { .. }
+        | ClientMsg::SetTransport { .. } => return Err(bad("не команда ввода")),
     })
 }

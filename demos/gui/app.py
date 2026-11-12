@@ -5,7 +5,8 @@
     uv run app.py --fps 15 --token ...
 
 Мышь по плитке: касание (нажатие и протяжка), колесо: прокрутка. Клавиатура идёт на выбранный телефон
-(Tab: следующий телефон). Пробел с зажатым Ctrl: разбудить. Заголовок плитки показывает состояние телефона
+(Tab: следующий телефон). Пробел с зажатым Ctrl: разбудить. F1 / F2 / F3: перевести выбранный телефон на USB-аксессуар / ADB / serial.
+Заголовок плитки показывает состояние телефона
 и подсказку, если нужны действия на телефоне.
 """
 import argparse
@@ -42,6 +43,8 @@ def main():
 
     phones = {}          # номер -> сведения
     watched = set()
+    notice = {"text": ""}     # последнее предупреждение фермы (например, «путь adb сейчас недоступен»)
+    TRANSPORT_KEYS = {pygame.K_F1: "usb", pygame.K_F2: "adb", pygame.K_F3: "serial"}
 
     def refresh():
         for d in daemon.request("List").get("details", []):
@@ -53,6 +56,8 @@ def main():
             phones.setdefault(p, {"phone": p}).update(transport=v["transport"], serial=v["serial"])
         elif v["ev"] == "State":
             phones.setdefault(p, {"phone": p}).update(state=v["state"], hint=v["detail"])
+        elif v["ev"] == "Warning":
+            notice["text"] = v.get("detail", "")
         elif v["ev"] == "Lost":
             phones.pop(p, None)
             watched.discard(p)
@@ -94,6 +99,12 @@ def main():
                 ids = sorted(phones)
                 if ids:
                     selected = ids[(ids.index(selected) + 1) % len(ids)] if selected in ids else ids[0]
+            elif ev.type == pygame.KEYDOWN and ev.key in TRANSPORT_KEYS and selected is not None:
+                try:
+                    daemon.request("SetTransport", phone=selected, transport=TRANSPORT_KEYS[ev.key])
+                    notice["text"] = ""
+                except RemoteError as e:
+                    notice["text"] = str(e)
             elif ev.type in (pygame.KEYDOWN, pygame.KEYUP) and selected is not None and ev.key in KEYMAP:
                 daemon.send("Key", phone=selected, usage=KEYMAP[ev.key], down=ev.type == pygame.KEYDOWN)
             elif ev.type == pygame.KEYDOWN and ev.key == pygame.K_SPACE and ev.mod & pygame.KMOD_CTRL and selected:
@@ -138,6 +149,8 @@ def main():
             if d.get("hint"):
                 hint = font.render(d["hint"][:80], True, (230, 150, 40))
                 screen.blit(hint, (r.left + 8, r.bottom - 22))
+        if notice["text"]:
+            screen.blit(font.render(notice["text"][:120], True, (230, 150, 40)), (8, screen.get_height() - 22))
         if not phones:
             screen.blit(font.render("Телефонов нет. Подключите телефон: ферма найдёт его сама.", True, (200, 200, 200)), (20, 20))
         pygame.display.flip()
