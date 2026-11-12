@@ -6,7 +6,7 @@
 
 | Что | Требование |
 |---|---|
-| ОС ПК | Linux (проверено, в том числе в WSL2). macOS: частично. Windows: не проверялась |
+| ОС ПК | Linux (проверено, в том числе в WSL2). Windows и macOS: CI зелёный, бинарники на Windows запускались, с телефоном не проверялось |
 | Сборка | Rust 1.82+ (проверено на 1.99), `libusb-1.0` с заголовками (Linux: `libusb-1.0-0-dev`; macOS: `brew install libusb`) |
 | ADB-режим | `adb` (платформа-тулс) на ПК, APK сервера |
 | AOA-режим | приложение PC Dock на телефоне |
@@ -14,6 +14,8 @@
 | Производитель USB | один из списка `ANDROID_VIDS` (Google, Samsung, HTC, Huawei, Honor, Xiaomi, Motorola, OnePlus, Oppo/Realme, Vivo, Nothing, HMD, Sony Ericsson, LG, ZTE) или добавленный через `--vid` |
 
 ## 2. Установка
+
+Готовые бинарники: `curl -fsSL https://pc-dock.prozorov.me/install.sh | sh` (Windows: `irm https://pc-dock.prozorov.me/install.ps1 | iex`), или `cargo install`. Все способы: [install.md](install.md). Ниже сборка из исходников.
 
 ```bash
 cd sdk

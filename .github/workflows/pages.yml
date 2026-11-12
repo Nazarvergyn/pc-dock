@@ -1,0 +1,43 @@
+name: Pages
+
+# Сайт: лендинг (site/), документация (sdk/docs -> HTML) и установщики (install.sh, install.ps1).
+# Один раз включить: Settings -> Pages -> Source: GitHub Actions. Свой домен задаётся там же.
+
+on:
+  push:
+    branches: [main]
+    paths: ["site/**", "sdk/docs/**", "install.sh", "install.ps1", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install markdown
+      - run: python3 site/build.py _site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

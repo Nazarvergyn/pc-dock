@@ -26,3 +26,4 @@ logs/
 .idea/
 .vscode/
 *.swp
+_site/

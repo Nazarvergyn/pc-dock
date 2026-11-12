@@ -19,13 +19,18 @@ pcdock-check   самопроверка на вашей машине (Linux, mac
 
 ## Установка
 
+Сайт: **https://pc-dock.prozorov.me** (установка, быстрый старт, документация).
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/toxic-sunflower/pc-dock/main/install.sh | sh     # Linux, macOS
-irm https://raw.githubusercontent.com/toxic-sunflower/pc-dock/main/install.ps1 | iex           # Windows (PowerShell)
+curl -fsSL https://pc-dock.prozorov.me/install.sh | sh     # Linux, macOS
+irm https://pc-dock.prozorov.me/install.ps1 | iex           # Windows (PowerShell)
 ```
 
 Установщик скачивает последний релиз, проверяет `SHA256SUMS`, ставит `pcdockd`, `pcdock-autod`, `pcdock-check` в `~/.pcdock/bin` и добавляет каталог в PATH
 (на Linux и macOS подскажет строку для `~/.profile`). Версию можно задать: `sh install.sh v0.1.0-alpha.3`.
+
+Через Rust: `cargo install --locked --git https://github.com/toxic-sunflower/pc-dock pcdockd pcdock-autod pcdock-check pcdock-usb`.
+Все способы, обновление и удаление: [sdk/docs/install.md](sdk/docs/install.md). Если сайт недоступен, скрипт лежит в репозитории: `https://raw.githubusercontent.com/toxic-sunflower/pc-dock/main/install.sh`.
 
 ## Быстрый старт
 

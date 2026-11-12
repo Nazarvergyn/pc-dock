@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PC Dock: управление Android-телефонами с компьютера</title>
+<meta name="description" content="Ферма телефонов и автотесты: экран, звук, ввод и файлы Android-телефонов с ПК по USB. Демоны pcdockd и pcdock-autod.">
+<link rel="stylesheet" href="style.css"></head>
+<body>
+<header><a class="brand" href="./">PC Dock</a>
+<nav><a href="#install">Установка</a><a href="docs/getting-started.html">Быстрый старт</a><a href="docs/index.html">Документация</a><a href="https://github.com/toxic-sunflower/pc-dock/releases">Релизы</a><a href="https://github.com/toxic-sunflower/pc-dock">GitHub</a></nav></header>
+
+<div class="wrap">
+<section class="hero">
+  <h1>Телефоны Android под управлением компьютера</h1>
+  <p class="lead">Экран, звук, касания, клавиатура и файлы нескольких телефонов через USB. Два небольших демона и один открытый протокол: интерфейс, автотесты и скрипты пишите на чём угодно.</p>
+  <a class="btn" href="#install">Установить</a><a class="btn alt" href="docs/getting-started.html">Быстрый старт</a>
+  <p style="color:var(--dim);font-size:14px">Альфа-версия 0.1.0-alpha.3. Linux, macOS, Windows. Лицензия MIT или Apache-2.0.</p>
+</section>
+
+<section>
+<div class="grid">
+  <div class="card"><h3>Ферма телефонов</h3><p><code>pcdockd</code> держит подключения, находит телефоны сам (hotplug) и выбирает путь: USB-аксессуар, ADB или serial. Подключил кабель и работает.</p></div>
+  <div class="card"><h3>Автотесты на Lua</h3><p><code>pcdock-autod</code> запускает сценарии с проверками, логами и отчётом в JSON. Ход прогона виден в прямом эфире.</p></div>
+  <div class="card"><h3>Один протокол</h3><p>JSON и бинарные кадры по TCP, WebSocket и локальной трубе. Пример клиента для браузера и для Python в репозитории.</p></div>
+  <div class="card"><h3>Оригинальное разрешение</h3><p>Кадры без уменьшения, видео по спросу: подписчик сам выбирает частоту. Передача файлов в разрешённые папки.</p></div>
+</div>
+</section>
+
+<section id="install">
+<h2>Установка</h2>
+<div class="tabs">
+<h4>Linux и macOS</h4>
+<pre><code>curl -fsSL https://pc-dock.prozorov.me/install.sh | sh</code></pre>
+<h4>Windows (PowerShell)</h4>
+<pre><code>irm https://pc-dock.prozorov.me/install.ps1 | iex</code></pre>
+<h4>Через Rust (cargo)</h4>
+<pre><code>cargo install --locked --git https://github.com/toxic-sunflower/pc-dock \
+    pcdockd pcdock-autod pcdock-check pcdock-usb</code></pre>
+</div>
+<p>Скрипт скачивает последний релиз, проверяет контрольную сумму и кладёт <code>pcdockd</code>, <code>pcdock-autod</code>, <code>pcdock-check</code> и <code>pcdock-probe</code> в <code>~/.pcdock/bin</code>.
+Все способы, обновление и удаление: <a href="docs/install.html">подробная инструкция</a>.</p>
+</section>
+
+<section>
+<h2>Первые шаги</h2>
+<pre><code># 1. Включите на телефоне «Отладку по USB», подключите кабель, проверьте машину
+pcdock-check
+
+# 2. Запустите ферму
+pcdockd --auto --server-apk pcdock-server.apk
+
+# 3. Запустите автоматизацию (по желанию)
+pcdock-autod --farm 127.0.0.1:9001 --data ./autod-data</code></pre>
+<p>Подробно, с телефоном, браузерным демо и первым автотестом: <a href="docs/getting-started.html">быстрый старт</a>.</p>
+</section>
+
+<section>
+<h2>Документация</h2>
+<div class="grid">
+  <div class="card"><h3><a href="docs/install.html">Установка</a></h3><p>Скрипт, cargo, исходники; APK для телефона.</p></div>
+  <div class="card"><h3><a href="docs/getting-started.html">Быстрый старт</a></h3><p>От чистой машины до первого автотеста.</p></div>
+  <div class="card"><h3><a href="docs/operations.html">Эксплуатация</a></h3><p>Запуск, настройка, службы, диагностика, безопасность.</p></div>
+  <div class="card"><h3><a href="docs/protocol.html">Протокол</a></h3><p>Команды и события обоих демонов для своих клиентов.</p></div>
+  <div class="card"><h3><a href="docs/autod.html">Автоматизация</a></h3><p>Сценарии на Lua, проверки, отчёты.</p></div>
+  <div class="card"><h3><a href="docs/transports.html">Пути подключения</a></h3><p>AOA, ADB, serial; права на USB, WSL2, Windows, macOS.</p></div>
+</div>
+</section>
+
+<footer>PC Dock · MIT или Apache-2.0 · © Toxic Sunflower ·
+<a href="https://github.com/toxic-sunflower/pc-dock">исходники</a> · <a href="https://github.com/toxic-sunflower/pc-dock/releases">релизы</a></footer>
+</div>
+</body></html>
