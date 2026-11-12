@@ -37,6 +37,20 @@ jobs:
         run: cargo build --workspace --all-targets
       - name: Test
         run: cargo test --workspace --no-fail-fast
+      - name: Build release binaries (artifact for manual checks)
+        run: cargo build --release -p pcdockd -p pcdock-autod -p pcdock-check
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.os }}
+          path: |
+            sdk/target/release/pcdockd
+            sdk/target/release/pcdockd.exe
+            sdk/target/release/pcdock-autod
+            sdk/target/release/pcdock-autod.exe
+            sdk/target/release/pcdock-check
+            sdk/target/release/pcdock-check.exe
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Clippy
         if: runner.os == 'Linux'
         run: cargo clippy --workspace --all-targets -- -D warnings
