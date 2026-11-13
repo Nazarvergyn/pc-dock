@@ -32,6 +32,7 @@ use serde_json::{json, Value as Json};
 use crate::backend::{Backend, Frame, PhoneInfo};
 use crate::events::Sink;
 use crate::jpeg::jpeg_size;
+use crate::uitree::{self, Selector};
 
 /// Параметры прогона.
 pub struct RunConfig {
@@ -412,6 +413,98 @@ impl PhoneHandle {
     }
 }
 
+/// Селектор элемента из Lua: строка — текст целиком, таблица — `{text=, text_contains=, id=, desc=, class=, index=}`.
+fn selector(v: &Value) -> mlua::Result<Selector> {
+    let sel = match v {
+        Value::String(s) => Selector { text: Some(s.to_string_lossy()), ..Default::default() },
+        Value::Table(t) => Selector {
+            text: t.get("text")?,
+            text_contains: t.get("text_contains")?,
+            id: t.get("id")?,
+            desc: t.get("desc")?,
+            class: t.get("class")?,
+            index: t.get::<Option<usize>>("index")?.unwrap_or(0),
+        },
+        _ => {
+            return Err(mlua::Error::runtime(
+                "элемент: строка (текст) или таблица {text=, id=, desc=, class=}",
+            ))
+        }
+    };
+    if sel.is_empty() {
+        return Err(mlua::Error::runtime("элемент: задайте text, text_contains, id, desc или class"));
+    }
+    Ok(sel)
+}
+
+/// Ответ приложения как значение Lua: JSON — таблица, иначе строка.
+fn reply_value(lua: &Lua, s: &str) -> mlua::Result<Value> {
+    match serde_json::from_str::<Json>(s.trim()) {
+        Ok(j) if j.is_object() || j.is_array() => json_to_lua(lua, &j),
+        _ => Ok(Value::String(lua.create_string(s.trim())?)),
+    }
+}
+
+impl PhoneHandle {
+    /// Запрос к приложению на телефоне с ответом-строкой.
+    fn app(&self, req: Json, timeout: Duration) -> mlua::Result<String> {
+        self.st.check_alive()?;
+        self.st.backend.app(self.id, req, timeout).map_err(mlua::Error::runtime)
+    }
+
+    /// Элементы экрана сейчас; ошибка, если телефон их не отдал.
+    fn ui_nodes(&self) -> mlua::Result<(String, Vec<uitree::Node>)> {
+        let r = self.app(json!({"op": "UiDump"}), Duration::from_secs(10))?;
+        let xml = r.strip_prefix("xml").map(str::trim_start).ok_or_else(|| {
+            mlua::Error::runtime(format!(
+                "элементы экрана недоступны: {}",
+                r.chars().take(120).collect::<String>()
+            ))
+        })?;
+        Ok((xml.to_string(), uitree::parse(xml)))
+    }
+
+    /// Ждёт элемент до срока (0 — одна попытка). Возвращает элемент и размер экрана.
+    fn wait_node(
+        &self,
+        sel: &Selector,
+        timeout: Duration,
+    ) -> mlua::Result<Option<(uitree::Node, (i32, i32))>> {
+        let end = Instant::now() + timeout;
+        loop {
+            let (_, nodes) = self.ui_nodes()?;
+            if let (Some(n), Some(size)) = (uitree::find(&nodes, sel), uitree::screen_size(&nodes)) {
+                return Ok(Some((n.clone(), size)));
+            }
+            if Instant::now() >= end {
+                return Ok(None);
+            }
+            self.st.sleep(Duration::from_millis(500))?;
+        }
+    }
+}
+
+fn node_table(lua: &Lua, n: &uitree::Node, size: (i32, i32)) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    let (cx, cy) = n.center();
+    t.set("text", n.text.as_str())?;
+    t.set("id", n.id.as_str())?;
+    t.set("desc", n.desc.as_str())?;
+    t.set("class", n.class.as_str())?;
+    t.set("package", n.package.as_str())?;
+    t.set("clickable", n.clickable)?;
+    t.set("enabled", n.enabled)?;
+    // Центр в долях экрана — те же координаты, что у `p:tap`.
+    t.set("x", cx / size.0 as f32)?;
+    t.set("y", cy / size.1 as f32)?;
+    let b = lua.create_table()?;
+    for (i, v) in [n.bounds.0, n.bounds.1, n.bounds.2, n.bounds.3].into_iter().enumerate() {
+        b.set(i + 1, v)?;
+    }
+    t.set("bounds", b)?;
+    Ok(t)
+}
+
 impl UserData for PhoneHandle {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
         fields.add_field_method_get("id", |_, t| Ok(t.id));
@@ -556,6 +649,60 @@ impl UserData for PhoneHandle {
         methods.add_method("rm", |_, t, path: String| {
             t.st.check_alive()?;
             t.st.backend.file_delete(t.id, &path).map_err(mlua::Error::runtime)
+        });
+        // Приложение на телефоне (нужно приложение pc-dock с возможностями 6–11).
+        // Открыть приложение по пакету; возвращает итог телефона: "ok", "not_installed", "blocked_bal", "error …".
+        methods.add_method("launch", |_, t, (pkg, o): (String, Option<Table>)| {
+            let r = t.app(json!({"op": "LaunchApp", "package": pkg}), opt_secs(&o, "timeout", 10.0))?;
+            t.st.emit("log", json!({"test": *t.st.current.lock().unwrap(), "level": "debug", "text": format!("открыть {pkg}: {r}")}));
+            Ok(r)
+        });
+        // Приложения с главным экраном: таблица из ответа телефона.
+        methods.add_method("apps", |lua, t, ()| {
+            let r = t.app(json!({"op": "ListApps"}), Duration::from_secs(15))?;
+            reply_value(lua, &r)
+        });
+        // Пакет на переднем плане или nil.
+        methods.add_method("foreground", |_, t, ()| Ok(t.st.backend.foreground(t.id)));
+        // Элементы экрана как XML uiautomator.
+        methods.add_method("ui", |_, t, ()| Ok(t.ui_nodes()?.0));
+        // Найти элемент: `p:find("Войти")`, `p:find({id = "login"}, {timeout = 5})` → таблица {text, id, x, y, …} или nil.
+        methods.add_method("find", |lua, t, (sel, o): (Value, Option<Table>)| {
+            let sel = selector(&sel)?;
+            match t.wait_node(&sel, opt_secs(&o, "timeout", 0.0))? {
+                Some((n, size)) => Ok(Some(node_table(lua, &n, size)?)),
+                None => Ok(None),
+            }
+        });
+        // Ждёт появления элемента; true/false по сроку (по умолчанию 10 с).
+        methods.add_method("wait_for", |_, t, (sel, timeout): (Value, Option<f64>)| {
+            let sel = selector(&sel)?;
+            Ok(t.wait_node(&sel, Duration::from_secs_f64(timeout.unwrap_or(10.0)))?.is_some())
+        });
+        // Нажать на элемент (ждёт его до `timeout`, по умолчанию 10 с); нет элемента — ошибка.
+        methods.add_method("tap_on", |_, t, (sel, o): (Value, Option<Table>)| {
+            let sel = selector(&sel)?;
+            let Some((n, size)) = t.wait_node(&sel, opt_secs(&o, "timeout", 10.0))? else {
+                return Err(mlua::Error::runtime(format!("элемент не найден: {}", sel.describe())));
+            };
+            let (cx, cy) = n.center();
+            let (x, y) = (cx / size.0 as f32, cy / size.1 as f32);
+            t.touch(0, x, y, &o)?;
+            t.st.sleep(opt_secs(&o, "hold", 0.05))?;
+            t.touch(2, x, y, &o)
+        });
+        // Причины завершения приложения после `since_ms` (мс Unix): таблица или строка ("unsupported"…).
+        methods.add_method("exit_info", |lua, t, (pkg, since): (String, Option<u64>)| {
+            let r = t.app(
+                json!({"op": "ExitInfo", "package": pkg, "since_ms": since.unwrap_or(0)}),
+                Duration::from_secs(10),
+            )?;
+            reply_value(lua, &r)
+        });
+        // Внешний IP телефона: HTTPS GET по его сети; таблица {body, code, network, …} или строка-ошибка.
+        methods.add_method("ip", |lua, t, url: String| {
+            let r = t.app(json!({"op": "IpCheck", "url": url}), Duration::from_secs(30))?;
+            reply_value(lua, &r)
         });
         // Последний кадр экрана; `{fresh = true}` — дождаться нового, `{timeout = N}` — срок ожидания.
         methods.add_method("frame", |_, t, o: Option<Table>| {
@@ -1187,6 +1334,24 @@ mod tests {
             self.files.lock().unwrap().remove(path);
             Ok(())
         }
+        fn app(&self, phone: u32, req: Json, _timeout: Duration) -> Result<String, String> {
+            self.log.lock().unwrap().push(format!("app {phone} {req}"));
+            Ok(match req["op"].as_str() {
+                Some("LaunchApp") => "ok".into(),
+                Some("ListApps") => r#"[{"package":"com.app","label":"App"}]"#.into(),
+                Some("UiDump") => concat!(
+                    r#"xml <hierarchy rotation="0"><node text="" class="android.widget.FrameLayout" bounds="[0,0][1000,2000]">"#,
+                    r#"<node text="Войти" resource-id="com.app:id/login" class="android.widget.Button" clickable="true" bounds="[100,1000][300,1200]" />"#,
+                    "</node></hierarchy>"
+                )
+                .into(),
+                Some("IpCheck") => r#"{"code":200,"body":"1.2.3.4"}"#.into(),
+                _ => "unsupported".into(),
+            })
+        }
+        fn foreground(&self, _phone: u32) -> Option<String> {
+            Some("com.app".into())
+        }
         fn latest_frame(&self, _phone: u32) -> Option<Frame> {
             self.frames.lock().unwrap().last().cloned()
         }
@@ -1224,6 +1389,36 @@ mod tests {
         let sink = Arc::new(Collect::default());
         let r = run_script(src, "demo", &cfg, fake.clone(), sink.clone(), Arc::new(AtomicBool::new(false)));
         (r, sink)
+    }
+
+    #[test]
+    fn app_requests_and_screen_elements_from_lua() {
+        let fake = Fake::new();
+        let (r, _sink) = run(
+            r#"
+            test("app", function()
+              local p = phones()[1]
+              assert.eq(p:launch("com.app"), "ok")
+              assert.eq(p:apps()[1].package, "com.app")
+              assert.eq(p:foreground(), "com.app")
+              assert.eq(p:ip("https://example.com/ip").body, "1.2.3.4")
+              assert.eq(p:exit_info("com.app", 5), "unsupported")
+              local e = p:find({id = "login"})
+              assert.eq(e.text, "Войти")
+              assert.near(e.x, 0.2, 0.001)
+              assert.near(e.y, 0.55, 0.001)
+              assert.truthy(p:wait_for("войти", 1))
+              assert.falsy(p:find("Нет такого"))
+              p:tap_on("Войти")
+              assert.contains(p:ui(), "hierarchy")
+            end)
+            "#,
+            &fake,
+        );
+        assert_eq!(r.status, "passed", "{r:?}");
+        let log = fake.log().join("\n");
+        assert!(log.contains(r#""op":"LaunchApp""#) && log.contains(r#""package":"com.app""#), "{log}");
+        assert!(log.contains("touch 1 0 0.20 0.55") && log.contains("touch 1 2 0.20 0.55"), "{log}");
     }
 
     #[test]

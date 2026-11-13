@@ -337,6 +337,23 @@ impl Handler<ClientState> for Handle {
                     Err(e) => fail(e),
                 }
             }
+            ClientMsg::AppEvents { phone, on } => {
+                if !self.shared.daemon.lock().unwrap().phones().contains(&phone) {
+                    return fail(format!("нет трубки {phone}"));
+                }
+                hub.with_clients(|clients| {
+                    if let Some(c) = clients.get_mut(&client) {
+                        if on {
+                            c.data.apps.insert(phone);
+                        } else {
+                            c.data.apps.remove(&phone);
+                        }
+                    }
+                });
+                if id.is_some() {
+                    reply(ServerMsg::Ok);
+                }
+            }
             other => {
                 let (phone, cmd) = match map_input(other) {
                     Ok(v) => v,
@@ -732,6 +749,7 @@ fn map_input(msg: ClientMsg) -> Result<(PhoneId, InputCmd), String> {
         | ClientMsg::FileList { .. }
         | ClientMsg::FileDelete { .. }
         | ClientMsg::FileCancel { .. }
-        | ClientMsg::SetTransport { .. } => return Err(bad("не команда ввода")),
+        | ClientMsg::SetTransport { .. }
+        | ClientMsg::AppEvents { .. } => return Err(bad("не команда ввода")),
     })
 }

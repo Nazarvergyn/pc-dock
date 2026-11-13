@@ -88,6 +88,7 @@
 | `FileList` | `phone, path` | `Files {phone, path, names}` |
 | `FileDelete` | `phone, path` | `Ok` |
 | `FileCancel` | `transfer` | `Ok` |
+| `AppEvents` | `phone, on` | получать `Status` приложения телефона (передний план 16/17, ответы) без `Watch`; `Ok` |
 | `LaunchApp` | `phone, request, package` | открыть приложение; ответ событием `Status` 18 `"<request> <результат>"` |
 | `ListApps` | `phone, request` | приложения с главным экраном; `Status` 19 `"<request> <JSON>"` |
 | `UiDump` | `phone, request` | элементы экрана (uiautomator XML); `Status` 20 частями `"<request> <i>/<n> <часть>"` |
