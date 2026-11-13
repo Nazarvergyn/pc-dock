@@ -472,7 +472,12 @@ impl PhoneHandle {
     ) -> mlua::Result<Option<(uitree::Node, (i32, i32))>> {
         let end = Instant::now() + timeout;
         loop {
-            let (_, nodes) = self.ui_nodes()?;
+            // Окно ещё не готово (`no_window`: приложение только что открылось) — ждём до срока, как «не найден»
+            let nodes = match self.ui_nodes() {
+                Ok((_, nodes)) => nodes,
+                Err(e) if e.to_string().contains("no_window") && Instant::now() < end => Vec::new(),
+                Err(e) => return Err(e),
+            };
             if let (Some(n), Some(size)) = (uitree::find(&nodes, sel), uitree::screen_size(&nodes)) {
                 return Ok(Some((n.clone(), size)));
             }
