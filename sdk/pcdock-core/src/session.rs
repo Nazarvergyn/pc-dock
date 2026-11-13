@@ -397,10 +397,19 @@ impl Session {
     }
 
     /// Просит телефон изменить параметры потока. Телефон ответит новым `DisplayInfo`.
+    /// Настройки запоминаются: после переподключения телефон получит последние.
     pub fn set_stream(&mut self, settings: SetStream) {
+        self.cfg.stream = Some(settings);
         if self.state == State::Active {
             self.send_packet(settings.to_packet());
         }
+    }
+
+    /// Включить или выключить видео и звук и сменить предел частоты, не трогая размер и качество кадра,
+    /// заданные раньше (`set_initial_stream`/`set_stream`). Так `InputCmd::SetStream` не сбрасывает их.
+    pub fn set_stream_switches(&mut self, video: bool, audio: bool, max_fps: u8) {
+        let base = self.cfg.stream.unwrap_or_default();
+        self.set_stream(SetStream { video, audio, max_fps, ..base });
     }
 
     /// Просит телефон прислать текущее содержимое экрана.

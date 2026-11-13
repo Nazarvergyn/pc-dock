@@ -335,7 +335,10 @@ fn launch_app_only_when_both_sides_agree() {
     r.push(&streams[0]);
     let p = r.next_packet().unwrap();
     assert_eq!(p.ptype, PacketType::LaunchApp);
-    assert_eq!(LaunchApp::from_payload(&p.payload).unwrap(), LaunchApp { request_id: 7, package: "com.android.settings".into() });
+    assert_eq!(
+        LaunchApp::from_payload(&p.payload).unwrap(),
+        LaunchApp { request_id: 7, package: "com.android.settings".into() }
+    );
     feed(&mut s, 20, &[Status { code: 18, detail: "7 ok".into() }.to_packet()]);
     assert!(events(&mut s).contains(&Event::Status(Status { code: 18, detail: "7 ok".into() })));
     // Список приложений этот телефон не согласовал
@@ -348,7 +351,13 @@ fn list_apps_request_when_agreed() {
     let mut s = Session::new(cfg);
     assert_eq!(s.list_apps(1), Err(LaunchError::NotActive));
     s.start(0);
-    let hello = Hello { version_max: 2, version_min: 2, capabilities: caps::VIDEO_JPEG | caps::LIST_APPS, role: Role::Device, name: "p".into() };
+    let hello = Hello {
+        version_max: 2,
+        version_min: 2,
+        capabilities: caps::VIDEO_JPEG | caps::LIST_APPS,
+        role: Role::Device,
+        name: "p".into(),
+    };
     feed(&mut s, 10, &[hello.to_packet()]);
     drain(&mut s);
     assert_eq!(s.list_apps(0x0A0B_0C0D), Ok(()));
@@ -364,7 +373,10 @@ fn ui_dump_and_exit_info_only_when_agreed() {
     assert_eq!(s.exit_info(1, 0, "com.example.shop"), Err(LaunchError::Unsupported));
     assert!(drain(&mut s).0.is_empty());
 
-    let cfg = Config { capabilities: Config::default().capabilities | caps::UI_TREE | caps::EXIT_INFO, ..Config::default() };
+    let cfg = Config {
+        capabilities: Config::default().capabilities | caps::UI_TREE | caps::EXIT_INFO,
+        ..Config::default()
+    };
     let mut s = Session::new(cfg);
     assert_eq!(s.ui_dump(1), Err(LaunchError::NotActive));
     s.start(0);
@@ -408,7 +420,13 @@ fn ip_check_only_when_agreed() {
     let mut s = Session::new(cfg);
     assert_eq!(s.ip_check(1, "https://x.y/ip"), Err(LaunchError::NotActive));
     s.start(0);
-    let hello = Hello { version_max: 2, version_min: 2, capabilities: caps::VIDEO_JPEG | caps::IP_CHECK, role: Role::Device, name: "p".into() };
+    let hello = Hello {
+        version_max: 2,
+        version_min: 2,
+        capabilities: caps::VIDEO_JPEG | caps::IP_CHECK,
+        role: Role::Device,
+        name: "p".into(),
+    };
     feed(&mut s, 10, &[hello.to_packet()]);
     drain(&mut s);
     events(&mut s);
@@ -422,9 +440,40 @@ fn ip_check_only_when_agreed() {
     r.push(&streams[0]);
     let p = r.next_packet().unwrap();
     assert_eq!(p.ptype, PacketType::IpCheck);
-    assert_eq!(IpCheckReq::from_payload(&p.payload).unwrap(), IpCheckReq { request_id: 7, url: "https://x.y/ip".into() });
+    assert_eq!(
+        IpCheckReq::from_payload(&p.payload).unwrap(),
+        IpCheckReq { request_id: 7, url: "https://x.y/ip".into() }
+    );
     // Ответ — обычный STATUS 23
     let d = r#"7 {"ok":true,"code":200,"body":"{\"ip\":\"1.2.3.4\"}","transport":"cellular","ms":120}"#;
     feed(&mut s, 20, &[Status { code: 23, detail: d.into() }.to_packet()]);
     assert!(events(&mut s).contains(&Event::Status(Status { code: 23, detail: d.into() })));
+}
+
+#[test]
+fn stream_switches_keep_size_and_quality() {
+    let mut s = Session::new(Config::default());
+    let base = SetStream {
+        video: false,
+        audio: false,
+        max_width: 1280,
+        max_height: 1280,
+        jpeg_quality: 80,
+        max_fps: 30,
+    };
+    s.set_initial_stream(base);
+    s.start(0);
+    feed(&mut s, 10, &[phone_hello(), display(0, 720, 1640).to_packet()]);
+    drain(&mut s);
+    s.set_stream_switches(true, false, 10);
+    let (streams, _) = drain(&mut s);
+    let mut r = PacketReader::new();
+    r.push(&streams.concat());
+    let p = r.next_packet().unwrap();
+    assert_eq!(p.ptype, PacketType::SetStream);
+    let st = SetStream::from_payload(&p.payload).unwrap();
+    assert_eq!(
+        (st.video, st.max_width, st.max_height, st.jpeg_quality, st.max_fps),
+        (true, 1280, 1280, 80, 10)
+    );
 }

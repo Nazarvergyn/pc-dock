@@ -868,7 +868,8 @@ mod tests {
     fn ui_dump_and_exit_info_roundtrip() {
         let bytes = ui_dump_packet(0x0102_0304).encode();
         assert_eq!(&bytes[..12], &[b'P', b'D', 0x45, 0, 0, 0, 0, 4, 1, 2, 3, 4]);
-        let e = ExitInfoReq { request_id: 9, since_ms: 1_700_000_000_123, package: "com.example.shop".into() };
+        let e =
+            ExitInfoReq { request_id: 9, since_ms: 1_700_000_000_123, package: "com.example.shop".into() };
         let bytes = e.to_packet().encode();
         assert_eq!(bytes[2], 0x46);
         let mut r = PacketReader::new();
@@ -917,7 +918,12 @@ mod tests {
         assert_eq!(LaunchApp::from_payload(&p.payload).unwrap(), l);
         assert!(LaunchApp::from_payload(&[0, 1]).is_err());
         assert!(valid_package("com.example.shop_app2"));
-        assert!(!valid_package("1com.x") && !valid_package("") && !valid_package("com.x;reboot") && !valid_package("com x"));
+        assert!(
+            !valid_package("1com.x")
+                && !valid_package("")
+                && !valid_package("com.x;reboot")
+                && !valid_package("com x")
+        );
         assert!(!valid_package(&"a".repeat(256)));
     }
 }

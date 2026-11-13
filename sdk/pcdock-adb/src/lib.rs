@@ -14,7 +14,6 @@ use std::time::Duration;
 
 use pcdock_core::input::TouchPoint;
 use pcdock_core::link::{InputCmd, LinkError, PhoneLink};
-use pcdock_core::packet::SetStream;
 use pcdock_core::session::{Config, Event, Session, Transmit};
 
 /// Таймауты по умолчанию.
@@ -584,12 +583,7 @@ impl AdbLink {
                 Ok(())
             }
             InputCmd::SetStream { video, audio, max_fps } => {
-                s.set_stream(SetStream {
-                    video: *video,
-                    audio: *audio,
-                    max_fps: *max_fps,
-                    ..SetStream::default()
-                });
+                s.set_stream_switches(*video, *audio, *max_fps);
                 Ok(())
             }
         };

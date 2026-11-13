@@ -2,7 +2,6 @@
 
 use pcdock_core::input::TouchPoint;
 use pcdock_core::link::{InputCmd, LinkError, PhoneLink};
-use pcdock_core::packet::SetStream;
 use pcdock_core::session::Event;
 
 /// USB-связь поверх готового `Dock`: одна трубка, ретраи снаружи в воркере.
@@ -72,9 +71,7 @@ impl PhoneLink for UsbLink {
                 Ok(())
             }
             InputCmd::SetStream { video, audio, max_fps } => {
-                let st =
-                    SetStream { video: *video, audio: *audio, max_fps: *max_fps, ..SetStream::default() };
-                s.set_stream(st);
+                s.set_stream_switches(*video, *audio, *max_fps);
                 Ok(())
             }
         };
