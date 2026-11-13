@@ -337,6 +337,30 @@ impl Handler<ClientState> for Handle {
                     Err(e) => fail(e),
                 }
             }
+            ClientMsg::Pin { spec } => {
+                let r = pcdock_farm::PhoneSpec::parse(&spec)
+                    .and_then(|s| self.shared.daemon.lock().unwrap().pin(s));
+                match r {
+                    Ok(()) => {
+                        if id.is_some() {
+                            reply(ServerMsg::Ok);
+                        }
+                    }
+                    Err(e) => fail(e),
+                }
+            }
+            ClientMsg::Unpin { spec } => {
+                let r = pcdock_farm::PhoneSpec::parse(&spec)
+                    .and_then(|s| self.shared.daemon.lock().unwrap().unpin(&s));
+                match r {
+                    Ok(_) => {
+                        if id.is_some() {
+                            reply(ServerMsg::Ok);
+                        }
+                    }
+                    Err(e) => fail(e),
+                }
+            }
             ClientMsg::AppEvents { phone, on } => {
                 if !self.shared.daemon.lock().unwrap().phones().contains(&phone) {
                     return fail(format!("нет трубки {phone}"));
@@ -750,6 +774,8 @@ fn map_input(msg: ClientMsg) -> Result<(PhoneId, InputCmd), String> {
         | ClientMsg::FileDelete { .. }
         | ClientMsg::FileCancel { .. }
         | ClientMsg::SetTransport { .. }
-        | ClientMsg::AppEvents { .. } => return Err(bad("не команда ввода")),
+        | ClientMsg::AppEvents { .. }
+        | ClientMsg::Pin { .. }
+        | ClientMsg::Unpin { .. } => return Err(bad("не команда ввода")),
     })
 }

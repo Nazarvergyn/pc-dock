@@ -88,6 +88,8 @@
 | `FileList` | `phone, path` | `Files {phone, path, names}` |
 | `FileDelete` | `phone, path` | `Ok` |
 | `FileCancel` | `transfer` | `Ok` |
+| `Pin` | `spec` (`usb:1-2.3`, `usb:СЕРИЙНИК`, `adb:СЕРИЙНИК`, `serial:ПУТЬ`) | закрепить телефон на ходу; `Ok`, затем `Appeared` при ближайшем обнаружении. Для `pcdockd --manual`: приложение подключает телефоны по одному |
+| `Unpin` | `spec` | снять закрепление: телефон отключается (USB возвращается в обычный режим), `Lost` |
 | `AppEvents` | `phone, on` | получать `Status` приложения телефона (передний план 16/17, ответы) без `Watch`; `Ok` |
 | `LaunchApp` | `phone, request, package` | открыть приложение; ответ событием `Status` 18 `"<request> <результат>"` |
 | `ListApps` | `phone, request` | приложения с главным экраном; `Status` 19 `"<request> <JSON>"` |
