@@ -130,6 +130,32 @@ pub enum ClientMsg {
         video: bool,
         audio: bool,
     },
+    /// Запросы к приложению на телефоне (возможности 7–11). Ответ — событие `Status` (коды 18, 19, 20, 22, 23) с
+    /// `detail`, начинающимся с `request`; приходит запросившему клиенту, даже без `Watch`.
+    LaunchApp {
+        phone: u32,
+        request: u32,
+        package: String,
+    },
+    ListApps {
+        phone: u32,
+        request: u32,
+    },
+    UiDump {
+        phone: u32,
+        request: u32,
+    },
+    ExitInfo {
+        phone: u32,
+        request: u32,
+        since_ms: u64,
+        package: String,
+    },
+    IpCheck {
+        phone: u32,
+        request: u32,
+        url: String,
+    },
 }
 
 /// Запрос клиента: команда и необязательный номер `id`. Если `id` есть, ответ на эту команду несёт тот же `id`.

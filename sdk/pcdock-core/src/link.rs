@@ -58,6 +58,49 @@ pub enum InputCmd {
         audio: bool,
         max_fps: u8,
     },
+    /// Запрос к приложению на телефоне (возможности 7–11). Ответ всегда приходит событием `Status` с кодом
+    /// [`AppRequest::reply_code`]: от телефона или, если запрос не ушёл (телефон не умеет, неверный пакет или URL,
+    /// сессия не активна), от самой сессии с `detail` = `"<request> error <причина>"` (для `UiDump` —
+    /// `"<request> 1/1 error <причина>"`, как у частей ответа).
+    App(AppRequest),
+}
+
+/// Запрос к приложению на телефоне. `request` — номер, который вернётся в начале `detail` ответа.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AppRequest {
+    /// Открыть приложение (`LAUNCH_APP`, ответ `STATUS` 18).
+    LaunchApp { request: u32, package: String },
+    /// Приложения с главным экраном (`LIST_APPS`, ответ `STATUS` 19).
+    ListApps { request: u32 },
+    /// Элементы экрана в виде uiautomator XML (`UI_DUMP`, ответ `STATUS` 20 частями).
+    UiDump { request: u32 },
+    /// Причины завершения процессов приложения после `since_ms` (`EXIT_INFO`, ответ `STATUS` 22).
+    ExitInfo { request: u32, since_ms: u64, package: String },
+    /// HTTPS GET по сети телефона: внешний IP (`IP_CHECK`, ответ `STATUS` 23).
+    IpCheck { request: u32, url: String },
+}
+
+impl AppRequest {
+    /// Код `STATUS`, которым придёт ответ.
+    pub fn reply_code(&self) -> u16 {
+        match self {
+            Self::LaunchApp { .. } => 18,
+            Self::ListApps { .. } => 19,
+            Self::UiDump { .. } => 20,
+            Self::ExitInfo { .. } => 22,
+            Self::IpCheck { .. } => 23,
+        }
+    }
+
+    pub fn request(&self) -> u32 {
+        match self {
+            Self::LaunchApp { request, .. }
+            | Self::ListApps { request }
+            | Self::UiDump { request }
+            | Self::ExitInfo { request, .. }
+            | Self::IpCheck { request, .. } => *request,
+        }
+    }
 }
 
 impl InputCmd {

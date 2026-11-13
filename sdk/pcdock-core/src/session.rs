@@ -38,7 +38,16 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             name: format!("pcdock-core/{}", env!("CARGO_PKG_VERSION")),
-            capabilities: caps::VIDEO_JPEG | caps::AUDIO_PCM | caps::AUDIO_OPUS | caps::ROTATION,
+            capabilities: caps::VIDEO_JPEG
+                | caps::AUDIO_PCM
+                | caps::AUDIO_OPUS
+                | caps::ROTATION
+                | caps::FOREGROUND
+                | caps::LAUNCH_APP
+                | caps::LIST_APPS
+                | caps::UI_TREE
+                | caps::EXIT_INFO
+                | caps::IP_CHECK,
             aoa: AoaStrings::default(),
             hid: HidConfig::default(),
             stream: None,
@@ -455,6 +464,30 @@ impl Session {
         }
         self.send_packet(list_apps_packet(request_id));
         Ok(())
+    }
+
+    /// Выполнить запрос к приложению на телефоне. Ответ всегда придёт событием `Status` (см. [`crate::link::AppRequest`]):
+    /// если запрос не ушёл, сессия сама кладёт `Status` с `"<request> error <причина>"`.
+    pub fn app_request(&mut self, req: &crate::link::AppRequest) {
+        use crate::link::AppRequest as R;
+        let r = match req {
+            R::LaunchApp { request, package } => self.launch_app(*request, package),
+            R::ListApps { request } => self.list_apps(*request),
+            R::UiDump { request } => self.ui_dump(*request),
+            R::ExitInfo { request, since_ms, package } => self.exit_info(*request, *since_ms, package),
+            R::IpCheck { request, url } => self.ip_check(*request, url),
+        };
+        if let Err(e) = r {
+            let why = match e {
+                LaunchError::NotActive => "not_active",
+                LaunchError::Unsupported => "unsupported",
+                LaunchError::BadPackage => "invalid_package",
+                LaunchError::BadUrl => "invalid_url",
+            };
+            let part = if matches!(req, R::UiDump { .. }) { "1/1 " } else { "" };
+            let detail = format!("{} {part}error {why}", req.request());
+            self.events.push_back(Event::Status(Status { code: req.reply_code(), detail }));
+        }
     }
 
     /// Просит телефон прислать элементы экрана (`UI_DUMP`). Ответ придёт событиями `Status` с кодом 20

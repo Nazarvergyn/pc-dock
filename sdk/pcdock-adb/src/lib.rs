@@ -582,6 +582,10 @@ impl AdbLink {
                 s.wake();
                 Ok(())
             }
+            InputCmd::App(req) => {
+                s.app_request(req);
+                Ok(())
+            }
             InputCmd::SetStream { video, audio, max_fps } => {
                 s.set_stream_switches(*video, *audio, *max_fps);
                 Ok(())
