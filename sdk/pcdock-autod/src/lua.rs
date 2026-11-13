@@ -458,7 +458,50 @@ fn http_reply(lua: &Lua, s: &str) -> mlua::Result<Value> {
     json_to_lua(lua, &json!({"ok": false, "error": why}))
 }
 
+/// Можно ли набрать текст HID-клавиатурой `p:type` по-старому: латиница, цифры, пробел и `-=.,/`.
+fn hid_typeable(text: &str) -> bool {
+    text.chars().all(|c| c.is_ascii() && usage_for(&c.to_ascii_lowercase().to_string()).is_some())
+}
+
+/// Ответ `TypeText` (возможность 13) → способ ввода (`paste`, `set_text`, `clipboard`) или ошибка. Старое приложение
+/// pc-dock (сессия ответила `error unsupported`) — ошибка с кодом `app_outdated` в начале сообщения.
+fn text_input_reply(r: &str) -> Result<String, String> {
+    let r = r.trim();
+    match serde_json::from_str::<Json>(r) {
+        Ok(j) if j.is_object() => {
+            if j["ok"] == true {
+                return Ok(j["method"].as_str().unwrap_or("").to_string());
+            }
+            Err(format!("text_input_failed: телефон не ввёл текст ({})", j["error"].as_str().unwrap_or("?")))
+        }
+        _ => match r.strip_prefix("error ").unwrap_or(r) {
+            "unsupported" => Err("app_outdated: приложение pc-dock на телефоне не умеет вводить такой текст \
+                                  (кириллица, эмодзи, знаки; нужна возможность 13 TEXT_INPUT) — обновите приложение pc-dock"
+                .into()),
+            why => Err(format!("text_input_failed: {why}")),
+        },
+    }
+}
+
 impl PhoneHandle {
+    /// Ввести текст через приложение pc-dock (`TypeText`, возможность 13): телефон вставляет его в поле с курсором
+    /// сам или кладёт в буфер обмена — тогда жмём Ctrl+V HID-клавиатурой. Возвращает способ ввода.
+    fn text_input(&self, text: &str) -> mlua::Result<String> {
+        let r = self.app(json!({"op": "TypeText", "text": text}), Duration::from_secs(15))?;
+        let method = text_input_reply(&r).map_err(mlua::Error::runtime)?;
+        if method == "clipboard" {
+            // Ctrl (0xE0) + V (0x19)
+            let k = |usage: u16, down: bool| {
+                self.st.backend.key(self.id, usage, down).map_err(mlua::Error::runtime)
+            };
+            k(0xE0, true)?;
+            k(0x19, true)?;
+            k(0x19, false)?;
+            k(0xE0, false)?;
+        }
+        Ok(method)
+    }
+
     /// Запрос к приложению на телефоне с ответом-строкой.
     fn app(&self, req: Json, timeout: Duration) -> mlua::Result<String> {
         self.st.check_alive()?;
@@ -594,8 +637,18 @@ impl UserData for PhoneHandle {
             t.st.sleep(opt_secs(&o, "hold", 0.03))?;
             t.st.backend.key(t.id, usage, false).map_err(mlua::Error::runtime)
         });
-        // Набор текста из латиницы, цифр и пробела (заглавные через Shift).
-        methods.add_method("type", |_, t, text: String| {
+        // Набор текста. Латиница, цифры, пробел и `-=.,/` — HID-клавиатурой (заглавные через Shift), как раньше;
+        // остальное (кириллица, эмодзи, `#@!`, переводы строк) — через приложение pc-dock (возможность 13 TEXT_INPUT).
+        // Старое приложение без неё — ошибка «app_outdated: …».
+        methods.add_method("type", |_, t, text: mlua::String| {
+            let text = text.to_str()?.to_string();
+            if text.is_empty() {
+                return Ok(());
+            }
+            if !hid_typeable(&text) {
+                t.st.check_alive()?;
+                return t.text_input(&text).map(|_| ());
+            }
             for c in text.chars() {
                 t.st.check_alive()?;
                 let usage = usage_for(&c.to_ascii_lowercase().to_string())
@@ -611,6 +664,13 @@ impl UserData for PhoneHandle {
                 }
             }
             Ok(())
+        });
+        // Вставить текст (любой) в поле с курсором через приложение pc-dock (возможность 13 TEXT_INPUT), без набора по
+        // клавише; возвращает способ: "paste", "set_text" или "clipboard" (буфер обмена + Ctrl+V).
+        methods.add_method("paste", |_, t, text: mlua::String| {
+            let text = text.to_str()?.to_string();
+            t.st.check_alive()?;
+            t.text_input(&text)
         });
         methods.add_method("scroll", |_, t, ticks: f32| {
             t.st.check_alive()?;
@@ -1396,6 +1456,12 @@ mod tests {
                     r#"{"ok":true,"code":401,"body":"[error]0","headers":{"set-cookie":"JSESSIONID=1"},"ms":30}"#.into()
                 }
                 Some("HttpLocal") => "error unsupported".into(),
+                Some("TypeText") => match req["text"].as_str().unwrap_or("") {
+                    "старое приложение" => "error unsupported".into(),
+                    t if t.starts_with("буфер") => r#"{"ok":true,"method":"clipboard","reason":"no_service","ms":2}"#.into(),
+                    "сбой" => r#"{"ok":false,"error":"clipboard: SecurityException","ms":1}"#.into(),
+                    _ => r#"{"ok":true,"method":"paste","ms":40}"#.into(),
+                },
                 _ => "unsupported".into(),
             })
         }
@@ -1439,6 +1505,52 @@ mod tests {
         let sink = Arc::new(Collect::default());
         let r = run_script(src, "demo", &cfg, fake.clone(), sink.clone(), Arc::new(AtomicBool::new(false)));
         (r, sink)
+    }
+
+    #[test]
+    fn type_uses_text_input_for_unicode_and_hid_for_plain_latin() {
+        let fake = Fake::new();
+        let (r, _sink) = run(
+            r#"
+            test("text", function()
+              local p = phones()[1]
+              p:type("ab")
+              p:type("")
+              p:type("Привет 👋 #тест\nстрока")
+              assert.eq(p:paste("plain"), "paste")
+              assert.eq(p:paste("буфер ✨"), "clipboard")
+              local ok, e = pcall(function() p:type("старое приложение") end)
+              assert.falsy(ok)
+              assert.contains(tostring(e), "app_outdated")
+              local ok2, e2 = pcall(function() p:paste("сбой") end)
+              assert.falsy(ok2)
+              assert.contains(tostring(e2), "text_input_failed")
+              assert.contains(tostring(e2), "SecurityException")
+            end)
+            "#,
+            &fake,
+        );
+        assert_eq!(r.status, "passed", "{r:?}");
+        let log = fake.log();
+        let apps: Vec<&String> = log.iter().filter(|l| l.contains(r#""op":"TypeText""#)).collect();
+        assert_eq!(apps.len(), 5, "{log:?}");
+        assert!(apps[0].contains(r#""text":"Привет 👋 #тест\nстрока""#), "{apps:?}");
+        assert!(!log.iter().any(|l| l.contains(r#""text":"ab""#)), "латиница — HID, не TEXT_INPUT");
+        // «ab» — HID (a = 0x4, b = 0x5); после ответа «clipboard» — Ctrl+V: Ctrl (0xE0) вниз, V (0x19), Ctrl вверх
+        let keys: Vec<&str> = log.iter().filter(|l| l.starts_with("key")).map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "key 1 0x4 true",
+                "key 1 0x4 false",
+                "key 1 0x5 true",
+                "key 1 0x5 false",
+                "key 1 0xe0 true",
+                "key 1 0x19 true",
+                "key 1 0x19 false",
+                "key 1 0xe0 false",
+            ]
+        );
     }
 
     #[test]

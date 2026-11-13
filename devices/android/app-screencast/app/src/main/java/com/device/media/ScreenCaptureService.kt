@@ -152,6 +152,9 @@ class ScreenCaptureService : Service(), HostLink.Listener {
     // HTTP в локальной Wi-Fi-сети (CAP_HTTP_LOCAL, HTTP_LOCAL → STATUS 24): свой поток — медленный роутер не задерживает IP_CHECK
     @Volatile private var hostWantsHttp = false
     private val httpExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "http-local") }
+    // Ввод текста (CAP_TEXT_INPUT, TEXT_INPUT → STATUS 25): по одному, по порядку, не в потоке захвата
+    @Volatile private var hostWantsText = false
+    private val textExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "text-input") }
     // Дампы и причины завершения — по одному, не в потоке захвата (обход дерева — межпроцессные вызовы)
     private val uiExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "ui-tree") }
 
@@ -795,6 +798,7 @@ class ScreenCaptureService : Service(), HostLink.Listener {
         hostWantsExit = false
         hostWantsIp = false
         hostWantsHttp = false
+        hostWantsText = false
         stopUiChanges()
         stream = StreamConfig()
         Log.d(TAG, "USB подключён (#$connects): ${accessory.manufacturer} ${accessory.model}, жду HELLO от ПК")
@@ -826,6 +830,7 @@ class ScreenCaptureService : Service(), HostLink.Listener {
                 hostWantsExit = false
                 hostWantsIp = false
                 hostWantsHttp = false
+                hostWantsText = false
                 stopUiChanges()
             }
         }
@@ -1001,6 +1006,26 @@ class ScreenCaptureService : Service(), HostLink.Listener {
                 }
             }
 
+            Proto.T_TEXT_INPUT -> {
+                reactivateIfPaused("TEXT_INPUT")
+                val cmd = Messages.parseTextInput(p.payload) ?: return
+                if (!hostWantsText) {
+                    l.sendControl(Messages.status(Proto.STATUS_TEXT_INPUT, "${cmd.requestId} ${TextInput.error("not_negotiated", 0)}").encode())
+                    return
+                }
+                // Буфер обмена — в главном потоке, действия службы — межпроцессные вызовы: не в потоке захвата
+                textExecutor.execute {
+                    val answer = try {
+                        TextInput.run(this, cmd.bytes)
+                    } catch (e: Throwable) {
+                        TextInput.error("error: " + e.javaClass.simpleName, 0)
+                    }
+                    // Сам текст в журнал не пишется
+                    Log.d(TAG, "TEXT_INPUT #${cmd.requestId} (${cmd.bytes.size} байт): $answer")
+                    l.sendControl(Messages.status(Proto.STATUS_TEXT_INPUT, "${cmd.requestId} $answer").encode())
+                }
+            }
+
             else -> {} // PONG и неизвестные типы пропускаем
         }
     }
@@ -1022,7 +1047,7 @@ class ScreenCaptureService : Service(), HostLink.Listener {
         stream = StreamConfig()
         relayout("HELLO")
         var caps = Proto.CAP_VIDEO_JPEG or Proto.CAP_ROTATION or Proto.CAP_FOREGROUND or Proto.CAP_LAUNCH_APP or Proto.CAP_LIST_APPS or
-            Proto.CAP_UI_TREE or Proto.CAP_EXIT_INFO or Proto.CAP_IP_CHECK or Proto.CAP_HTTP_LOCAL
+            Proto.CAP_UI_TREE or Proto.CAP_EXIT_INFO or Proto.CAP_IP_CHECK or Proto.CAP_HTTP_LOCAL or Proto.CAP_TEXT_INPUT
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) caps = caps or Proto.CAP_AUDIO_PCM
         hostWantsForeground = hello.capabilities and Proto.CAP_FOREGROUND != 0
         hostWantsLaunch = hello.capabilities and Proto.CAP_LAUNCH_APP != 0
@@ -1031,6 +1056,7 @@ class ScreenCaptureService : Service(), HostLink.Listener {
         hostWantsExit = hello.capabilities and Proto.CAP_EXIT_INFO != 0
         hostWantsIp = hello.capabilities and Proto.CAP_IP_CHECK != 0
         hostWantsHttp = hello.capabilities and Proto.CAP_HTTP_LOCAL != 0
+        hostWantsText = hello.capabilities and Proto.CAP_TEXT_INPUT != 0
         if (hostWantsUi) startUiChanges(l) else stopUiChanges()
         l.sendControl(Messages.hello(caps, NAME).encode())
         val lay = layout
@@ -1165,6 +1191,7 @@ class ScreenCaptureService : Service(), HostLink.Listener {
         uiExecutor.shutdownNow()
         ipExecutor.shutdownNow()
         httpExecutor.shutdownNow()
+        textExecutor.shutdownNow()
         running = false
         isRunning = false
         projectionAlive = false

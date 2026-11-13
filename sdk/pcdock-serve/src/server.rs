@@ -774,6 +774,9 @@ fn map_input(msg: ClientMsg) -> Result<(PhoneId, InputCmd), String> {
                 timeout_ms,
             }),
         ),
+        ClientMsg::TypeText { phone, request, text } => {
+            (phone, InputCmd::App(AppRequest::TypeText { request, text }))
+        }
         ClientMsg::Auth { .. }
         | ClientMsg::List
         | ClientMsg::Watch { .. }

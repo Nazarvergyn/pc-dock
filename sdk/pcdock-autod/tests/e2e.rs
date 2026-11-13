@@ -51,6 +51,13 @@ impl PhoneLink for FakeLink {
                         format!(r#"{id} {{"ok":true,"code":401,"body":"[error]0","headers":{{}},"ms":7}}"#),
                     )]
                 }
+                // Поля с фокусом нет — текст только в буфере обмена, Ctrl+V жмёт хост
+                AppRequest::TypeText { .. } => {
+                    vec![(
+                        25,
+                        format!(r#"{id} {{"ok":true,"method":"clipboard","reason":"no_focus","ms":3}}"#),
+                    )]
+                }
                 AppRequest::UiDump { .. } => vec![
                     (20, format!(r#"{id} 1/2 xml <hierarchy><node text="" bounds="[0,0][1000,2000]">"#)),
                     (
@@ -535,6 +542,8 @@ fn lua_asks_the_phone_app_through_the_farm_daemon() {
           assert.truthy(r.ok)
           assert.eq(r.code, 401)
           assert.eq(r.body, "[error]0")
+          p:type("Подпись ✨ #тест")
+          assert.eq(p:paste("x"), "clipboard")
         end)
         "#,
     );
@@ -545,4 +554,7 @@ fn lua_asks_the_phone_app_through_the_farm_daemon() {
     assert!(e.wait_inputs(r#"LaunchApp { request: "#), "{}", e.inputs());
     assert!(e.inputs().contains("UiDump"), "{}", e.inputs());
     assert!(e.inputs().contains(r#"HttpLocal { request: "#), "{}", e.inputs());
+    assert!(e.inputs().contains(r#"text: "Подпись ✨ #тест" }"#), "{}", e.inputs());
+    assert!(e.inputs().contains("Key { usage: 224, down: true }"), "Ctrl+V после clipboard: {}", e.inputs());
+    assert!(e.inputs().contains("Key { usage: 25, down: true }"), "Ctrl+V после clipboard: {}", e.inputs());
 }

@@ -35,6 +35,8 @@ object Proto {
     const val T_IP_CHECK = 0x47
     /** HTTP-запрос в локальной Wi-Fi-сети телефона (хост → телефон): u32 request_id, JSON UTF-8. Ответ — STATUS 24. */
     const val T_HTTP_LOCAL = 0x48
+    /** Ввод текста в поле с курсором (хост → телефон): u32 request_id, текст UTF-8. Ответ — STATUS 25. */
+    const val T_TEXT_INPUT = 0x49
     const val T_STATUS = 0x50
     const val T_ERROR = 0x7F
 
@@ -55,6 +57,8 @@ object Proto {
     const val CAP_IP_CHECK = 1 shl 11
     /** Телефон делает HTTP-запрос к устройству своей Wi-Fi-сети (HTTP_LOCAL → STATUS 24), если хост поставил бит. */
     const val CAP_HTTP_LOCAL = 1 shl 12
+    /** Телефон вводит текст любого языка в поле с курсором (TEXT_INPUT → STATUS 25), если хост поставил бит. */
+    const val CAP_TEXT_INPUT = 1 shl 13
 
     const val CODEC_VIDEO_JPEG = 1
     const val CODEC_AUDIO_PCM_S16LE = 1
@@ -83,6 +87,8 @@ object Proto {
     const val STATUS_IP_CHECK = 23
     /** Ответ на HTTP_LOCAL: detail = "<request_id> <JSON-объект>" (ok, code, body, headers, ms или ok=false, error, ms). */
     const val STATUS_HTTP_LOCAL = 24
+    /** Ответ на TEXT_INPUT: detail = "<request_id> <JSON-объект>" (ok, method, ms или ok=false, error, ms). */
+    const val STATUS_TEXT_INPUT = 25
 }
 
 class Packet(val type: Int, val flags: Int, val payload: ByteArray) {
@@ -190,6 +196,9 @@ class IpCheckReq(val requestId: Long, val url: String)
 
 class HttpLocalReq(val requestId: Long, val json: String)
 
+/** [bytes] — текст как пришёл (UTF-8); проверка и декодирование — TextInput.decode. */
+class TextInputReq(val requestId: Long, val bytes: ByteArray)
+
 object Messages {
     /** LIST_APPS: u32 request_id. null — пакет повреждён. */
     fun parseListApps(payload: ByteArray): Long? = try {
@@ -228,6 +237,15 @@ object Messages {
         val id = b.int.toLong() and 0xFFFFFFFFL
         val json = ByteArray(b.remaining()).also { b.get(it) }.toString(Charsets.UTF_8)
         HttpLocalReq(id, json)
+    } catch (e: Exception) {
+        null
+    }
+
+    /** TEXT_INPUT: u32 request_id, затем текст UTF-8 до конца. null — пакет повреждён. */
+    fun parseTextInput(payload: ByteArray): TextInputReq? = try {
+        val b = ByteBuffer.wrap(payload)
+        val id = b.int.toLong() and 0xFFFFFFFFL
+        TextInputReq(id, ByteArray(b.remaining()).also { b.get(it) })
     } catch (e: Exception) {
         null
     }

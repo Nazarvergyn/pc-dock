@@ -48,7 +48,8 @@ impl Default for Config {
                 | caps::UI_TREE
                 | caps::EXIT_INFO
                 | caps::IP_CHECK
-                | caps::HTTP_LOCAL,
+                | caps::HTTP_LOCAL
+                | caps::TEXT_INPUT,
             aoa: AoaStrings::default(),
             hid: HidConfig::default(),
             stream: None,
@@ -121,7 +122,8 @@ pub enum LaunchError {
     BadPackage,
     /// Некорректный URL для `IP_CHECK` (только `https://`, см. `packet::valid_ip_check_url`).
     BadUrl,
-    /// Некорректный запрос `HTTP_LOCAL`: метод, заголовки или тело (см. `packet::HttpLocalReq::check`).
+    /// Некорректный запрос `HTTP_LOCAL` (метод, заголовки или тело, см. `packet::HttpLocalReq::check`) или текст
+    /// `TEXT_INPUT` (пустой, длиннее 16 КБ или с `\0`, см. `packet::valid_text_input`).
     BadRequest,
 }
 
@@ -489,6 +491,9 @@ impl Session {
                     timeout_ms: *timeout_ms,
                 })
             }
+            R::TypeText { request, text } => {
+                self.text_input(&TextInputReq { request_id: *request, text: text.clone() })
+            }
         };
         if let Err(e) = r {
             let why = match e {
@@ -547,6 +552,23 @@ impl Session {
             return Err(LaunchError::BadUrl);
         }
         self.send_packet(IpCheckReq { request_id, url: url.to_string() }.to_packet());
+        Ok(())
+    }
+
+    /// Просит телефон ввести текст в поле с курсором (`TEXT_INPUT`). Ответ придёт событием `Status` с кодом 25 и
+    /// `detail` = `"<request_id> <JSON>"`; при `"method":"clipboard"` текст только в буфере обмена — нажать Ctrl+V
+    /// должен хост. Ошибка — сессия не активна, `caps::TEXT_INPUT` не согласован или текст некорректен (`BadRequest`).
+    pub fn text_input(&mut self, req: &TextInputReq) -> Result<(), LaunchError> {
+        if self.state != State::Active {
+            return Err(LaunchError::NotActive);
+        }
+        if self.negotiated_caps & caps::TEXT_INPUT == 0 {
+            return Err(LaunchError::Unsupported);
+        }
+        if !req.valid() {
+            return Err(LaunchError::BadRequest);
+        }
+        self.send_packet(req.to_packet());
         Ok(())
     }
 

@@ -85,7 +85,7 @@ pub trait Backend: Send + Sync {
     fn file_list(&self, _phone: u32, _path: &str) -> Result<Vec<String>, String> {
         Err("передача файлов не поддерживается".into())
     }
-    /// Запрос к приложению на телефоне: `req` — `{"op": "LaunchApp" | "ListApps" | "UiDump" | "ExitInfo" | "IpCheck" | "HttpLocal", …}`
+    /// Запрос к приложению на телефоне: `req` — `{"op": "LaunchApp" | "ListApps" | "UiDump" | "ExitInfo" | "IpCheck" | "HttpLocal" | "TypeText", …}`
     /// без `phone` и `request`. Возвращает ответ телефона без номера запроса (части `UiDump` склеены).
     fn app(&self, _phone: u32, _req: Value, _timeout: Duration) -> Result<String, String> {
         Err("запросы к приложению не поддерживаются".into())
@@ -117,7 +117,7 @@ struct Routes {
 /// Ответ на запрос к приложению: полученные части (у `UiDump` их несколько) и склеенный ответ.
 type AppReply = (Vec<Option<String>>, Option<String>);
 
-/// Ответы приложения на запросы (`Status` 18–24) и передний план (16/17).
+/// Ответы приложения на запросы (`Status` 18–25) и передний план (16/17).
 #[derive(Default)]
 struct AppReplies {
     /// Номер запроса → части ответа (у `UiDump` их несколько) и склеенный ответ.
@@ -138,7 +138,7 @@ impl AppReplies {
                 self.foreground.lock().unwrap().remove(&phone);
                 return;
             }
-            18..=20 | 22..=24 => {}
+            18..=20 | 22..=25 => {}
             _ => return,
         }
         let Some((id, rest)) = detail.split_once(' ') else { return };

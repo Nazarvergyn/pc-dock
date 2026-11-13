@@ -36,6 +36,9 @@ pub mod caps {
     /// Телефон выполняет HTTP-запрос к устройству своей локальной Wi-Fi-сети (`HTTP_LOCAL`, ответ — `STATUS` 24):
     /// например, к админке роутера, в Wi-Fi которого телефон, а компьютер — нет.
     pub const HTTP_LOCAL: u32 = 1 << 12;
+    /// Телефон вводит текст любого языка (кириллица, эмодзи) в поле, где стоит курсор (`TEXT_INPUT`, ответ — `STATUS`
+    /// 25): вставкой через службу специальных возможностей или через буфер обмена, после которого хост жмёт Ctrl+V.
+    pub const TEXT_INPUT: u32 = 1 << 13;
 }
 
 /// Коды кодеков.
@@ -79,6 +82,8 @@ pub enum PacketType {
     IpCheck,
     /// HTTP-запрос к устройству локальной Wi-Fi-сети телефона (хост → телефон, возможность `caps::HTTP_LOCAL`).
     HttpLocal,
+    /// Ввести текст в поле с курсором (хост → телефон, возможность `caps::TEXT_INPUT`).
+    TextInput,
     Status,
     Error,
     /// Тип, неизвестный этой версии ядра (такие пакеты пропускаются).
@@ -105,6 +110,7 @@ impl PacketType {
             0x46 => Self::ExitInfo,
             0x47 => Self::IpCheck,
             0x48 => Self::HttpLocal,
+            0x49 => Self::TextInput,
             0x50 => Self::Status,
             0x7F => Self::Error,
             other => Self::Unknown(other),
@@ -130,6 +136,7 @@ impl PacketType {
             Self::ExitInfo => 0x46,
             Self::IpCheck => 0x47,
             Self::HttpLocal => 0x48,
+            Self::TextInput => 0x49,
             Self::Status => 0x50,
             Self::Error => 0x7F,
             Self::Unknown(v) => v,
@@ -851,6 +858,45 @@ pub fn valid_http_local_url(url: &str) -> bool {
         || (o[0] == 169 && o[1] == 254)
 }
 
+/// Наибольший текст `TEXT_INPUT`, байт UTF-8 (подпись Instagram — до 2200 символов, с эмодзи — до ~9 КБ).
+pub const TEXT_INPUT_MAX: usize = 16 * 1024;
+
+/// Ввести текст в поле, где стоит курсор (`TEXT_INPUT`, 0x49): `u32 request_id`, затем текст UTF-8 до конца payload.
+/// Телефон вставляет его в поле с фокусом ввода (служба специальных возможностей: «Вставить» из буфера обмена или
+/// «Задать текст») или только кладёт в буфер обмена — тогда хост жмёт Ctrl+V своей HID-клавиатурой.
+/// Ответ — `STATUS` 25 `"<request_id> <JSON-объект>"`: `{"ok":true,"method":"paste"|"set_text"|"clipboard","ms":12}`
+/// или `{"ok":false,"error":"bad_request"|"clipboard: …"|"not_negotiated","ms":0}` (PROTOCOL.md «Ввод текста
+/// (возможность 13)»).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextInputReq {
+    pub request_id: u32,
+    /// Не пустой, не больше [`TEXT_INPUT_MAX`] байт UTF-8, без символа `\0`.
+    pub text: String,
+}
+
+impl TextInputReq {
+    /// Те же правила проверяет телефон: текст не пустой, не больше [`TEXT_INPUT_MAX`] байт UTF-8 и без `\0`.
+    pub fn valid(&self) -> bool {
+        valid_text_input(&self.text)
+    }
+
+    pub fn to_packet(&self) -> Packet {
+        let mut p = self.request_id.to_be_bytes().to_vec();
+        p.extend_from_slice(self.text.as_bytes());
+        Packet::new(PacketType::TextInput, p)
+    }
+
+    pub fn decode(data: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor::new(data);
+        Ok(Self { request_id: c.u32()?, text: utf8(c.rest()) })
+    }
+}
+
+/// Текст, который можно передать в `TEXT_INPUT`: не пустой, не больше [`TEXT_INPUT_MAX`] байт UTF-8, без `\0`.
+pub fn valid_text_input(text: &str) -> bool {
+    !text.is_empty() && text.len() <= TEXT_INPUT_MAX && !text.contains('\0')
+}
+
 /// Имя пакета Android, которое можно передать в `LAUNCH_APP`: латинская буква, затем буквы, цифры, `_` и `.`,
 /// не длиннее 255 байт (те же правила проверяет телефон).
 pub fn valid_package(p: &str) -> bool {
@@ -1192,6 +1238,32 @@ mod tests {
             !valid_http_local_url(&format!("http://192.168.1.1/{}", "a".repeat(2100))),
             "не длиннее 2048"
         );
+    }
+
+    #[test]
+    fn text_input_roundtrip_and_rules() {
+        let q = TextInputReq {
+            request_id: 0x0A0B_0C0D,
+            text: "Привет, мир! 🌍👨‍👩‍👧 #тест\nвторая строка".into(),
+        };
+        assert!(q.valid());
+        let bytes = q.to_packet().encode();
+        assert_eq!(bytes[2], 0x49);
+        let mut r = PacketReader::new();
+        r.push(&bytes);
+        let p = r.next_packet().unwrap();
+        assert_eq!(p.ptype, PacketType::TextInput);
+        assert_eq!(&p.payload[..4], &[0x0A, 0x0B, 0x0C, 0x0D]);
+        assert_eq!(TextInputReq::decode(&p.payload).unwrap(), q);
+        assert!(TextInputReq::decode(&[0, 0]).is_err());
+        assert_eq!(PacketType::from_u8(0x49), PacketType::TextInput);
+        assert_eq!(PacketType::TextInput.to_u8(), 0x49);
+
+        assert!(!valid_text_input(""));
+        assert!(!valid_text_input("a\0b"));
+        assert!(valid_text_input(&"я".repeat(TEXT_INPUT_MAX / 2)), "ровно предел (кириллица — 2 байта)");
+        assert!(!valid_text_input(&"я".repeat(TEXT_INPUT_MAX / 2 + 1)));
+        assert!(valid_text_input("\t\r\n"));
     }
 
     #[test]

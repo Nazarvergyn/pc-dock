@@ -525,6 +525,63 @@ fn http_local_only_when_agreed() {
 }
 
 #[test]
+fn text_input_only_when_agreed() {
+    use pcdock_core::link::AppRequest;
+    let req = |request: u32, text: &str| AppRequest::TypeText { request, text: text.into() };
+    // Хост просит бит 13 по умолчанию
+    assert_ne!(Config::default().capabilities & caps::TEXT_INPUT, 0);
+
+    // Старый телефон (без бита 13) — команда не уходит, ответ «unsupported» кладёт сама сессия
+    let mut s = active_session();
+    s.app_request(&req(3, "Привет"));
+    assert!(drain(&mut s).0.is_empty());
+    assert!(
+        events(&mut s).contains(&Event::Status(Status { code: 25, detail: "3 error unsupported".into() }))
+    );
+
+    let mut s = Session::new(Config::default());
+    s.start(0);
+    let hello = Hello {
+        version_max: 2,
+        version_min: 2,
+        capabilities: caps::VIDEO_JPEG | caps::TEXT_INPUT,
+        role: Role::Device,
+        name: "p".into(),
+    };
+    feed(&mut s, 10, &[hello.to_packet()]);
+    drain(&mut s);
+    events(&mut s);
+
+    // Пустой и слишком длинный текст — не уходят
+    s.app_request(&req(4, ""));
+    s.app_request(&req(5, &"я".repeat(TEXT_INPUT_MAX)));
+    assert!(drain(&mut s).0.is_empty(), "неверный текст не уходит");
+    let ev = events(&mut s);
+    assert!(
+        ev.contains(&Event::Status(Status { code: 25, detail: "4 error invalid_request".into() })),
+        "{ev:?}"
+    );
+    assert!(
+        ev.contains(&Event::Status(Status { code: 25, detail: "5 error invalid_request".into() })),
+        "{ev:?}"
+    );
+
+    let text = "Подпись ✨ #тест\nвторая строка 👨‍👩‍👧";
+    s.app_request(&req(7, text));
+    let (streams, _) = drain(&mut s);
+    assert_eq!(streams.len(), 1);
+    let mut r = PacketReader::new();
+    r.push(&streams[0]);
+    let p = r.next_packet().unwrap();
+    assert_eq!(p.ptype, PacketType::TextInput);
+    assert_eq!(TextInputReq::decode(&p.payload).unwrap(), TextInputReq { request_id: 7, text: text.into() });
+    // Ответ — обычный STATUS 25
+    let d = r#"7 {"ok":true,"method":"paste","ms":40}"#;
+    feed(&mut s, 20, &[Status { code: 25, detail: d.into() }.to_packet()]);
+    assert!(events(&mut s).contains(&Event::Status(Status { code: 25, detail: d.into() })));
+}
+
+#[test]
 fn stream_switches_keep_size_and_quality() {
     let mut s = Session::new(Config::default());
     let base = SetStream {
