@@ -445,6 +445,19 @@ fn reply_value(lua: &Lua, s: &str) -> mlua::Result<Value> {
     }
 }
 
+/// Ответ `HttpLocal` → таблица `{ok, code, body, headers, ms}` или `{ok = false, error}`: JSON телефона как есть,
+/// а ответ без JSON (`"error unsupported"` от сессии, если приложение pc-dock старое) — `{ok = false, error = …}`.
+fn http_reply(lua: &Lua, s: &str) -> mlua::Result<Value> {
+    if let Ok(j) = serde_json::from_str::<Json>(s.trim()) {
+        if j.is_object() {
+            return json_to_lua(lua, &j);
+        }
+    }
+    let why = s.trim();
+    let why = why.strip_prefix("error ").unwrap_or(why);
+    json_to_lua(lua, &json!({"ok": false, "error": why}))
+}
+
 impl PhoneHandle {
     /// Запрос к приложению на телефоне с ответом-строкой.
     fn app(&self, req: Json, timeout: Duration) -> mlua::Result<String> {
@@ -655,7 +668,7 @@ impl UserData for PhoneHandle {
             t.st.check_alive()?;
             t.st.backend.file_delete(t.id, &path).map_err(mlua::Error::runtime)
         });
-        // Приложение на телефоне (нужно приложение pc-dock с возможностями 6–11).
+        // Приложение на телефоне (нужно приложение pc-dock с возможностями 6–12).
         // Открыть приложение по пакету; возвращает итог телефона: "ok", "not_installed", "blocked_bal", "error …".
         methods.add_method("launch", |_, t, (pkg, o): (String, Option<Table>)| {
             let r = t.app(json!({"op": "LaunchApp", "package": pkg}), opt_secs(&o, "timeout", 10.0))?;
@@ -708,6 +721,34 @@ impl UserData for PhoneHandle {
         methods.add_method("ip", |lua, t, url: String| {
             let r = t.app(json!({"op": "IpCheck", "url": url}), Duration::from_secs(30))?;
             reply_value(lua, &r)
+        });
+        // HTTP-запрос к устройству локальной Wi-Fi-сети телефона (админка роутера и т.п.), через Wi-Fi телефона:
+        // `p:http{method = "POST", url = "http://192.168.1.1/…", headers = {…}, body = "…", timeout = 10}` →
+        // `{ok, code, body, headers, ms}` (любой код HTTP — ok = true) или `{ok = false, error}`.
+        methods.add_method("http", |lua, t, o: Table| {
+            let method =
+                o.get::<Option<String>>("method")?.unwrap_or_else(|| "GET".into()).to_ascii_uppercase();
+            let url: String =
+                o.get::<Option<String>>("url")?.ok_or_else(|| mlua::Error::runtime("p:http: нужен url"))?;
+            let mut headers = serde_json::Map::new();
+            if let Some(h) = o.get::<Option<Table>>("headers")? {
+                for pair in h.pairs::<String, String>() {
+                    let (k, v) = pair?;
+                    headers.insert(k, Json::String(v));
+                }
+            }
+            let body = o
+                .get::<Option<mlua::String>>("body")?
+                .map(|b| String::from_utf8_lossy(&b.as_bytes()).into_owned())
+                .unwrap_or_default();
+            let timeout = o.get::<Option<f64>>("timeout")?.unwrap_or(10.0).clamp(0.001, 30.0);
+            let timeout_ms = (timeout * 1000.0).round() as u32;
+            let r = t.app(
+                json!({"op": "HttpLocal", "method": method, "url": url, "headers": headers, "body": body,
+                       "timeout_ms": timeout_ms}),
+                Duration::from_millis(timeout_ms as u64) * 2 + Duration::from_secs(5),
+            )?;
+            http_reply(lua, &r)
         });
         // Последний кадр экрана; `{fresh = true}` — дождаться нового, `{timeout = N}` — срок ожидания.
         methods.add_method("frame", |_, t, o: Option<Table>| {
@@ -1351,6 +1392,10 @@ mod tests {
                 )
                 .into(),
                 Some("IpCheck") => r#"{"code":200,"body":"1.2.3.4"}"#.into(),
+                Some("HttpLocal") if req["url"] == "http://192.168.1.1/cgi?1" => {
+                    r#"{"ok":true,"code":401,"body":"[error]0","headers":{"set-cookie":"JSESSIONID=1"},"ms":30}"#.into()
+                }
+                Some("HttpLocal") => "error unsupported".into(),
                 _ => "unsupported".into(),
             })
         }
@@ -1407,6 +1452,15 @@ mod tests {
               assert.eq(p:apps()[1].package, "com.app")
               assert.eq(p:foreground(), "com.app")
               assert.eq(p:ip("https://example.com/ip").body, "1.2.3.4")
+              local h = p:http{method = "post", url = "http://192.168.1.1/cgi?1", headers = {Referer = "http://192.168.1.1/"},
+                               body = "[x]", timeout = 5}
+              assert.truthy(h.ok)
+              assert.eq(h.code, 401)
+              assert.eq(h.body, "[error]0")
+              assert.eq(h.headers["set-cookie"], "JSESSIONID=1")
+              local old = p:http{url = "http://192.168.1.1/"}
+              assert.falsy(old.ok)
+              assert.eq(old.error, "unsupported")
               assert.eq(p:exit_info("com.app", 5), "unsupported")
               local e = p:find({id = "login"})
               assert.eq(e.text, "Войти")
@@ -1423,6 +1477,12 @@ mod tests {
         assert_eq!(r.status, "passed", "{r:?}");
         let log = fake.log().join("\n");
         assert!(log.contains(r#""op":"LaunchApp""#) && log.contains(r#""package":"com.app""#), "{log}");
+        assert!(
+            log.contains(r#""method":"POST""#)
+                && log.contains(r#""timeout_ms":5000"#)
+                && log.contains(r#""headers":{"Referer":"http://192.168.1.1/"}"#),
+            "{log}"
+        );
         assert!(log.contains("touch 1 0 0.20 0.55") && log.contains("touch 1 2 0.20 0.55"), "{log}");
     }
 

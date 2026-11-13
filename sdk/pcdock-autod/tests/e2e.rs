@@ -45,6 +45,12 @@ impl PhoneLink for FakeLink {
             let id = req.request();
             let replies: Vec<(u16, String)> = match req {
                 AppRequest::LaunchApp { .. } => vec![(18, format!("{id} ok"))],
+                AppRequest::HttpLocal { url, .. } if url == "http://192.168.1.1/" => {
+                    vec![(
+                        24,
+                        format!(r#"{id} {{"ok":true,"code":401,"body":"[error]0","headers":{{}},"ms":7}}"#),
+                    )]
+                }
                 AppRequest::UiDump { .. } => vec![
                     (20, format!(r#"{id} 1/2 xml <hierarchy><node text="" bounds="[0,0][1000,2000]">"#)),
                     (
@@ -525,6 +531,10 @@ fn lua_asks_the_phone_app_through_the_farm_daemon() {
           assert.near(ok.x, 0.1, 0.001)
           p:tap_on("OK")
           assert.eq(p:ip("https://example.com/ip"), "unsupported")
+          local r = p:http{method = "POST", url = "http://192.168.1.1/", body = "[x]"}
+          assert.truthy(r.ok)
+          assert.eq(r.code, 401)
+          assert.eq(r.body, "[error]0")
         end)
         "#,
     );
@@ -534,4 +544,5 @@ fn lua_asks_the_phone_app_through_the_farm_daemon() {
     assert_eq!(end["status"], "passed", "{evs:?}");
     assert!(e.wait_inputs(r#"LaunchApp { request: "#), "{}", e.inputs());
     assert!(e.inputs().contains("UiDump"), "{}", e.inputs());
+    assert!(e.inputs().contains(r#"HttpLocal { request: "#), "{}", e.inputs());
 }

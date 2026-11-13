@@ -149,6 +149,9 @@ class ScreenCaptureService : Service(), HostLink.Listener {
     // IP-адрес телефона (CAP_IP_CHECK, IP_CHECK → STATUS 23)
     @Volatile private var hostWantsIp = false
     private val ipExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "ip-check") }
+    // HTTP в локальной Wi-Fi-сети (CAP_HTTP_LOCAL, HTTP_LOCAL → STATUS 24): свой поток — медленный роутер не задерживает IP_CHECK
+    @Volatile private var hostWantsHttp = false
+    private val httpExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "http-local") }
     // Дампы и причины завершения — по одному, не в потоке захвата (обход дерева — межпроцессные вызовы)
     private val uiExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "ui-tree") }
 
@@ -791,6 +794,7 @@ class ScreenCaptureService : Service(), HostLink.Listener {
         hostWantsUi = false
         hostWantsExit = false
         hostWantsIp = false
+        hostWantsHttp = false
         stopUiChanges()
         stream = StreamConfig()
         Log.d(TAG, "USB подключён (#$connects): ${accessory.manufacturer} ${accessory.model}, жду HELLO от ПК")
@@ -821,6 +825,7 @@ class ScreenCaptureService : Service(), HostLink.Listener {
                 hostWantsUi = false
                 hostWantsExit = false
                 hostWantsIp = false
+                hostWantsHttp = false
                 stopUiChanges()
             }
         }
@@ -977,6 +982,25 @@ class ScreenCaptureService : Service(), HostLink.Listener {
                 }
             }
 
+            Proto.T_HTTP_LOCAL -> {
+                reactivateIfPaused("HTTP_LOCAL")
+                val cmd = Messages.parseHttpLocal(p.payload) ?: return
+                if (!hostWantsHttp) {
+                    l.sendControl(Messages.status(Proto.STATUS_HTTP_LOCAL, "${cmd.requestId} ${HttpLocal.error("not_negotiated", 0)}").encode())
+                    return
+                }
+                // Сеть — не в потоке захвата
+                httpExecutor.execute {
+                    val answer = try {
+                        HttpLocal.run(this, cmd.json)
+                    } catch (e: Throwable) {
+                        HttpLocal.error("io: " + e.javaClass.simpleName, 0)
+                    }
+                    Log.d(TAG, "HTTP_LOCAL #${cmd.requestId}: ${answer.take(200)}")
+                    l.sendControl(Messages.status(Proto.STATUS_HTTP_LOCAL, "${cmd.requestId} $answer").encode())
+                }
+            }
+
             else -> {} // PONG и неизвестные типы пропускаем
         }
     }
@@ -998,7 +1022,7 @@ class ScreenCaptureService : Service(), HostLink.Listener {
         stream = StreamConfig()
         relayout("HELLO")
         var caps = Proto.CAP_VIDEO_JPEG or Proto.CAP_ROTATION or Proto.CAP_FOREGROUND or Proto.CAP_LAUNCH_APP or Proto.CAP_LIST_APPS or
-            Proto.CAP_UI_TREE or Proto.CAP_EXIT_INFO or Proto.CAP_IP_CHECK
+            Proto.CAP_UI_TREE or Proto.CAP_EXIT_INFO or Proto.CAP_IP_CHECK or Proto.CAP_HTTP_LOCAL
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) caps = caps or Proto.CAP_AUDIO_PCM
         hostWantsForeground = hello.capabilities and Proto.CAP_FOREGROUND != 0
         hostWantsLaunch = hello.capabilities and Proto.CAP_LAUNCH_APP != 0
@@ -1006,6 +1030,7 @@ class ScreenCaptureService : Service(), HostLink.Listener {
         hostWantsUi = hello.capabilities and Proto.CAP_UI_TREE != 0
         hostWantsExit = hello.capabilities and Proto.CAP_EXIT_INFO != 0
         hostWantsIp = hello.capabilities and Proto.CAP_IP_CHECK != 0
+        hostWantsHttp = hello.capabilities and Proto.CAP_HTTP_LOCAL != 0
         if (hostWantsUi) startUiChanges(l) else stopUiChanges()
         l.sendControl(Messages.hello(caps, NAME).encode())
         val lay = layout
@@ -1139,6 +1164,7 @@ class ScreenCaptureService : Service(), HostLink.Listener {
         stopUiChanges()
         uiExecutor.shutdownNow()
         ipExecutor.shutdownNow()
+        httpExecutor.shutdownNow()
         running = false
         isRunning = false
         projectionAlive = false

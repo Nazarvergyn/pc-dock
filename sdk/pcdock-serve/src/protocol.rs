@@ -130,7 +130,7 @@ pub enum ClientMsg {
         video: bool,
         audio: bool,
     },
-    /// Запросы к приложению на телефоне (возможности 7–11). Ответ — событие `Status` (коды 18, 19, 20, 22, 23) с
+    /// Запросы к приложению на телефоне (возможности 7–12). Ответ — событие `Status` (коды 18, 19, 20, 22, 23, 24) с
     /// `detail`, начинающимся с `request`; приходит запросившему клиенту, даже без `Watch`.
     /// Закрепить телефон (`usb:1-2.3`, `usb:СЕРИЙНИК`, `adb:СЕРИЙНИК`, `serial:ПУТЬ`): ферма его возьмёт при ближайшем
     /// обнаружении (событие `Appeared`). Нужен демон с обнаружением (`--auto`, `--phone` или `--manual`).
@@ -170,6 +170,25 @@ pub enum ClientMsg {
         request: u32,
         url: String,
     },
+    /// HTTP-запрос к устройству локальной Wi-Fi-сети телефона (возможность 12): `method` — `GET` (по умолчанию) или
+    /// `POST`, `url` — `http(s)://` с IPv4 частной сети, `body` — только у `POST`, `timeout_ms` — 0/нет = 10 с, до 30 с.
+    HttpLocal {
+        phone: u32,
+        request: u32,
+        #[serde(default = "default_http_method")]
+        method: String,
+        url: String,
+        #[serde(default)]
+        headers: std::collections::BTreeMap<String, String>,
+        #[serde(default)]
+        body: String,
+        #[serde(default)]
+        timeout_ms: u32,
+    },
+}
+
+fn default_http_method() -> String {
+    "GET".into()
 }
 
 /// Запрос клиента: команда и необязательный номер `id`. Если `id` есть, ответ на эту команду несёт тот же `id`.

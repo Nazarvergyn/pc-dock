@@ -96,10 +96,11 @@
 | `UiDump` | `phone, request` | элементы экрана (uiautomator XML); `Status` 20 частями `"<request> <i>/<n> <часть>"` |
 | `ExitInfo` | `phone, request, since_ms, package` | причины завершения приложения; `Status` 22 `"<request> <JSON>"` |
 | `IpCheck` | `phone, request, url` | HTTPS GET по сети телефона (`https://` только); `Status` 23 `"<request> <JSON>"` |
+| `HttpLocal` | `phone, request, url`, `method?` (`GET` по умолчанию, `POST`), `headers?` (`{"имя":"значение"}`), `body?` (только `POST`, ≤ 64 КБ), `timeout_ms?` (0/нет — 10 с, не больше 30 с) | HTTP-запрос к устройству локальной Wi-Fi-сети телефона (админка роутера, в Wi-Fi которого телефон, а компьютер — нет); `url` — `http(s)://` с IPv4 частной сети (10/8, 172.16/12, 192.168/16, 169.254/16). `Status` 24 `"<request> <JSON>"`: `{"ok":true,"code":401,"body":"…","headers":{"set-cookie":"…"},"ms":35}` (любой код HTTP — успех) или `{"ok":false,"error":"no_wifi","ms":2}` |
 
-Запросы к приложению (возможности 7–11, `devices/android/PROTOCOL.md`): ответ `Status` приходит запросившему клиенту и без
+Запросы к приложению (возможности 7–12, `devices/android/PROTOCOL.md`): ответ `Status` приходит запросившему клиенту и без
 `Watch`. Если телефон не умеет или запрос неверен, ответ всё равно приходит: `"<request> error <причина>"` (`unsupported`,
-`not_active`, `invalid_package`, `invalid_url`; у `UiDump` — `"<request> 1/1 error <причина>"`). Сообщения приложения без
+`not_active`, `invalid_package`, `invalid_url`, `invalid_request`; у `UiDump` — `"<request> 1/1 error <причина>"`). Сообщения приложения без
 запроса — передний план (`Status` 16/17), «экран изменился» (21) — получают подписчики и те, кто уже спрашивал приложение.
 
 Координаты, размер пятна и сила касания доли `0..1` отображаемой картинки; `phase`: 0 down, 1 move, 2 up, 3 cancel.

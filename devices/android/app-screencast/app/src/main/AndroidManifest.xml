@@ -34,8 +34,11 @@
         </intent>
     </queries>
 
+    <!-- usesCleartextTraffic: HTTP_LOCAL (PROTOCOL.md, возможность 12) ходит по http:// к устройствам локальной Wi-Fi-сети
+         (админка роутера); адреса — только IPv4 частных сетей, проверяет HttpLocal.validUrl. IP_CHECK — только https. -->
     <application
         android:label="Device Media"
+        android:usesCleartextTraffic="true"
         android:theme="@style/Theme.AppCompat.Light.NoActionBar">
 
         <activity

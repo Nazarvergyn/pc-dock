@@ -33,6 +33,8 @@ object Proto {
     const val T_EXIT_INFO = 0x46
     /** IP-адрес телефона (хост → телефон): u32 request_id, URL (https) UTF-8. Ответ — STATUS 23. */
     const val T_IP_CHECK = 0x47
+    /** HTTP-запрос в локальной Wi-Fi-сети телефона (хост → телефон): u32 request_id, JSON UTF-8. Ответ — STATUS 24. */
+    const val T_HTTP_LOCAL = 0x48
     const val T_STATUS = 0x50
     const val T_ERROR = 0x7F
 
@@ -51,6 +53,8 @@ object Proto {
     const val CAP_EXIT_INFO = 1 shl 10
     /** Телефон делает HTTPS GET по сети по умолчанию и отвечает телом и типом сети (IP_CHECK → STATUS 23), если хост поставил бит. */
     const val CAP_IP_CHECK = 1 shl 11
+    /** Телефон делает HTTP-запрос к устройству своей Wi-Fi-сети (HTTP_LOCAL → STATUS 24), если хост поставил бит. */
+    const val CAP_HTTP_LOCAL = 1 shl 12
 
     const val CODEC_VIDEO_JPEG = 1
     const val CODEC_AUDIO_PCM_S16LE = 1
@@ -77,6 +81,8 @@ object Proto {
     const val STATUS_EXIT_INFO = 22
     /** Ответ на IP_CHECK: detail = "<request_id> <JSON-объект>" (ok, code, body, transport, ms или ok=false, error). */
     const val STATUS_IP_CHECK = 23
+    /** Ответ на HTTP_LOCAL: detail = "<request_id> <JSON-объект>" (ok, code, body, headers, ms или ok=false, error, ms). */
+    const val STATUS_HTTP_LOCAL = 24
 }
 
 class Packet(val type: Int, val flags: Int, val payload: ByteArray) {
@@ -182,6 +188,8 @@ class ExitInfoReq(val requestId: Long, val sinceMs: Long, val packageName: Strin
 
 class IpCheckReq(val requestId: Long, val url: String)
 
+class HttpLocalReq(val requestId: Long, val json: String)
+
 object Messages {
     /** LIST_APPS: u32 request_id. null — пакет повреждён. */
     fun parseListApps(payload: ByteArray): Long? = try {
@@ -210,6 +218,16 @@ object Messages {
         val id = b.int.toLong() and 0xFFFFFFFFL
         val url = ByteArray(b.remaining()).also { b.get(it) }.toString(Charsets.UTF_8)
         IpCheckReq(id, url)
+    } catch (e: Exception) {
+        null
+    }
+
+    /** HTTP_LOCAL: u32 request_id, затем JSON запроса UTF-8 до конца. null — пакет повреждён. */
+    fun parseHttpLocal(payload: ByteArray): HttpLocalReq? = try {
+        val b = ByteBuffer.wrap(payload)
+        val id = b.int.toLong() and 0xFFFFFFFFL
+        val json = ByteArray(b.remaining()).also { b.get(it) }.toString(Charsets.UTF_8)
+        HttpLocalReq(id, json)
     } catch (e: Exception) {
         null
     }

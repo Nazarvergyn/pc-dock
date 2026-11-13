@@ -47,7 +47,8 @@ impl Default for Config {
                 | caps::LIST_APPS
                 | caps::UI_TREE
                 | caps::EXIT_INFO
-                | caps::IP_CHECK,
+                | caps::IP_CHECK
+                | caps::HTTP_LOCAL,
             aoa: AoaStrings::default(),
             hid: HidConfig::default(),
             stream: None,
@@ -120,6 +121,8 @@ pub enum LaunchError {
     BadPackage,
     /// Некорректный URL для `IP_CHECK` (только `https://`, см. `packet::valid_ip_check_url`).
     BadUrl,
+    /// Некорректный запрос `HTTP_LOCAL`: метод, заголовки или тело (см. `packet::HttpLocalReq::check`).
+    BadRequest,
 }
 
 #[derive(Debug)]
@@ -476,6 +479,16 @@ impl Session {
             R::UiDump { request } => self.ui_dump(*request),
             R::ExitInfo { request, since_ms, package } => self.exit_info(*request, *since_ms, package),
             R::IpCheck { request, url } => self.ip_check(*request, url),
+            R::HttpLocal { request, method, url, headers, body, timeout_ms } => {
+                self.http_local(&HttpLocalReq {
+                    request_id: *request,
+                    method: method.clone(),
+                    url: url.clone(),
+                    headers: headers.clone(),
+                    body: body.clone(),
+                    timeout_ms: *timeout_ms,
+                })
+            }
         };
         if let Err(e) = r {
             let why = match e {
@@ -483,6 +496,7 @@ impl Session {
                 LaunchError::Unsupported => "unsupported",
                 LaunchError::BadPackage => "invalid_package",
                 LaunchError::BadUrl => "invalid_url",
+                LaunchError::BadRequest => "invalid_request",
             };
             let part = if matches!(req, R::UiDump { .. }) { "1/1 " } else { "" };
             let detail = format!("{} {part}error {why}", req.request());
@@ -533,6 +547,25 @@ impl Session {
             return Err(LaunchError::BadUrl);
         }
         self.send_packet(IpCheckReq { request_id, url: url.to_string() }.to_packet());
+        Ok(())
+    }
+
+    /// Просит телефон выполнить HTTP-запрос к устройству своей локальной Wi-Fi-сети (`HTTP_LOCAL`), например к админке
+    /// роутера. Ответ придёт событием `Status` с кодом 24 и `detail` = `"<request_id> <JSON>"`. Ошибка — сессия не
+    /// активна, `caps::HTTP_LOCAL` не согласован, URL (`BadUrl`) или метод/заголовки/тело (`BadRequest`) некорректны.
+    pub fn http_local(&mut self, req: &HttpLocalReq) -> Result<(), LaunchError> {
+        if self.state != State::Active {
+            return Err(LaunchError::NotActive);
+        }
+        if self.negotiated_caps & caps::HTTP_LOCAL == 0 {
+            return Err(LaunchError::Unsupported);
+        }
+        match req.check() {
+            Ok(()) => {}
+            Err(HttpLocalInvalid::Url) => return Err(LaunchError::BadUrl),
+            Err(HttpLocalInvalid::Request) => return Err(LaunchError::BadRequest),
+        }
+        self.send_packet(req.to_packet());
         Ok(())
     }
 

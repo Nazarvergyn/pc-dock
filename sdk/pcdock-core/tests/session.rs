@@ -451,6 +451,80 @@ fn ip_check_only_when_agreed() {
 }
 
 #[test]
+fn http_local_only_when_agreed() {
+    use pcdock_core::link::AppRequest;
+    let req = |request: u32, url: &str| AppRequest::HttpLocal {
+        request,
+        method: "POST".into(),
+        url: url.into(),
+        headers: vec![("Content-Type".into(), "text/plain".into())],
+        body: "[cgi]".into(),
+        timeout_ms: 0,
+    };
+    // Хост просит бит 12 по умолчанию
+    assert_ne!(Config::default().capabilities & caps::HTTP_LOCAL, 0);
+
+    // Старый телефон (без бита 12) — команда не уходит, ответ «unsupported» кладёт сама сессия
+    let mut s = active_session();
+    s.app_request(&req(3, "http://192.168.1.1/cgi"));
+    assert!(drain(&mut s).0.is_empty());
+    assert!(
+        events(&mut s).contains(&Event::Status(Status { code: 24, detail: "3 error unsupported".into() }))
+    );
+
+    let mut s = Session::new(Config::default());
+    s.start(0);
+    let hello = Hello {
+        version_max: 2,
+        version_min: 2,
+        capabilities: caps::VIDEO_JPEG | caps::HTTP_LOCAL,
+        role: Role::Device,
+        name: "p".into(),
+    };
+    feed(&mut s, 10, &[hello.to_packet()]);
+    drain(&mut s);
+    events(&mut s);
+
+    // Адрес не из локальной сети и неверный метод — не уходят
+    s.app_request(&req(4, "http://8.8.8.8/"));
+    s.app_request(&AppRequest::HttpLocal {
+        request: 5,
+        method: "DELETE".into(),
+        url: "http://192.168.1.1/".into(),
+        headers: vec![],
+        body: String::new(),
+        timeout_ms: 0,
+    });
+    assert!(drain(&mut s).0.is_empty(), "неверный запрос не уходит");
+    let ev = events(&mut s);
+    assert!(ev.contains(&Event::Status(Status { code: 24, detail: "4 error invalid_url".into() })), "{ev:?}");
+    assert!(
+        ev.contains(&Event::Status(Status { code: 24, detail: "5 error invalid_request".into() })),
+        "{ev:?}"
+    );
+
+    s.app_request(&req(7, "http://192.168.1.1/cgi?1"));
+    let (streams, _) = drain(&mut s);
+    assert_eq!(streams.len(), 1);
+    let mut r = PacketReader::new();
+    r.push(&streams[0]);
+    let p = r.next_packet().unwrap();
+    assert_eq!(p.ptype, PacketType::HttpLocal);
+    assert_eq!(
+        HttpLocalReq::split_payload(&p.payload).unwrap(),
+        (
+            7,
+            r#"{"method":"POST","url":"http://192.168.1.1/cgi?1","headers":{"Content-Type":"text/plain"},"body":"[cgi]","timeout_ms":10000}"#
+                .to_string()
+        )
+    );
+    // Ответ — обычный STATUS 24 (401 — тоже успех: роутер так отвечает на вход)
+    let d = r#"7 {"ok":true,"code":401,"body":"[error]0","headers":{"content-type":"text/plain"},"ms":35}"#;
+    feed(&mut s, 20, &[Status { code: 24, detail: d.into() }.to_packet()]);
+    assert!(events(&mut s).contains(&Event::Status(Status { code: 24, detail: d.into() })));
+}
+
+#[test]
 fn stream_switches_keep_size_and_quality() {
     let mut s = Session::new(Config::default());
     let base = SetStream {

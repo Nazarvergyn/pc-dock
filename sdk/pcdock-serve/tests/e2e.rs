@@ -570,6 +570,11 @@ fn app_requests_reach_the_phone_and_replies_go_to_the_requester_without_watch() 
     asker.send_raw(r#"{"op":"UiDump","phone":5,"request":8}"#);
     asker.send_raw(r#"{"op":"ExitInfo","phone":5,"request":9,"since_ms":100,"package":"com.example.app"}"#);
     asker.send_raw(r#"{"op":"IpCheck","phone":5,"request":10,"url":"https://example.com/ip"}"#);
+    asker.send_raw(concat!(
+        r#"{"op":"HttpLocal","phone":5,"request":12,"method":"POST","url":"http://192.168.1.1/cgi?1","#,
+        r#""headers":{"Referer":"http://192.168.1.1/","Content-Type":"text/plain"},"body":"[x]","timeout_ms":5000}"#
+    ));
+    asker.send_raw(r#"{"op":"HttpLocal","phone":5,"request":13,"url":"http://192.168.1.1/"}"#);
     asker.send_raw(r#"{"op":"ListApps","phone":5,"request":11,"id":2}"#);
     assert_eq!(asker.json()["ev"], "Ok");
     let t0 = Instant::now();
@@ -582,6 +587,11 @@ fn app_requests_reach_the_phone_and_replies_go_to_the_requester_without_watch() 
         "UiDump { request: 8 }",
         r#"ExitInfo { request: 9, since_ms: 100, package: "com.example.app" }"#,
         r#"IpCheck { request: 10, url: "https://example.com/ip" }"#,
+        concat!(
+            r#"HttpLocal { request: 12, method: "POST", url: "http://192.168.1.1/cgi?1", headers: [("Content-Type", "text/plain"), "#,
+            r#"("Referer", "http://192.168.1.1/")], body: "[x]", timeout_ms: 5000 }"#
+        ),
+        r#"HttpLocal { request: 13, method: "GET", url: "http://192.168.1.1/", headers: [], body: "", timeout_ms: 0 }"#,
         "ListApps { request: 11 }",
     ] {
         assert!(log.contains(want), "нет {want} в\n{log}");
@@ -592,6 +602,13 @@ fn app_requests_reach_the_phone_and_replies_go_to_the_requester_without_watch() 
     match asker.msg() {
         ServerMsg::Status { phone: 5, code: 18, detail } => assert_eq!(detail, "7 ok"),
         m => panic!("ждали Status 18, пришло {m:?}"),
+    }
+    let reply =
+        r#"12 {"ok":true,"code":401,"body":"[error]0","headers":{"set-cookie":"JSESSIONID=1"},"ms":30}"#;
+    phone.push(Event::Status(pcdock_core::packet::Status { code: 24, detail: reply.into() }));
+    match asker.msg() {
+        ServerMsg::Status { phone: 5, code: 24, detail } => assert_eq!(detail, reply),
+        m => panic!("ждали Status 24, пришло {m:?}"),
     }
     other.send_raw(r#"{"op":"List","id":3}"#);
     let m = other.msg();

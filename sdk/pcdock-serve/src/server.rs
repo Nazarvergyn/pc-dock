@@ -763,6 +763,17 @@ fn map_input(msg: ClientMsg) -> Result<(PhoneId, InputCmd), String> {
         ClientMsg::IpCheck { phone, request, url } => {
             (phone, InputCmd::App(AppRequest::IpCheck { request, url }))
         }
+        ClientMsg::HttpLocal { phone, request, method, url, headers, body, timeout_ms } => (
+            phone,
+            InputCmd::App(AppRequest::HttpLocal {
+                request,
+                method,
+                url,
+                headers: headers.into_iter().collect(),
+                body,
+                timeout_ms,
+            }),
+        ),
         ClientMsg::Auth { .. }
         | ClientMsg::List
         | ClientMsg::Watch { .. }

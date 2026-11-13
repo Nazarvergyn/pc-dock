@@ -58,7 +58,7 @@ pub enum InputCmd {
         audio: bool,
         max_fps: u8,
     },
-    /// Запрос к приложению на телефоне (возможности 7–11). Ответ всегда приходит событием `Status` с кодом
+    /// Запрос к приложению на телефоне (возможности 7–12). Ответ всегда приходит событием `Status` с кодом
     /// [`AppRequest::reply_code`]: от телефона или, если запрос не ушёл (телефон не умеет, неверный пакет или URL,
     /// сессия не активна), от самой сессии с `detail` = `"<request> error <причина>"` (для `UiDump` —
     /// `"<request> 1/1 error <причина>"`, как у частей ответа).
@@ -78,6 +78,18 @@ pub enum AppRequest {
     ExitInfo { request: u32, since_ms: u64, package: String },
     /// HTTPS GET по сети телефона: внешний IP (`IP_CHECK`, ответ `STATUS` 23).
     IpCheck { request: u32, url: String },
+    /// HTTP-запрос к устройству локальной Wi-Fi-сети телефона (`HTTP_LOCAL`, ответ `STATUS` 24): например, админка
+    /// роутера, в Wi-Fi которого телефон. `method` — `GET`/`POST`, `url` — `http(s)://` с IPv4 частной сети,
+    /// `headers` — по порядку, `body` — только у `POST` (≤ 64 КБ), `timeout_ms` — 0 = 10 с, не больше 30 с.
+    /// Ответ `"<request> <JSON>"`: `{"ok":true,"code","body","headers","ms"}` или `{"ok":false,"error","ms"}`.
+    HttpLocal {
+        request: u32,
+        method: String,
+        url: String,
+        headers: Vec<(String, String)>,
+        body: String,
+        timeout_ms: u32,
+    },
 }
 
 impl AppRequest {
@@ -89,6 +101,7 @@ impl AppRequest {
             Self::UiDump { .. } => 20,
             Self::ExitInfo { .. } => 22,
             Self::IpCheck { .. } => 23,
+            Self::HttpLocal { .. } => 24,
         }
     }
 
@@ -98,7 +111,8 @@ impl AppRequest {
             | Self::ListApps { request }
             | Self::UiDump { request }
             | Self::ExitInfo { request, .. }
-            | Self::IpCheck { request, .. } => *request,
+            | Self::IpCheck { request, .. }
+            | Self::HttpLocal { request, .. } => *request,
         }
     }
 }
