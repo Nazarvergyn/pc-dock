@@ -15,14 +15,19 @@ import org.json.JSONObject
  * Порядок (первый сработавший):
  * 1. Wi-Fi уже в нужном состоянии — `"method":"already"`;
  * 2. `WifiManager.setWifiEnabled` — работает до Android 10 (с targetSdk 29+ на Android 10+ вызов возвращает false);
- * 3. служба специальных возможностей [UiTreeService]: открыть быстрые настройки (GLOBAL_ACTION_QUICK_SETTINGS), найти
+ * 3. служба специальных возможностей [UiTreeService]: если плитка Wi-Fi уже видна (хост открыл шторку жестом) — сразу
+ *    к ней; иначе открыть быстрые настройки (GLOBAL_ACTION_QUICK_SETTINGS), найти
  *    плитку Wi-Fi (Wi-Fi / WLAN / «Интернет» Android 12+; MIUI — пункт центра управления) по тексту и описанию, нажать её,
- *    если состояние не то; плитка «Интернет» открывает окно со своим переключателем Wi-Fi — нажимаем его; закрыть шторку;
+ *    если состояние не то; плитка «Интернет» открывает окно со своим переключателем Wi-Fi — нажимаем его; закрыть шторку.
+ *    Xiaomi/MIUI с «Центром управления»: глобальное действие открывает левую шторку уведомлений, плитки там нет —
+ *    "tile_not_found" за ~1,5 с; хост открывает правую шторку жестом от правого верхнего угла и повторяет запрос;
  * 4. ответ — по факту `WifiManager.isWifiEnabled` (ждём до [CONFIRM_MS]).
  */
 object WifiToggle {
     private const val CONFIRM_MS = 10_000L
     private const val TILE_WAIT_MS = 3_000L
+    /** Xiaomi/MIUI: «Центр управления» — плитки в другой шторке; ждём недолго, дальше хост откроет её жестом */
+    private const val XIAOMI_TILE_WAIT_MS = 1_200L
     private const val CLICK_SETTLE_MS = 3_000L
 
     fun error(code: String, ms: Long, enabled: Boolean? = null): String {
@@ -57,6 +62,12 @@ object WifiToggle {
         return if (waitState(wm, on, CONFIRM_MS)) ok(on, "quick_settings", ms()) else error("timeout", ms(), wm.isWifiEnabled)
     }
 
+    private fun isXiaomi(): Boolean {
+        val m = (Build.MANUFACTURER ?: "").lowercase()
+        val b = (Build.BRAND ?: "").lowercase()
+        return listOf("xiaomi", "redmi", "poco").any { m.contains(it) || b.contains(it) }
+    }
+
     private fun settled(wm: WifiManager): Boolean =
         wm.wifiState == WifiManager.WIFI_STATE_ENABLED || wm.wifiState == WifiManager.WIFI_STATE_DISABLED
 
@@ -73,18 +84,25 @@ object WifiToggle {
 
     /** Через шторку быстрых настроек. null — нажали (итог проверит [run]), иначе код ошибки. */
     private fun viaQuickSettings(svc: AccessibilityService, wm: WifiManager, on: Boolean): String? {
-        if (!svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS)) return "quick_settings_failed"
-        val end = SystemClock.elapsedRealtime() + TILE_WAIT_MS
-        var tile: AccessibilityNodeInfo? = null
-        while (tile == null) {
-            SystemClock.sleep(300)
-            tile = findTile(svc)
-            if (tile == null && SystemClock.elapsedRealtime() >= end) return "tile_not_found"
+        // Шторка уже открыта хостом (MIUI: жест от правого верхнего угла после "tile_not_found") — не трогаем её:
+        // GLOBAL_ACTION_QUICK_SETTINGS на MIUI с «Центром управления» открыл бы левую шторку уведомлений
+        // Только окно системной шторки: «Wi-Fi» на экране приложения (например, в Настройках) — не плитка
+        var tile: AccessibilityNodeInfo? = findTile(svc, shadeOnly = true)
+        if (tile == null) {
+            if (!svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS)) return "quick_settings_failed"
+            // MIUI: плитки нет в левой шторке — ответить быстро, хост откроет правую шторку жестом и спросит снова
+            val end = SystemClock.elapsedRealtime() + if (isXiaomi()) XIAOMI_TILE_WAIT_MS else TILE_WAIT_MS
+            while (tile == null) {
+                SystemClock.sleep(300)
+                tile = findTile(svc)
+                if (tile == null && SystemClock.elapsedRealtime() >= end) return "tile_not_found"
+            }
         }
-        val state = tileState(tile)
+        val found = tile ?: return "tile_not_found"
+        val state = tileState(found)
         // Состояние плитки известно и уже нужное, а Wi-Fi нет — плитка врёт или ещё обновляется: ждём
         if (state == on) return if (waitState(wm, on, CLICK_SETTLE_MS)) null else "tile_state_mismatch"
-        if (!click(tile)) return "click_failed"
+        if (!click(found)) return "click_failed"
         if (waitState(wm, on, CLICK_SETTLE_MS)) return null
         // Плитка «Интернет» (Android 12+) открывает окно со своим переключателем Wi-Fi
         val sw = findDialogSwitch(svc) ?: return null
@@ -143,10 +161,11 @@ object WifiToggle {
         }
     }
 
-    private fun findTile(svc: AccessibilityService): AccessibilityNodeInfo? {
+    private fun findTile(svc: AccessibilityService, shadeOnly: Boolean = false): AccessibilityNodeInfo? {
         var best: AccessibilityNodeInfo? = null
         var bestScore = 0
         for (root in roots(svc)) {
+            if (shadeOnly && root.packageName?.toString() != "com.android.systemui") continue
             walk(root, 0) { n ->
                 if (!n.isVisibleToUser) return@walk
                 val s = maxOf(score(norm(n.contentDescription)), score(norm(n.text)))

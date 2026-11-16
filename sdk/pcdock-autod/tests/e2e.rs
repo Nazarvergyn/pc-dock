@@ -323,6 +323,23 @@ fn phones_are_exclusive_and_a_run_can_be_stopped() {
 }
 
 #[test]
+fn host_fails_a_run_with_a_reason() {
+    let e = env("fail");
+    let c = e.client();
+    let slow = e.put(&c, "ждёт роутер", "test('x', function() sleep(30) end)");
+    let run = c.request(json!({"op": "Run", "script": slow, "phones": [1]})).unwrap()["run"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    c.request(json!({"op": "Fail", "run": run, "message": "router_reconnect: роутер не ответил"})).unwrap();
+    assert!(e.runs.wait(&run, Duration::from_secs(5)));
+    let info = c.request(json!({"op": "RunInfo", "run": run})).unwrap();
+    assert_eq!(info["report"]["status"], "error", "{info}");
+    assert!(info.to_string().contains("роутер не ответил"), "{info}");
+    assert!(c.request(json!({"op": "Fail", "run": run, "message": "x"})).is_err(), "закончившийся прогон");
+}
+
+#[test]
 fn failure_screenshot_is_listed_and_downloadable_over_the_wire() {
     let e = env("shots");
     let c = e.client();

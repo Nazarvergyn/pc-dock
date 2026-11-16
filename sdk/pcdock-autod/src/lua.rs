@@ -67,12 +67,15 @@ pub struct Report {
     pub status: String,
     pub tests: Vec<TestResult>,
     pub duration_ms: u64,
+    /// Ошибка прогона вне тестов (сценарий не загрузился, хост прервал прогон `Fail`, вышло время).
+    pub error: Option<String>,
 }
 
 impl Report {
     pub fn to_json(&self) -> Json {
         json!({
             "status": self.status,
+            "error": self.error,
             "duration_ms": self.duration_ms,
             "passed": self.tests.iter().filter(|t| t.status == "passed").count(),
             "failed": self.tests.iter().filter(|t| t.status == "failed").count(),
@@ -89,6 +92,8 @@ struct State {
     sink: Arc<dyn Sink>,
     backend: Arc<dyn Backend>,
     stop: Arc<AtomicBool>,
+    /// Хост прервал прогон с причиной (`Fail`): следующая проверка `check_alive` — ошибка с этим текстом.
+    abort: Arc<Mutex<Option<String>>>,
     phones: Vec<u32>,
     artifacts: Option<PathBuf>,
     started: Instant,
@@ -108,6 +113,9 @@ impl State {
     }
 
     fn check_alive(&self) -> mlua::Result<()> {
+        if let Some(why) = self.abort.lock().unwrap().clone() {
+            return Err(mlua::Error::runtime(why));
+        }
         if self.stop.load(Ordering::SeqCst) {
             return Err(mlua::Error::runtime("прогон остановлен"));
         }
@@ -448,14 +456,55 @@ fn reply_value(lua: &Lua, s: &str) -> mlua::Result<Value> {
 /// Ответ `HttpLocal` → таблица `{ok, code, body, headers, ms}` или `{ok = false, error}`: JSON телефона как есть,
 /// а ответ без JSON (`"error unsupported"` от сессии, если приложение pc-dock старое) — `{ok = false, error = …}`.
 fn http_reply(lua: &Lua, s: &str) -> mlua::Result<Value> {
-    if let Ok(j) = serde_json::from_str::<Json>(s.trim()) {
-        if j.is_object() {
-            return json_to_lua(lua, &j);
+    reply_table(lua, &answer_object(s))
+}
+
+/// Ответ `SetWifi`/`HttpLocal` → объект JSON: ответ телефона как есть; не JSON (`"error unsupported"` от сессии) — `{ok = false, error}`.
+fn answer_object(s: &str) -> Json {
+    match serde_json::from_str::<Json>(s.trim()) {
+        Ok(j) if j.is_object() => j,
+        _ => {
+            let why = s.trim();
+            json!({"ok": false, "error": why.strip_prefix("error ").unwrap_or(why)})
         }
     }
-    let why = s.trim();
-    let why = why.strip_prefix("error ").unwrap_or(why);
-    json_to_lua(lua, &json!({"ok": false, "error": why}))
+}
+
+/// Wi-Fi в нужном состоянии — Ok, иначе понятная ошибка с кодом в начале (`wifi_failed: tile_not_found — …`).
+fn wifi_check(r: &Json, on: bool) -> Result<(), String> {
+    let want = if on { "включить" } else { "выключить" };
+    if r["ok"] == true {
+        if r["enabled"] == on {
+            return Ok(());
+        }
+        return Err(format!(
+            "wifi_failed: телефон ответил ok, но Wi-Fi {} (нужно {want}) — ответ: {r}",
+            if r["enabled"] == true { "включён" } else { "выключен" }
+        ));
+    }
+    let code = r["error"].as_str().unwrap_or("?");
+    let hint = match code {
+        "tile_not_found" => "плитка Wi-Fi не найдена в шторке; на Xiaomi включите классическую шторку: Настройки → \
+                             Уведомления и Центр управления → Стиль → Старая версия; экран должен быть включён и разблокирован",
+        "no_service" => "включите службу специальных возможностей Device Media (Настройки → Специальные возможности)",
+        "unsupported" | "not_negotiated" => "приложение pc-dock на телефоне старое — обновите pc-dock (нужна версия 112+)",
+        "timeout" => "плитку нажали, но Wi-Fi не сменился за 10 с",
+        "quick_settings_failed" => "шторка быстрых настроек не открылась (экран выключен или заблокирован?)",
+        _ => "телефон не переключил Wi-Fi",
+    };
+    Err(format!("wifi_failed: {code} — не удалось {want} Wi-Fi: {hint}"))
+}
+
+/// Таблица из ответа телефона с читаемым `tostring` (JSON вместо `table: 0x…`) — для `log.info(r)`.
+fn reply_table(lua: &Lua, j: &Json) -> mlua::Result<Value> {
+    let v = json_to_lua(lua, j)?;
+    if let Value::Table(t) = &v {
+        let text = j.to_string();
+        let mt = lua.create_table()?;
+        mt.set("__tostring", lua.create_function(move |_, _: Value| Ok(text.clone()))?)?;
+        t.set_metatable(Some(mt));
+    }
+    Ok(v)
 }
 
 /// Можно ли набрать текст HID-клавиатурой `p:type` по-старому: латиница, цифры, пробел и `-=.,/`.
@@ -810,11 +859,32 @@ impl UserData for PhoneHandle {
             )?;
             http_reply(lua, &r)
         });
-        // Включить (`true`) или выключить (`false`) Wi-Fi телефона через приложение pc-dock (возможность 14):
-        // `{ok = true, enabled, method, ms}` или `{ok = false, error}` (`"unsupported"` — старое приложение).
-        methods.add_method("wifi", |lua, t, on: bool| {
-            let r = t.app(json!({"op": "SetWifi", "on": on}), Duration::from_secs(30))?;
-            http_reply(lua, &r)
+        // Включить (`true`) или выключить (`false`) Wi-Fi телефона через приложение pc-dock (возможность 14).
+        // Не вышло (ответ `{ok = false, error}` или Wi-Fi не в нужном состоянии) — ошибка Lua с понятным текстом и кодом
+        // (тест падает, а не проходит молча). `{soft = true}` — вернуть таблицу `{ok, enabled, method, error, ms}`.
+        // Плитки нет в шторке (`tile_not_found`: MIUI «Центр управления» открывает не ту шторку) — один раз открыть
+        // правую шторку жестом от правого верхнего угла и повторить (`{retry = false}` — не повторять).
+        methods.add_method("wifi", |lua, t, (on, o): (bool, Option<Table>)| {
+            let flag = |k: &str, d: bool| o.as_ref().and_then(|t| t.get::<Option<bool>>(k).ok().flatten()).unwrap_or(d);
+            let ask = || t.app(json!({"op": "SetWifi", "on": on}), Duration::from_secs(30));
+            let mut r = answer_object(&ask()?);
+            if r["error"] == "tile_not_found" && flag("retry", true) {
+                t.st.emit("log", json!({"test": *t.st.current.lock().unwrap(), "level": "info",
+                    "text": "Wi-Fi: плитки нет в шторке — открываю шторку от правого верхнего угла и пробую снова"}));
+                let none = None;
+                t.touch(0, 0.9, 0.005, &none)?;
+                for i in 1..=10 {
+                    t.st.sleep(Duration::from_millis(30))?;
+                    t.touch(1, 0.9, 0.005 + 0.6 * i as f32 / 10.0, &none)?;
+                }
+                t.touch(2, 0.9, 0.605, &none)?;
+                t.st.sleep(Duration::from_millis(900))?;
+                r = answer_object(&ask()?);
+            }
+            if !flag("soft", false) {
+                wifi_check(&r, on).map_err(mlua::Error::runtime)?;
+            }
+            reply_table(lua, &r)
         });
         // Последний кадр экрана; `{fresh = true}` — дождаться нового, `{timeout = N}` — срок ожидания.
         methods.add_method("frame", |_, t, o: Option<Table>| {
@@ -1025,11 +1095,25 @@ pub fn run_script(
     sink: Arc<dyn Sink>,
     stop: Arc<AtomicBool>,
 ) -> Report {
+    run_script_ex(source, script_name, cfg, backend, sink, stop, Arc::new(Mutex::new(None)))
+}
+
+/// [run_script] с причиной прерывания от хоста (`abort`, op `Fail`): прогон заканчивается ошибкой с этим текстом.
+pub fn run_script_ex(
+    source: &str,
+    script_name: &str,
+    cfg: &RunConfig,
+    backend: Arc<dyn Backend>,
+    sink: Arc<dyn Sink>,
+    stop: Arc<AtomicBool>,
+    abort: Arc<Mutex<Option<String>>>,
+) -> Report {
     let started = Instant::now();
     let st = Arc::new(State {
         sink: sink.clone(),
         backend,
         stop: stop.clone(),
+        abort,
         phones: cfg.phones.clone(),
         artifacts: cfg.artifacts.clone(),
         started,
@@ -1050,6 +1134,12 @@ pub fn run_script(
         st.backend.release(id);
     }
     let was_stopped = st.stop.load(Ordering::SeqCst);
+    let error = outcome.as_ref().err().cloned();
+    if let Some(e) = &error {
+        if !(was_stopped || e.contains("остановлен")) {
+            sink.emit("log", json!({"test": script_name, "level": "error", "text": e}));
+        }
+    }
     let status = match outcome {
         Err(e) if was_stopped || e.contains("остановлен") => "stopped",
         Err(e) if e.contains("вышло время") => "error",
@@ -1063,6 +1153,7 @@ pub fn run_script(
         status: status.to_string(),
         tests: results,
         duration_ms: started.elapsed().as_millis() as u64,
+        error,
     };
     sink.emit("run_end", report.to_json());
     report
@@ -1120,6 +1211,9 @@ fn execute(
         }
         if st.stop.load(Ordering::SeqCst) {
             return Err("прогон остановлен".into());
+        }
+        if let Some(why) = st.abort.lock().unwrap().clone() {
+            return Err(why);
         }
         *st.current.lock().unwrap() = name.clone();
         *st.passed.lock().unwrap() = 0;
@@ -1462,13 +1556,14 @@ mod tests {
                     r#"{"ok":true,"code":401,"body":"[error]0","headers":{"set-cookie":"JSESSIONID=1"},"ms":30}"#.into()
                 }
                 Some("HttpLocal") => "error unsupported".into(),
-                Some("SetWifi") => {
-                    if req["on"] == true {
-                        r#"{"ok":true,"enabled":true,"method":"quick_settings","ms":900}"#.into()
-                    } else {
-                        "error unsupported".into()
-                    }
+                // Wi-Fi вкл — сразу; выкл — сначала «плитки нет» (MIUI), после жеста шторки — получилось
+                Some("SetWifi") if req["on"] == true => {
+                    r#"{"ok":true,"enabled":true,"method":"quick_settings","ms":900}"#.into()
                 }
+                Some("SetWifi") if self.log.lock().unwrap().iter().any(|l| l.starts_with("touch")) => {
+                    r#"{"ok":true,"enabled":false,"method":"quick_settings","ms":700}"#.into()
+                }
+                Some("SetWifi") => r#"{"ok":false,"error":"tile_not_found","enabled":true,"ms":1500}"#.into(),
                 Some("TypeText") => match req["text"].as_str().unwrap_or("") {
                     "старое приложение" => "error unsupported".into(),
                     t if t.starts_with("буфер") => r#"{"ok":true,"method":"clipboard","reason":"no_service","ms":2}"#.into(),
@@ -1528,18 +1623,40 @@ mod tests {
             test("wifi", function()
               local p = phones()[1]
               local a = p:wifi(true)
-              assert.truthy(a.ok)
               assert.eq(a.enabled, true)
               assert.eq(a.method, "quick_settings")
+              assert.contains(tostring(a), '"method":"quick_settings"')
+              -- без повтора жестом: плитки нет — ошибка Lua с кодом и подсказкой, а не таблица
+              local ok, e = pcall(function() return p:wifi(false, {retry = false}) end)
+              assert.falsy(ok)
+              assert.contains(tostring(e), "wifi_failed: tile_not_found")
+              assert.contains(tostring(e), "Старая версия")
+              local s = p:wifi(false, {soft = true, retry = false})
+              assert.falsy(s.ok)
+              assert.eq(s.error, "tile_not_found")
+              -- с повтором: жест от правого верхнего угла, вторая попытка удалась
               local b = p:wifi(false)
-              assert.falsy(b.ok)
-              assert.eq(b.error, "unsupported")
+              assert.eq(b.enabled, false)
             end)
             "#,
             &fake,
         );
         assert_eq!(r.status, "passed", "{r:?}");
-        assert!(fake.log().iter().any(|l| l.contains(r#""op":"SetWifi""#) && l.contains(r#""on":false"#)));
+        let log = fake.log();
+        assert!(log.iter().any(|l| l.starts_with("touch 1 0 0.90 ")), "{log:?}");
+        assert!(log.iter().any(|l| l.contains(r#""op":"SetWifi""#) && l.contains(r#""on":false"#)));
+    }
+
+    #[test]
+    fn wifi_failure_fails_the_test() {
+        assert!(wifi_check(&json!({"ok": true, "enabled": true}), false).unwrap_err().contains("ok, но Wi-Fi включён"));
+        assert!(wifi_check(&json!({"ok": false, "error": "no_service"}), true).unwrap_err().contains("службу"));
+        assert!(wifi_check(&json!({"ok": false, "error": "unsupported"}), true).unwrap_err().contains("обновите pc-dock"));
+        assert!(wifi_check(&json!({"ok": true, "enabled": false}), false).is_ok());
+        let fake = Fake::new();
+        let (r, _) = run(r#"test("w", function() local p = phones()[1] p:wifi(false, {retry = false}) end)"#, &fake);
+        assert_eq!(r.status, "error", "{r:?}");
+        assert!(r.tests[0].error.as_deref().unwrap_or("").contains("tile_not_found"), "{r:?}");
     }
 
     #[test]
