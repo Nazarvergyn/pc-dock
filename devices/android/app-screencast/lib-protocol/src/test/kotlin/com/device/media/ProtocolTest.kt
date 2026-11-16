@@ -72,4 +72,17 @@ class ProtocolTest {
         assertEquals(1 shl 13, Proto.CAP_TEXT_INPUT)
         assertEquals(25, Proto.STATUS_TEXT_INPUT)
     }
+
+    @Test
+    fun wifiSetIsParsed() {
+        // Тот же payload, что шлёт pcdock_core::packet::WifiSetReq: u32 request_id, u8 on
+        val w = assertNotNull(Messages.parseWifiSet(byteArrayOf(1, 2, 3, 4, 1)))
+        assertEquals(0x01020304L, w.requestId)
+        assertEquals(true, w.on)
+        assertEquals(false, assertNotNull(Messages.parseWifiSet(byteArrayOf(0, 0, 0, 9, 0))).on)
+        assertEquals(null, Messages.parseWifiSet(byteArrayOf(0, 0, 0, 9)))
+        assertEquals(0x4A, Proto.T_WIFI_SET)
+        assertEquals(1 shl 14, Proto.CAP_WIFI_TOGGLE)
+        assertEquals(26, Proto.STATUS_WIFI_SET)
+    }
 }

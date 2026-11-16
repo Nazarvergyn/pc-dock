@@ -58,6 +58,10 @@ impl PhoneLink for FakeLink {
                         format!(r#"{id} {{"ok":true,"method":"clipboard","reason":"no_focus","ms":3}}"#),
                     )]
                 }
+                AppRequest::SetWifi { on, .. } => vec![(
+                    26,
+                    format!(r#"{id} {{"ok":true,"enabled":{on},"method":"quick_settings","ms":900}}"#),
+                )],
                 AppRequest::UiDump { .. } => vec![
                     (20, format!(r#"{id} 1/2 xml <hierarchy><node text="" bounds="[0,0][1000,2000]">"#)),
                     (
@@ -544,6 +548,9 @@ fn lua_asks_the_phone_app_through_the_farm_daemon() {
           assert.eq(r.body, "[error]0")
           p:type("Подпись ✨ #тест")
           assert.eq(p:paste("x"), "clipboard")
+          local w = p:wifi(false)
+          assert.truthy(w.ok)
+          assert.eq(w.enabled, false)
         end)
         "#,
     );
@@ -557,4 +564,5 @@ fn lua_asks_the_phone_app_through_the_farm_daemon() {
     assert!(e.inputs().contains(r#"text: "Подпись ✨ #тест" }"#), "{}", e.inputs());
     assert!(e.inputs().contains("Key { usage: 224, down: true }"), "Ctrl+V после clipboard: {}", e.inputs());
     assert!(e.inputs().contains("Key { usage: 25, down: true }"), "Ctrl+V после clipboard: {}", e.inputs());
+    assert!(e.inputs().contains("SetWifi { request: "), "{}", e.inputs());
 }

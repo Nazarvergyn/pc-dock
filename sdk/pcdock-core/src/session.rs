@@ -49,7 +49,8 @@ impl Default for Config {
                 | caps::EXIT_INFO
                 | caps::IP_CHECK
                 | caps::HTTP_LOCAL
-                | caps::TEXT_INPUT,
+                | caps::TEXT_INPUT
+                | caps::WIFI_TOGGLE,
             aoa: AoaStrings::default(),
             hid: HidConfig::default(),
             stream: None,
@@ -494,6 +495,7 @@ impl Session {
             R::TypeText { request, text } => {
                 self.text_input(&TextInputReq { request_id: *request, text: text.clone() })
             }
+            R::SetWifi { request, on } => self.wifi_set(&WifiSetReq { request_id: *request, on: *on }),
         };
         if let Err(e) = r {
             let why = match e {
@@ -552,6 +554,19 @@ impl Session {
             return Err(LaunchError::BadUrl);
         }
         self.send_packet(IpCheckReq { request_id, url: url.to_string() }.to_packet());
+        Ok(())
+    }
+
+    /// Просит телефон включить или выключить Wi-Fi (`WIFI_SET`). Ответ придёт событием `Status` с кодом 26 и
+    /// `detail` = `"<request_id> <JSON>"`. Ошибка — сессия не активна или `caps::WIFI_TOGGLE` не согласован.
+    pub fn wifi_set(&mut self, req: &WifiSetReq) -> Result<(), LaunchError> {
+        if self.state != State::Active {
+            return Err(LaunchError::NotActive);
+        }
+        if self.negotiated_caps & caps::WIFI_TOGGLE == 0 {
+            return Err(LaunchError::Unsupported);
+        }
+        self.send_packet(req.to_packet());
         Ok(())
     }
 

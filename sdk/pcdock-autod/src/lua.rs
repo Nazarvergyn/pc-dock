@@ -810,6 +810,12 @@ impl UserData for PhoneHandle {
             )?;
             http_reply(lua, &r)
         });
+        // Включить (`true`) или выключить (`false`) Wi-Fi телефона через приложение pc-dock (возможность 14):
+        // `{ok = true, enabled, method, ms}` или `{ok = false, error}` (`"unsupported"` — старое приложение).
+        methods.add_method("wifi", |lua, t, on: bool| {
+            let r = t.app(json!({"op": "SetWifi", "on": on}), Duration::from_secs(30))?;
+            http_reply(lua, &r)
+        });
         // Последний кадр экрана; `{fresh = true}` — дождаться нового, `{timeout = N}` — срок ожидания.
         methods.add_method("frame", |_, t, o: Option<Table>| {
             t.st.acquire(t.id)?;
@@ -1456,6 +1462,13 @@ mod tests {
                     r#"{"ok":true,"code":401,"body":"[error]0","headers":{"set-cookie":"JSESSIONID=1"},"ms":30}"#.into()
                 }
                 Some("HttpLocal") => "error unsupported".into(),
+                Some("SetWifi") => {
+                    if req["on"] == true {
+                        r#"{"ok":true,"enabled":true,"method":"quick_settings","ms":900}"#.into()
+                    } else {
+                        "error unsupported".into()
+                    }
+                }
                 Some("TypeText") => match req["text"].as_str().unwrap_or("") {
                     "старое приложение" => "error unsupported".into(),
                     t if t.starts_with("буфер") => r#"{"ok":true,"method":"clipboard","reason":"no_service","ms":2}"#.into(),
@@ -1505,6 +1518,28 @@ mod tests {
         let sink = Arc::new(Collect::default());
         let r = run_script(src, "demo", &cfg, fake.clone(), sink.clone(), Arc::new(AtomicBool::new(false)));
         (r, sink)
+    }
+
+    #[test]
+    fn wifi_toggle_from_lua() {
+        let fake = Fake::new();
+        let (r, _sink) = run(
+            r#"
+            test("wifi", function()
+              local p = phones()[1]
+              local a = p:wifi(true)
+              assert.truthy(a.ok)
+              assert.eq(a.enabled, true)
+              assert.eq(a.method, "quick_settings")
+              local b = p:wifi(false)
+              assert.falsy(b.ok)
+              assert.eq(b.error, "unsupported")
+            end)
+            "#,
+            &fake,
+        );
+        assert_eq!(r.status, "passed", "{r:?}");
+        assert!(fake.log().iter().any(|l| l.contains(r#""op":"SetWifi""#) && l.contains(r#""on":false"#)));
     }
 
     #[test]

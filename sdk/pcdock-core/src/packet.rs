@@ -39,6 +39,9 @@ pub mod caps {
     /// Телефон вводит текст любого языка (кириллица, эмодзи) в поле, где стоит курсор (`TEXT_INPUT`, ответ — `STATUS`
     /// 25): вставкой через службу специальных возможностей или через буфер обмена, после которого хост жмёт Ctrl+V.
     pub const TEXT_INPUT: u32 = 1 << 13;
+    /// Телефон включает и выключает свой Wi-Fi (`WIFI_SET`, ответ — `STATUS` 26): системным вызовом, где Android
+    /// разрешает, иначе плиткой «Wi-Fi» в быстрых настройках через службу специальных возможностей.
+    pub const WIFI_TOGGLE: u32 = 1 << 14;
 }
 
 /// Коды кодеков.
@@ -84,6 +87,8 @@ pub enum PacketType {
     HttpLocal,
     /// Ввести текст в поле с курсором (хост → телефон, возможность `caps::TEXT_INPUT`).
     TextInput,
+    /// Включить или выключить Wi-Fi телефона (хост → телефон, возможность `caps::WIFI_TOGGLE`).
+    WifiSet,
     Status,
     Error,
     /// Тип, неизвестный этой версии ядра (такие пакеты пропускаются).
@@ -111,6 +116,7 @@ impl PacketType {
             0x47 => Self::IpCheck,
             0x48 => Self::HttpLocal,
             0x49 => Self::TextInput,
+            0x4A => Self::WifiSet,
             0x50 => Self::Status,
             0x7F => Self::Error,
             other => Self::Unknown(other),
@@ -137,6 +143,7 @@ impl PacketType {
             Self::IpCheck => 0x47,
             Self::HttpLocal => 0x48,
             Self::TextInput => 0x49,
+            Self::WifiSet => 0x4A,
             Self::Status => 0x50,
             Self::Error => 0x7F,
             Self::Unknown(v) => v,
@@ -897,6 +904,31 @@ pub fn valid_text_input(text: &str) -> bool {
     !text.is_empty() && text.len() <= TEXT_INPUT_MAX && !text.contains('\0')
 }
 
+/// Включить или выключить Wi-Fi телефона (`WIFI_SET`, 0x4A): `u32 request_id`, `u8 on` (1 — включить, 0 — выключить).
+/// Ответ — `STATUS` 26 `"<request_id> <JSON-объект>"`: `{"ok":true,"enabled":true,"method":"api"|"quick_settings"|
+/// "already","ms":900}` или `{"ok":false,"error":"no_service"|"tile_not_found"|"timeout"|"not_negotiated"|…,
+/// "enabled":false,"ms":0}` (PROTOCOL.md «Wi-Fi (возможность 14)»).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WifiSetReq {
+    pub request_id: u32,
+    pub on: bool,
+}
+
+impl WifiSetReq {
+    pub fn to_packet(&self) -> Packet {
+        let mut p = self.request_id.to_be_bytes().to_vec();
+        p.push(self.on as u8);
+        Packet::new(PacketType::WifiSet, p)
+    }
+
+    pub fn decode(data: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor::new(data);
+        let request_id = c.u32()?;
+        let on = c.u8()? != 0;
+        Ok(Self { request_id, on })
+    }
+}
+
 /// Имя пакета Android, которое можно передать в `LAUNCH_APP`: латинская буква, затем буквы, цифры, `_` и `.`,
 /// не длиннее 255 байт (те же правила проверяет телефон).
 pub fn valid_package(p: &str) -> bool {
@@ -1264,6 +1296,24 @@ mod tests {
         assert!(valid_text_input(&"я".repeat(TEXT_INPUT_MAX / 2)), "ровно предел (кириллица — 2 байта)");
         assert!(!valid_text_input(&"я".repeat(TEXT_INPUT_MAX / 2 + 1)));
         assert!(valid_text_input("\t\r\n"));
+    }
+
+    #[test]
+    fn wifi_set_roundtrip() {
+        for on in [true, false] {
+            let q = WifiSetReq { request_id: 0x0102_0304, on };
+            let bytes = q.to_packet().encode();
+            assert_eq!(bytes[2], 0x4A);
+            let mut r = PacketReader::new();
+            r.push(&bytes);
+            let p = r.next_packet().unwrap();
+            assert_eq!(p.ptype, PacketType::WifiSet);
+            assert_eq!(p.payload, vec![1, 2, 3, 4, on as u8]);
+            assert_eq!(WifiSetReq::decode(&p.payload).unwrap(), q);
+        }
+        assert!(WifiSetReq::decode(&[0, 0, 0, 1]).is_err());
+        assert_eq!(PacketType::from_u8(0x4A), PacketType::WifiSet);
+        assert_eq!(caps::WIFI_TOGGLE, 1 << 14);
     }
 
     #[test]

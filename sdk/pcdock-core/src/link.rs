@@ -58,7 +58,7 @@ pub enum InputCmd {
         audio: bool,
         max_fps: u8,
     },
-    /// Запрос к приложению на телефоне (возможности 7–13). Ответ всегда приходит событием `Status` с кодом
+    /// Запрос к приложению на телефоне (возможности 7–14). Ответ всегда приходит событием `Status` с кодом
     /// [`AppRequest::reply_code`]: от телефона или, если запрос не ушёл (телефон не умеет, неверный пакет или URL,
     /// сессия не активна), от самой сессии с `detail` = `"<request> error <причина>"` (для `UiDump` —
     /// `"<request> 1/1 error <причина>"`, как у частей ответа).
@@ -94,6 +94,9 @@ pub enum AppRequest {
     /// ≤ 16 КБ UTF-8. Ответ `"<request> <JSON>"`: `{"ok":true,"method":"paste"|"set_text"|"clipboard","ms"}` или
     /// `{"ok":false,"error","ms"}`; `"clipboard"` — текст в буфере обмена, Ctrl+V жмёт хост.
     TypeText { request: u32, text: String },
+    /// Включить (`on`) или выключить Wi-Fi телефона (`WIFI_SET`, ответ `STATUS` 26). Ответ `"<request> <JSON>"`:
+    /// `{"ok":true,"enabled":bool,"method":"api"|"quick_settings"|"already","ms"}` или `{"ok":false,"error","ms"}`.
+    SetWifi { request: u32, on: bool },
 }
 
 impl AppRequest {
@@ -107,6 +110,7 @@ impl AppRequest {
             Self::IpCheck { .. } => 23,
             Self::HttpLocal { .. } => 24,
             Self::TypeText { .. } => 25,
+            Self::SetWifi { .. } => 26,
         }
     }
 
@@ -118,7 +122,8 @@ impl AppRequest {
             | Self::ExitInfo { request, .. }
             | Self::IpCheck { request, .. }
             | Self::HttpLocal { request, .. }
-            | Self::TypeText { request, .. } => *request,
+            | Self::TypeText { request, .. }
+            | Self::SetWifi { request, .. } => *request,
         }
     }
 }

@@ -576,6 +576,7 @@ fn app_requests_reach_the_phone_and_replies_go_to_the_requester_without_watch() 
     ));
     asker.send_raw(r#"{"op":"HttpLocal","phone":5,"request":13,"url":"http://192.168.1.1/"}"#);
     asker.send_raw(r#"{"op":"TypeText","phone":5,"request":14,"text":"Привет 👋 #тест\nстрока"}"#);
+    asker.send_raw(r#"{"op":"SetWifi","phone":5,"request":15,"on":false}"#);
     asker.send_raw(r#"{"op":"ListApps","phone":5,"request":11,"id":2}"#);
     assert_eq!(asker.json()["ev"], "Ok");
     let t0 = Instant::now();
@@ -594,6 +595,7 @@ fn app_requests_reach_the_phone_and_replies_go_to_the_requester_without_watch() 
         ),
         r#"HttpLocal { request: 13, method: "GET", url: "http://192.168.1.1/", headers: [], body: "", timeout_ms: 0 }"#,
         r#"TypeText { request: 14, text: "Привет 👋 #тест\nстрока" }"#,
+        "SetWifi { request: 15, on: false }",
         "ListApps { request: 11 }",
     ] {
         assert!(log.contains(want), "нет {want} в\n{log}");
@@ -617,6 +619,12 @@ fn app_requests_reach_the_phone_and_replies_go_to_the_requester_without_watch() 
     match asker.msg() {
         ServerMsg::Status { phone: 5, code: 25, detail } => assert_eq!(detail, reply),
         m => panic!("ждали Status 25, пришло {m:?}"),
+    }
+    let reply = r#"15 {"ok":true,"enabled":false,"method":"quick_settings","ms":900}"#;
+    phone.push(Event::Status(pcdock_core::packet::Status { code: 26, detail: reply.into() }));
+    match asker.msg() {
+        ServerMsg::Status { phone: 5, code: 26, detail } => assert_eq!(detail, reply),
+        m => panic!("ждали Status 26, пришло {m:?}"),
     }
     other.send_raw(r#"{"op":"List","id":3}"#);
     let m = other.msg();

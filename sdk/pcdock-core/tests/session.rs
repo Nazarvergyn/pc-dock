@@ -582,6 +582,43 @@ fn text_input_only_when_agreed() {
 }
 
 #[test]
+fn wifi_set_only_when_agreed() {
+    use pcdock_core::link::AppRequest;
+    assert_ne!(Config::default().capabilities & caps::WIFI_TOGGLE, 0);
+
+    // Старый телефон (без бита 14) — команда не уходит, ответ «unsupported» кладёт сама сессия
+    let mut s = active_session();
+    s.app_request(&AppRequest::SetWifi { request: 3, on: true });
+    assert!(drain(&mut s).0.is_empty());
+    assert!(events(&mut s).contains(&Event::Status(Status { code: 26, detail: "3 error unsupported".into() })));
+
+    let mut s = Session::new(Config::default());
+    s.start(0);
+    let hello = Hello {
+        version_max: 2,
+        version_min: 2,
+        capabilities: caps::VIDEO_JPEG | caps::WIFI_TOGGLE,
+        role: Role::Device,
+        name: "p".into(),
+    };
+    feed(&mut s, 10, &[hello.to_packet()]);
+    drain(&mut s);
+    events(&mut s);
+
+    s.app_request(&AppRequest::SetWifi { request: 7, on: false });
+    let (streams, _) = drain(&mut s);
+    assert_eq!(streams.len(), 1);
+    let mut r = PacketReader::new();
+    r.push(&streams[0]);
+    let p = r.next_packet().unwrap();
+    assert_eq!(p.ptype, PacketType::WifiSet);
+    assert_eq!(WifiSetReq::decode(&p.payload).unwrap(), WifiSetReq { request_id: 7, on: false });
+    let d = r#"7 {"ok":true,"enabled":false,"method":"quick_settings","ms":900}"#;
+    feed(&mut s, 20, &[Status { code: 26, detail: d.into() }.to_packet()]);
+    assert!(events(&mut s).contains(&Event::Status(Status { code: 26, detail: d.into() })));
+}
+
+#[test]
 fn stream_switches_keep_size_and_quality() {
     let mut s = Session::new(Config::default());
     let base = SetStream {

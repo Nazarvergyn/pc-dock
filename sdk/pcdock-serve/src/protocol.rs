@@ -130,7 +130,7 @@ pub enum ClientMsg {
         video: bool,
         audio: bool,
     },
-    /// Запросы к приложению на телефоне (возможности 7–13). Ответ — событие `Status` (коды 18, 19, 20, 22–25) с
+    /// Запросы к приложению на телефоне (возможности 7–14). Ответ — событие `Status` (коды 18, 19, 20, 22–26) с
     /// `detail`, начинающимся с `request`; приходит запросившему клиенту, даже без `Watch`.
     /// Закрепить телефон (`usb:1-2.3`, `usb:СЕРИЙНИК`, `adb:СЕРИЙНИК`, `serial:ПУТЬ`): ферма его возьмёт при ближайшем
     /// обнаружении (событие `Appeared`). Нужен демон с обнаружением (`--auto`, `--phone` или `--manual`).
@@ -192,6 +192,14 @@ pub enum ClientMsg {
         phone: u32,
         request: u32,
         text: String,
+    },
+    /// Включить (`on: true`) или выключить Wi-Fi телефона (возможность 14). Ответ `Status` 26 `"<request> <JSON>"`:
+    /// `{"ok":true,"enabled":true,"method":"api"|"quick_settings"|"already","ms"}` или
+    /// `{"ok":false,"error":"no_service"|"tile_not_found"|"timeout"|…,"enabled":false,"ms"}`.
+    SetWifi {
+        phone: u32,
+        request: u32,
+        on: bool,
     },
 }
 

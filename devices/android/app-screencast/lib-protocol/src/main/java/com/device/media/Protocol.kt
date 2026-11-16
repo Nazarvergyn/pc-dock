@@ -37,6 +37,8 @@ object Proto {
     const val T_HTTP_LOCAL = 0x48
     /** Ввод текста в поле с курсором (хост → телефон): u32 request_id, текст UTF-8. Ответ — STATUS 25. */
     const val T_TEXT_INPUT = 0x49
+    /** Включить/выключить Wi-Fi (хост → телефон): u32 request_id, u8 on. Ответ — STATUS 26. */
+    const val T_WIFI_SET = 0x4A
     const val T_STATUS = 0x50
     const val T_ERROR = 0x7F
 
@@ -59,6 +61,8 @@ object Proto {
     const val CAP_HTTP_LOCAL = 1 shl 12
     /** Телефон вводит текст любого языка в поле с курсором (TEXT_INPUT → STATUS 25), если хост поставил бит. */
     const val CAP_TEXT_INPUT = 1 shl 13
+    /** Телефон включает и выключает свой Wi-Fi (WIFI_SET → STATUS 26), если хост поставил бит. */
+    const val CAP_WIFI_TOGGLE = 1 shl 14
 
     const val CODEC_VIDEO_JPEG = 1
     const val CODEC_AUDIO_PCM_S16LE = 1
@@ -89,6 +93,8 @@ object Proto {
     const val STATUS_HTTP_LOCAL = 24
     /** Ответ на TEXT_INPUT: detail = "<request_id> <JSON-объект>" (ok, method, ms или ok=false, error, ms). */
     const val STATUS_TEXT_INPUT = 25
+    /** Ответ на WIFI_SET: detail = "<request_id> <JSON-объект>" (ok, enabled, method, ms или ok=false, error, ms). */
+    const val STATUS_WIFI_SET = 26
 }
 
 class Packet(val type: Int, val flags: Int, val payload: ByteArray) {
@@ -199,6 +205,8 @@ class HttpLocalReq(val requestId: Long, val json: String)
 /** [bytes] — текст как пришёл (UTF-8); проверка и декодирование — TextInput.decode. */
 class TextInputReq(val requestId: Long, val bytes: ByteArray)
 
+class WifiSetReq(val requestId: Long, val on: Boolean)
+
 object Messages {
     /** LIST_APPS: u32 request_id. null — пакет повреждён. */
     fun parseListApps(payload: ByteArray): Long? = try {
@@ -237,6 +245,15 @@ object Messages {
         val id = b.int.toLong() and 0xFFFFFFFFL
         val json = ByteArray(b.remaining()).also { b.get(it) }.toString(Charsets.UTF_8)
         HttpLocalReq(id, json)
+    } catch (e: Exception) {
+        null
+    }
+
+    /** WIFI_SET: u32 request_id, u8 on. null — пакет повреждён. */
+    fun parseWifiSet(payload: ByteArray): WifiSetReq? = try {
+        val b = ByteBuffer.wrap(payload)
+        val id = b.int.toLong() and 0xFFFFFFFFL
+        WifiSetReq(id, b.get().toInt() != 0)
     } catch (e: Exception) {
         null
     }

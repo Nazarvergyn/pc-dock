@@ -9,6 +9,9 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- IP-адрес телефона для компьютера (PROTOCOL.md, IP_CHECK): тип сети по умолчанию и шлюз -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Wi-Fi вкл/выкл по команде хоста (WIFI_SET, возможность 14, WifiToggle.kt): состояние и setWifiEnabled до Android 10 -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <!-- Пакет на переднем плане для хоста (PROTOCOL.md, STATUS 16). Даёт пользователь: «Доступ к истории использования» -->
     <uses-permission
         android:name="android.permission.PACKAGE_USAGE_STATS"
