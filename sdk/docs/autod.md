@@ -83,7 +83,7 @@ end)
 |---|---|
 | `p.id`, `p:state()`, `p:info()` | номер, состояние (`ready`…), сведения (серийник, путь, размер экрана, поворот) |
 | `p:wait_ready(timeout)` | ждёт `ready` (по умолчанию 30 с), возвращает true/false |
-| `p:tap(x, y, opts)` | касание; `opts`: `hold` (с), `pressure`, `size`, `finger` |
+| `p:tap(x, y, opts)` | касание; `opts`: `hold` (с, по умолчанию 0.1: 50 мс диалоги на Samsung пропускали), `pressure`, `size`, `finger` |
 | `p:swipe(x1, y1, x2, y2, opts)` | протяжка; `opts`: `duration`, `steps`, `pressure`, `size` |
 | `p:touch(phase, x, y, opts)` | одна фаза: `"down"`, `"move"`, `"up"`, `"cancel"` (для жестов из нескольких пальцев: `finger`) |
 | `p:key(name_or_usage, opts)` | клавиша по имени (`"a"`, `"enter"`, `"esc"`, `"f1"`) или коду USB HID; `opts.hold` |
@@ -99,9 +99,9 @@ end)
 | `p:apps()` | приложения с главным экраном (таблица из ответа телефона) |
 | `p:foreground()` | пакет на переднем плане или `nil` |
 | `p:ui()` | элементы экрана: XML uiautomator |
-| `p:find(sel, opts)` | элемент или `nil`; `sel` — строка (текст целиком) или `{text, text_contains, id, desc, class, index}`; `opts.timeout` — ждать (по умолчанию не ждёт). Элемент: `text, id, desc, class, package, clickable, enabled, x, y` (центр в долях), `bounds` |
+| `p:find(sel, opts)` | элемент или `nil`; `sel` — строка (текст целиком) или `{text, text_contains, id, desc, class, index}`; `opts.timeout` — ждать (по умолчанию не ждёт). Элемент: `text, id, desc, class, package, clickable, enabled, x, y` (центр в долях настоящего экрана телефона, как у `p:tap`; телефон отдаёт только активное окно, поэтому у диалога доли считаются не от его границ; размер экрана неизвестен — по крайним границам элементов), `bounds` (пиксели) |
 | `p:wait_for(sel, timeout)` | ждёт появления элемента (по умолчанию 10 с), true/false |
-| `p:tap_on(sel, opts)` | нажать на центр элемента, ждёт его до `opts.timeout` (10 с); нет элемента — ошибка |
+| `p:tap_on(sel, opts)` | нажать на центр элемента, ждёт его до `opts.timeout` (10 с); нет элемента — ошибка; `opts` касания — как у `p:tap` |
 | `p:exit_info(pkg, since_ms)` | причины завершения приложения (Android 11+): таблица или строка (`"unsupported"`, `"no_permission"`) |
 | `p:ip(url)` | HTTPS GET по сети телефона (внешний IP): таблица или строка-ошибка |
 | `p:http{method, url, headers, body, timeout}` | HTTP-запрос к устройству локальной Wi-Fi-сети телефона (админка роутера) через Wi-Fi телефона: `method` — `"GET"` (по умолчанию) или `"POST"`, `url` — `http(s)://` с IPv4 частной сети (`192.168.…`, `10.…`, `172.16–31.…`, `169.254.…`), `headers` — таблица, `body` — только у `POST` (≤ 64 КБ), `timeout` — секунды (10, не больше 30). Возвращает `{ok = true, code, body, headers, ms}` (любой код HTTP, в том числе 401; имена заголовков строчными, несколько `set-cookie` — через `\n`) или `{ok = false, error}`: `bad_url`, `bad_request`, `no_wifi`, `timeout`, `io: …`, `unsupported` (приложение pc-dock без возможности 12 — обновить) |

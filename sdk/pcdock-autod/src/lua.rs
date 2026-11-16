@@ -569,7 +569,8 @@ impl PhoneHandle {
         Ok((xml.to_string(), uitree::parse(xml)))
     }
 
-    /// Ждёт элемент до срока (0 — одна попытка). Возвращает элемент и размер экрана.
+    /// Ждёт элемент до срока (0 — одна попытка). Возвращает элемент и размер экрана для долей: настоящий размер
+    /// экрана телефона (дамп — только активное окно, у диалога его границы меньше экрана), без него — по дампу.
     fn wait_node(
         &self,
         sel: &Selector,
@@ -583,7 +584,10 @@ impl PhoneHandle {
                 Err(e) if e.to_string().contains("no_window") && Instant::now() < end => Vec::new(),
                 Err(e) => return Err(e),
             };
-            if let (Some(n), Some(size)) = (uitree::find(&nodes, sel), uitree::screen_size(&nodes)) {
+            let screen = self.st.backend.phone(self.id).and_then(|p| p.screen);
+            if let (Some(n), Some(size)) =
+                (uitree::find(&nodes, sel), uitree::screen_size_for(screen, &nodes))
+            {
                 return Ok(Some((n.clone(), size)));
             }
             if Instant::now() >= end {
@@ -593,6 +597,10 @@ impl PhoneHandle {
         }
     }
 }
+
+/// Удержание пальца у `p:tap` и `p:tap_on` по умолчанию, с. 50 мс диалоги App Cloner на Samsung (Galaxy S22)
+/// пропускали — касание HID доходило, а кнопка не срабатывала; 100 мс — как у обычного короткого нажатия пальцем.
+const TAP_HOLD: f64 = 0.1;
 
 fn node_table(lua: &Lua, n: &uitree::Node, size: (i32, i32)) -> mlua::Result<Table> {
     let t = lua.create_table()?;
@@ -644,7 +652,7 @@ impl UserData for PhoneHandle {
         });
         methods.add_method("tap", |_, t, (x, y, o): (f32, f32, Option<Table>)| {
             t.touch(0, x, y, &o)?;
-            t.st.sleep(opt_secs(&o, "hold", 0.05))?;
+            t.st.sleep(opt_secs(&o, "hold", TAP_HOLD))?;
             t.touch(2, x, y, &o)
         });
         methods.add_method("touch", |_, t, (phase, x, y, o): (Value, f32, f32, Option<Table>)| {
@@ -815,7 +823,7 @@ impl UserData for PhoneHandle {
             let (cx, cy) = n.center();
             let (x, y) = (cx / size.0 as f32, cy / size.1 as f32);
             t.touch(0, x, y, &o)?;
-            t.st.sleep(opt_secs(&o, "hold", 0.05))?;
+            t.st.sleep(opt_secs(&o, "hold", TAP_HOLD))?;
             t.touch(2, x, y, &o)
         });
         // Причины завершения приложения после `since_ms` (мс Unix): таблица или строка ("unsupported"…).
@@ -1450,12 +1458,16 @@ mod tests {
         seq: AtomicU64,
         state: Mutex<String>,
         files: Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
+        /// Размер экрана телефона от демона и свой ответ на `UiDump` (иначе — экран с кнопкой «Войти»).
+        screen: Mutex<Option<(u32, u32)>>,
+        ui: Mutex<Option<String>>,
     }
 
     impl Fake {
         fn new() -> Arc<Self> {
             let f = Arc::new(Self::default());
             *f.state.lock().unwrap() = "ready".into();
+            *f.screen.lock().unwrap() = Some((720, 1640));
             f
         }
 
@@ -1476,7 +1488,7 @@ mod tests {
                 id: 1,
                 state: self.state.lock().unwrap().clone(),
                 serial: Some("SER1".into()),
-                screen: Some((720, 1640)),
+                screen: *self.screen.lock().unwrap(),
                 ..Default::default()
             }]
         }
@@ -1545,6 +1557,7 @@ mod tests {
             Ok(match req["op"].as_str() {
                 Some("LaunchApp") => "ok".into(),
                 Some("ListApps") => r#"[{"package":"com.app","label":"App"}]"#.into(),
+                Some("UiDump") if self.ui.lock().unwrap().is_some() => self.ui.lock().unwrap().clone().unwrap(),
                 Some("UiDump") => concat!(
                     r#"xml <hierarchy rotation="0"><node text="" class="android.widget.FrameLayout" bounds="[0,0][1000,2000]">"#,
                     r#"<node text="Войти" resource-id="com.app:id/login" class="android.widget.Button" clickable="true" bounds="[100,1000][300,1200]" />"#,
@@ -1708,6 +1721,8 @@ mod tests {
     #[test]
     fn app_requests_and_screen_elements_from_lua() {
         let fake = Fake::new();
+        // Окно во весь экран: размер экрана совпадает с корнем дампа
+        *fake.screen.lock().unwrap() = Some((1000, 2000));
         let (r, _sink) = run(
             r#"
             test("app", function()
@@ -1748,6 +1763,50 @@ mod tests {
             "{log}"
         );
         assert!(log.contains("touch 1 0 0.20 0.55") && log.contains("touch 1 2 0.20 0.55"), "{log}");
+    }
+
+    /// Диалог поверх приложения: телефон отдаёт только окно диалога (App Cloner на Galaxy S22, экран 1080×2340).
+    /// Доли считаются от настоящего экрана, а не от границ диалога; без размера экрана — по дампу, как раньше.
+    #[test]
+    fn dialog_elements_use_real_screen_size() {
+        let dialog = concat!(
+            r#"xml <hierarchy rotation="0"><node class="android.widget.FrameLayout" bounds="[54,757][1026,1583]">"#,
+            r#"<node text="Continue" class="android.widget.Button" clickable="true" bounds="[627,1391][954,1535]" />"#,
+            "</node></hierarchy>"
+        );
+        let fake = Fake::new();
+        *fake.screen.lock().unwrap() = Some((1080, 2340));
+        *fake.ui.lock().unwrap() = Some(dialog.into());
+        let (r, _sink) = run(
+            r#"
+            test("dialog", function()
+              local p = phones()[1]
+              local e = p:find("Continue")
+              assert.near(e.x, 790.5 / 1080, 0.0005)
+              assert.near(e.y, 1463 / 2340, 0.0005)
+              p:tap_on("Continue")
+            end)
+            "#,
+            &fake,
+        );
+        assert_eq!(r.status, "passed", "{r:?}");
+        let log = fake.log().join("\n");
+        assert!(log.contains("touch 1 0 0.73 0.63") && log.contains("touch 1 2 0.73 0.63"), "{log}");
+
+        let fake = Fake::new();
+        *fake.screen.lock().unwrap() = None;
+        *fake.ui.lock().unwrap() = Some(dialog.into());
+        let (r, _sink) = run(
+            r#"
+            test("dialog", function()
+              local e = phones()[1]:find("Continue")
+              assert.near(e.x, 790.5 / 1026, 0.0005)
+              assert.near(e.y, 1463 / 1583, 0.0005)
+            end)
+            "#,
+            &fake,
+        );
+        assert_eq!(r.status, "passed", "{r:?}");
     }
 
     #[test]

@@ -145,11 +145,34 @@ fn bounds(s: &str) -> Option<(i32, i32, i32, i32)> {
     }
 }
 
-/// Размер экрана по дампу: правый нижний угол самого большого элемента (первый узел — окно целиком).
+/// Размер по дампу: самые дальние правый и нижний края элементов. Это размер экрана, только если в дампе окно
+/// во весь экран: телефон отдаёт лишь активное окно, и у диалога это край диалога, а не экрана.
 pub fn screen_size(nodes: &[Node]) -> Option<(i32, i32)> {
     let w = nodes.iter().map(|n| n.bounds.2).max()?;
     let h = nodes.iter().map(|n| n.bounds.3).max()?;
     (w > 0 && h > 0).then_some((w, h))
+}
+
+/// Размер экрана, в долях которого считаются координаты элементов (`x`, `y` у `p:find`, точка `p:tap_on`).
+///
+/// `screen` — настоящий размер экрана телефона от демона (`p:info()`: `width`, `height`), уже в текущей
+/// ориентации (`DisplayInfo.screen_width/height`, на телефоне `getRealMetrics`). Без него — запасной вариант по
+/// дампу ([`screen_size`]), который врёт для диалогов. Если телефон только что повернулся, а размер от демона
+/// ещё прежний (элементы не помещаются в `w×h`, но помещаются в `h×w`), — стороны меняются местами.
+/// Пустой дамп — `None` (элементов нет, считать нечего).
+pub fn screen_size_for(screen: Option<(u32, u32)>, nodes: &[Node]) -> Option<(i32, i32)> {
+    if nodes.is_empty() {
+        return None;
+    }
+    let Some((w, h)) = screen.filter(|&(w, h)| w > 0 && h > 0).map(|(w, h)| (w as i32, h as i32)) else {
+        return screen_size(nodes);
+    };
+    let fits = |(sw, sh): (i32, i32)| nodes.iter().all(|n| n.bounds.2 <= sw && n.bounds.3 <= sh);
+    if !fits((w, h)) && fits((h, w)) {
+        Some((h, w))
+    } else {
+        Some((w, h))
+    }
 }
 
 /// Найти элемент по селектору: `index`-е совпадение.
@@ -180,5 +203,44 @@ mod tests {
         assert!(find(&nodes, &Selector { text: Some("Нет".into()), ..Default::default() }).is_none());
         assert!(find(&nodes, &Selector { class: Some("Button".into()), index: 1, ..Default::default() })
             .is_none());
+    }
+
+    /// Диалог App Cloner на Galaxy S22 (экран 1080×2340): в дампе только окно диалога.
+    const DIALOG: &str = r#"<hierarchy rotation="0"><node class="android.widget.FrameLayout" package="com.applisto.appcloner" bounds="[54,757][1026,1583]"><node text="Continue" class="android.widget.Button" package="com.applisto.appcloner" clickable="true" enabled="true" bounds="[627,1391][954,1535]" /></node></hierarchy>"#;
+
+    #[test]
+    fn dialog_uses_real_screen_size_not_dialog_bounds() {
+        let nodes = parse(DIALOG);
+        // Крайние границы дампа — край диалога, не экрана
+        assert_eq!(screen_size(&nodes), Some((1026, 1583)));
+        // Настоящий размер экрана от демона — главный
+        assert_eq!(screen_size_for(Some((1080, 2340)), &nodes), Some((1080, 2340)));
+        let b = find(&nodes, &Selector { text: Some("Continue".into()), ..Default::default() }).unwrap();
+        let (cx, cy) = b.center();
+        let (w, h) = screen_size_for(Some((1080, 2340)), &nodes).unwrap();
+        let (fx, fy) = (cx / w as f32, cy / h as f32);
+        // Точка касания в пикселях экрана — внутри кнопки (раньше было y ≈ 2161 — мимо)
+        assert!((fx * 1080.0 - 790.5).abs() < 0.5 && (fy * 2340.0 - 1463.0).abs() < 0.5, "{fx} {fy}");
+    }
+
+    #[test]
+    fn screen_size_falls_back_to_dump_and_follows_fresh_rotation() {
+        let nodes = parse(DIALOG);
+        // Размер неизвестен (или нулевой) — по дампу, как раньше
+        assert_eq!(screen_size_for(None, &nodes), Some((1026, 1583)));
+        assert_eq!(screen_size_for(Some((0, 0)), &nodes), Some((1026, 1583)));
+        // Пустой дамп — считать нечего
+        assert_eq!(screen_size_for(Some((1080, 2340)), &[]), None);
+        // Повернули в альбомную, а демон ещё прислал книжный размер: элементы не помещаются — стороны меняются
+        let land = parse(
+            r#"<hierarchy rotation="1"><node class="android.widget.FrameLayout" bounds="[0,0][2340,1080]"><node text="OK" class="android.widget.Button" bounds="[2000,900][2300,1050]" /></node></hierarchy>"#,
+        );
+        assert_eq!(screen_size_for(Some((1080, 2340)), &land), Some((2340, 1080)));
+        assert_eq!(screen_size_for(Some((2340, 1080)), &land), Some((2340, 1080)));
+        // Маленький диалог помещается в обе ориентации — размер от демона не трогаем
+        let small = parse(
+            r#"<hierarchy><node class="android.widget.Button" bounds="[100,100][900,1000]" /></hierarchy>"#,
+        );
+        assert_eq!(screen_size_for(Some((1080, 2340)), &small), Some((1080, 2340)));
     }
 }
