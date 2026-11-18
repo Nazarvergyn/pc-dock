@@ -85,4 +85,12 @@ class ProtocolTest {
         assertEquals(1 shl 14, Proto.CAP_WIFI_TOGGLE)
         assertEquals(26, Proto.STATUS_WIFI_SET)
     }
+
+    @Test
+    fun clipboardSetConstants() {
+        // Payload — как у TEXT_INPUT (parseTextInput); коды — те же, что в pcdock_core
+        assertEquals(0x4B, Proto.T_CLIPBOARD_SET)
+        assertEquals(1 shl 15, Proto.CAP_CLIPBOARD_SET)
+        assertEquals(27, Proto.STATUS_CLIPBOARD_SET)
+    }
 }

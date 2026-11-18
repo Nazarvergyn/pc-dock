@@ -63,6 +63,18 @@ object TextInput {
         return j.put("ms", ms).toString()
     }
 
+    /**
+     * Ответ на CLIPBOARD_SET (JSON одной строкой): текст только в буфер обмена, без вставки в поле — например подпись
+     * поста, которую человек вставит сам. Те же правила текста, что у TEXT_INPUT. Вызывать не в главном потоке.
+     */
+    fun clipboard(context: Context, bytes: ByteArray): String {
+        val t0 = SystemClock.elapsedRealtime()
+        val text = decode(bytes) ?: return error("bad_request", 0)
+        val why = setClipboard(context, text)
+        val ms = SystemClock.elapsedRealtime() - t0
+        return if (why == null) JSONObject().put("ok", true).put("ms", ms).toString() else error("clipboard: $why", ms)
+    }
+
     /** Ответ на TEXT_INPUT (JSON одной строкой). Вызывать не в главном потоке и не в потоке захвата. */
     fun run(context: Context, bytes: ByteArray): String {
         val t0 = SystemClock.elapsedRealtime()

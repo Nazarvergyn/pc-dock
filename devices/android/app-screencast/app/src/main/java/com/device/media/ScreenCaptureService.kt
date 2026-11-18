@@ -155,6 +155,8 @@ class ScreenCaptureService : Service(), HostLink.Listener {
     // Ввод текста (CAP_TEXT_INPUT, TEXT_INPUT → STATUS 25): по одному, по порядку, не в потоке захвата
     @Volatile private var hostWantsText = false
     private val textExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "text-input") }
+    // Буфер обмена (CAP_CLIPBOARD_SET, CLIPBOARD_SET → STATUS 27): тем же потоком, что ввод текста — по порядку
+    @Volatile private var hostWantsClipboard = false
     // Wi-Fi вкл/выкл (CAP_WIFI_TOGGLE, WIFI_SET → STATUS 26): по одному, не в потоке захвата (ждём до ~15 с)
     @Volatile private var hostWantsWifi = false
     private val wifiExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r, "wifi-set") }
@@ -802,6 +804,7 @@ class ScreenCaptureService : Service(), HostLink.Listener {
         hostWantsIp = false
         hostWantsHttp = false
         hostWantsText = false
+        hostWantsClipboard = false
         hostWantsWifi = false
         stopUiChanges()
         stream = StreamConfig()
@@ -835,6 +838,7 @@ class ScreenCaptureService : Service(), HostLink.Listener {
                 hostWantsIp = false
                 hostWantsHttp = false
                 hostWantsText = false
+                hostWantsClipboard = false
                 hostWantsWifi = false
                 stopUiChanges()
             }
@@ -1049,6 +1053,26 @@ class ScreenCaptureService : Service(), HostLink.Listener {
                 }
             }
 
+            Proto.T_CLIPBOARD_SET -> {
+                reactivateIfPaused("CLIPBOARD_SET")
+                // Тот же формат, что TEXT_INPUT: u32 request_id, затем текст UTF-8
+                val cmd = Messages.parseTextInput(p.payload) ?: return
+                if (!hostWantsClipboard) {
+                    l.sendControl(Messages.status(Proto.STATUS_CLIPBOARD_SET, "${cmd.requestId} ${TextInput.error("not_negotiated", 0)}").encode())
+                    return
+                }
+                textExecutor.execute {
+                    val answer = try {
+                        TextInput.clipboard(this, cmd.bytes)
+                    } catch (e: Throwable) {
+                        TextInput.error("error: " + e.javaClass.simpleName, 0)
+                    }
+                    // Сам текст в журнал не пишется
+                    Log.d(TAG, "CLIPBOARD_SET #${cmd.requestId} (${cmd.bytes.size} байт): $answer")
+                    l.sendControl(Messages.status(Proto.STATUS_CLIPBOARD_SET, "${cmd.requestId} $answer").encode())
+                }
+            }
+
             else -> {} // PONG и неизвестные типы пропускаем
         }
     }
@@ -1071,7 +1095,7 @@ class ScreenCaptureService : Service(), HostLink.Listener {
         relayout("HELLO")
         var caps = Proto.CAP_VIDEO_JPEG or Proto.CAP_ROTATION or Proto.CAP_FOREGROUND or Proto.CAP_LAUNCH_APP or Proto.CAP_LIST_APPS or
             Proto.CAP_UI_TREE or Proto.CAP_EXIT_INFO or Proto.CAP_IP_CHECK or Proto.CAP_HTTP_LOCAL or Proto.CAP_TEXT_INPUT or
-            Proto.CAP_WIFI_TOGGLE
+            Proto.CAP_WIFI_TOGGLE or Proto.CAP_CLIPBOARD_SET
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) caps = caps or Proto.CAP_AUDIO_PCM
         hostWantsForeground = hello.capabilities and Proto.CAP_FOREGROUND != 0
         hostWantsLaunch = hello.capabilities and Proto.CAP_LAUNCH_APP != 0
@@ -1081,6 +1105,7 @@ class ScreenCaptureService : Service(), HostLink.Listener {
         hostWantsIp = hello.capabilities and Proto.CAP_IP_CHECK != 0
         hostWantsHttp = hello.capabilities and Proto.CAP_HTTP_LOCAL != 0
         hostWantsText = hello.capabilities and Proto.CAP_TEXT_INPUT != 0
+        hostWantsClipboard = hello.capabilities and Proto.CAP_CLIPBOARD_SET != 0
         hostWantsWifi = hello.capabilities and Proto.CAP_WIFI_TOGGLE != 0
         if (hostWantsUi) startUiChanges(l) else stopUiChanges()
         l.sendControl(Messages.hello(caps, NAME).encode())

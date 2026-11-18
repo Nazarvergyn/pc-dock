@@ -590,7 +590,9 @@ fn wifi_set_only_when_agreed() {
     let mut s = active_session();
     s.app_request(&AppRequest::SetWifi { request: 3, on: true });
     assert!(drain(&mut s).0.is_empty());
-    assert!(events(&mut s).contains(&Event::Status(Status { code: 26, detail: "3 error unsupported".into() })));
+    assert!(
+        events(&mut s).contains(&Event::Status(Status { code: 26, detail: "3 error unsupported".into() }))
+    );
 
     let mut s = Session::new(Config::default());
     s.start(0);
@@ -616,6 +618,55 @@ fn wifi_set_only_when_agreed() {
     let d = r#"7 {"ok":true,"enabled":false,"method":"quick_settings","ms":900}"#;
     feed(&mut s, 20, &[Status { code: 26, detail: d.into() }.to_packet()]);
     assert!(events(&mut s).contains(&Event::Status(Status { code: 26, detail: d.into() })));
+}
+
+#[test]
+fn clipboard_set_only_when_agreed() {
+    use pcdock_core::link::AppRequest;
+    assert_ne!(Config::default().capabilities & caps::CLIPBOARD_SET, 0);
+
+    // Старый телефон (без бита 15) — команда не уходит, ответ «unsupported» кладёт сама сессия
+    let mut s = active_session();
+    s.app_request(&AppRequest::SetClipboard { request: 3, text: "x".into() });
+    assert!(drain(&mut s).0.is_empty());
+    assert!(
+        events(&mut s).contains(&Event::Status(Status { code: 27, detail: "3 error unsupported".into() }))
+    );
+
+    let mut s = Session::new(Config::default());
+    s.start(0);
+    let hello = Hello {
+        version_max: 2,
+        version_min: 2,
+        capabilities: caps::VIDEO_JPEG | caps::CLIPBOARD_SET,
+        role: Role::Device,
+        name: "p".into(),
+    };
+    feed(&mut s, 10, &[hello.to_packet()]);
+    drain(&mut s);
+    events(&mut s);
+
+    // Пустой текст — не уходит, сессия отвечает сама
+    s.app_request(&AppRequest::SetClipboard { request: 4, text: String::new() });
+    assert!(drain(&mut s).0.is_empty());
+    assert!(events(&mut s)
+        .iter()
+        .any(|e| matches!(e, Event::Status(Status { code: 27, detail }) if detail.starts_with("4 error"))));
+
+    s.app_request(&AppRequest::SetClipboard { request: 7, text: "Подпись 👋".into() });
+    let (streams, _) = drain(&mut s);
+    assert_eq!(streams.len(), 1);
+    let mut r = PacketReader::new();
+    r.push(&streams[0]);
+    let p = r.next_packet().unwrap();
+    assert_eq!(p.ptype, PacketType::ClipboardSet);
+    assert_eq!(
+        ClipboardSetReq::decode(&p.payload).unwrap(),
+        ClipboardSetReq { request_id: 7, text: "Подпись 👋".into() }
+    );
+    let d = r#"7 {"ok":true,"ms":4}"#;
+    feed(&mut s, 20, &[Status { code: 27, detail: d.into() }.to_packet()]);
+    assert!(events(&mut s).contains(&Event::Status(Status { code: 27, detail: d.into() })));
 }
 
 #[test]

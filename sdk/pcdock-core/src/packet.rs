@@ -42,6 +42,9 @@ pub mod caps {
     /// Телефон включает и выключает свой Wi-Fi (`WIFI_SET`, ответ — `STATUS` 26): системным вызовом, где Android
     /// разрешает, иначе плиткой «Wi-Fi» в быстрых настройках через службу специальных возможностей.
     pub const WIFI_TOGGLE: u32 = 1 << 14;
+    /// Телефон кладёт текст в свой буфер обмена (`CLIPBOARD_SET`, ответ — `STATUS` 27): без вставки в поле, например
+    /// подпись поста, которую человек вставит сам.
+    pub const CLIPBOARD_SET: u32 = 1 << 15;
 }
 
 /// Коды кодеков.
@@ -89,6 +92,8 @@ pub enum PacketType {
     TextInput,
     /// Включить или выключить Wi-Fi телефона (хост → телефон, возможность `caps::WIFI_TOGGLE`).
     WifiSet,
+    /// Положить текст в буфер обмена телефона (хост → телефон, возможность `caps::CLIPBOARD_SET`).
+    ClipboardSet,
     Status,
     Error,
     /// Тип, неизвестный этой версии ядра (такие пакеты пропускаются).
@@ -117,6 +122,7 @@ impl PacketType {
             0x48 => Self::HttpLocal,
             0x49 => Self::TextInput,
             0x4A => Self::WifiSet,
+            0x4B => Self::ClipboardSet,
             0x50 => Self::Status,
             0x7F => Self::Error,
             other => Self::Unknown(other),
@@ -144,6 +150,7 @@ impl PacketType {
             Self::HttpLocal => 0x48,
             Self::TextInput => 0x49,
             Self::WifiSet => 0x4A,
+            Self::ClipboardSet => 0x4B,
             Self::Status => 0x50,
             Self::Error => 0x7F,
             Self::Unknown(v) => v,
@@ -904,6 +911,35 @@ pub fn valid_text_input(text: &str) -> bool {
     !text.is_empty() && text.len() <= TEXT_INPUT_MAX && !text.contains('\0')
 }
 
+/// Положить текст в буфер обмена телефона (`CLIPBOARD_SET`, 0x4B): тот же payload, что у `TEXT_INPUT` (`u32
+/// request_id`, затем текст UTF-8 до конца) и те же правила текста ([`valid_text_input`]).
+/// Ответ — `STATUS` 27 `"<request_id> <JSON-объект>"`: `{"ok":true,"ms":5}` или
+/// `{"ok":false,"error":"bad_request"|"clipboard: …"|"not_negotiated","ms":0}` (PROTOCOL.md «Буфер обмена
+/// (возможность 15)»).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClipboardSetReq {
+    pub request_id: u32,
+    /// Не пустой, не больше [`TEXT_INPUT_MAX`] байт UTF-8, без символа `\0`.
+    pub text: String,
+}
+
+impl ClipboardSetReq {
+    pub fn valid(&self) -> bool {
+        valid_text_input(&self.text)
+    }
+
+    pub fn to_packet(&self) -> Packet {
+        let mut p = self.request_id.to_be_bytes().to_vec();
+        p.extend_from_slice(self.text.as_bytes());
+        Packet::new(PacketType::ClipboardSet, p)
+    }
+
+    pub fn decode(data: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor::new(data);
+        Ok(Self { request_id: c.u32()?, text: utf8(c.rest()) })
+    }
+}
+
 /// Включить или выключить Wi-Fi телефона (`WIFI_SET`, 0x4A): `u32 request_id`, `u8 on` (1 — включить, 0 — выключить).
 /// Ответ — `STATUS` 26 `"<request_id> <JSON-объект>"`: `{"ok":true,"enabled":true,"method":"api"|"quick_settings"|
 /// "already","ms":900}` или `{"ok":false,"error":"no_service"|"tile_not_found"|"timeout"|"not_negotiated"|…,
@@ -1314,6 +1350,20 @@ mod tests {
         assert!(WifiSetReq::decode(&[0, 0, 0, 1]).is_err());
         assert_eq!(PacketType::from_u8(0x4A), PacketType::WifiSet);
         assert_eq!(caps::WIFI_TOGGLE, 1 << 14);
+    }
+
+    #[test]
+    fn clipboard_set_roundtrip() {
+        let q = ClipboardSetReq { request_id: 7, text: "Подпись 👋\n#тег".into() };
+        assert!(q.valid());
+        let p = q.to_packet();
+        assert_eq!(p.ptype, PacketType::ClipboardSet);
+        assert_eq!(&p.payload[..4], &7u32.to_be_bytes());
+        assert_eq!(ClipboardSetReq::decode(&p.payload).unwrap(), q);
+        assert!(!ClipboardSetReq { request_id: 1, text: String::new() }.valid());
+        assert_eq!(PacketType::from_u8(0x4B), PacketType::ClipboardSet);
+        assert_eq!(PacketType::ClipboardSet.to_u8(), 0x4B);
+        assert_eq!(caps::CLIPBOARD_SET, 1 << 15);
     }
 
     #[test]

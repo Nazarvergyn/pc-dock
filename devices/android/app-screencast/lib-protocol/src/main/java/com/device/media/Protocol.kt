@@ -39,6 +39,8 @@ object Proto {
     const val T_TEXT_INPUT = 0x49
     /** Включить/выключить Wi-Fi (хост → телефон): u32 request_id, u8 on. Ответ — STATUS 26. */
     const val T_WIFI_SET = 0x4A
+    /** Положить текст в буфер обмена (хост → телефон): u32 request_id, текст UTF-8. Ответ — STATUS 27. */
+    const val T_CLIPBOARD_SET = 0x4B
     const val T_STATUS = 0x50
     const val T_ERROR = 0x7F
 
@@ -63,6 +65,8 @@ object Proto {
     const val CAP_TEXT_INPUT = 1 shl 13
     /** Телефон включает и выключает свой Wi-Fi (WIFI_SET → STATUS 26), если хост поставил бит. */
     const val CAP_WIFI_TOGGLE = 1 shl 14
+    /** Телефон кладёт текст в свой буфер обмена (CLIPBOARD_SET → STATUS 27), если хост поставил бит. */
+    const val CAP_CLIPBOARD_SET = 1 shl 15
 
     const val CODEC_VIDEO_JPEG = 1
     const val CODEC_AUDIO_PCM_S16LE = 1
@@ -95,6 +99,8 @@ object Proto {
     const val STATUS_TEXT_INPUT = 25
     /** Ответ на WIFI_SET: detail = "<request_id> <JSON-объект>" (ok, enabled, method, ms или ok=false, error, ms). */
     const val STATUS_WIFI_SET = 26
+    /** Ответ на CLIPBOARD_SET: detail = "<request_id> <JSON-объект>" (ok, ms или ok=false, error, ms). */
+    const val STATUS_CLIPBOARD_SET = 27
 }
 
 class Packet(val type: Int, val flags: Int, val payload: ByteArray) {

@@ -201,6 +201,14 @@ pub enum ClientMsg {
         request: u32,
         on: bool,
     },
+    /// Положить текст в буфер обмена телефона (возможность 15; те же правила текста, что у `TypeText`), не вставляя в
+    /// поле. Ответ `Status` 27 `"<request> <JSON>"`: `{"ok":true,"ms"}` или `{"ok":false,"error":"bad_request"|
+    /// "clipboard: …"|"not_negotiated"}`; старый телефон — `"<request> error unsupported"`.
+    SetClipboard {
+        phone: u32,
+        request: u32,
+        text: String,
+    },
 }
 
 fn default_http_method() -> String {

@@ -50,7 +50,8 @@ impl Default for Config {
                 | caps::IP_CHECK
                 | caps::HTTP_LOCAL
                 | caps::TEXT_INPUT
-                | caps::WIFI_TOGGLE,
+                | caps::WIFI_TOGGLE
+                | caps::CLIPBOARD_SET,
             aoa: AoaStrings::default(),
             hid: HidConfig::default(),
             stream: None,
@@ -496,6 +497,9 @@ impl Session {
                 self.text_input(&TextInputReq { request_id: *request, text: text.clone() })
             }
             R::SetWifi { request, on } => self.wifi_set(&WifiSetReq { request_id: *request, on: *on }),
+            R::SetClipboard { request, text } => {
+                self.clipboard_set(&ClipboardSetReq { request_id: *request, text: text.clone() })
+            }
         };
         if let Err(e) = r {
             let why = match e {
@@ -565,6 +569,23 @@ impl Session {
         }
         if self.negotiated_caps & caps::WIFI_TOGGLE == 0 {
             return Err(LaunchError::Unsupported);
+        }
+        self.send_packet(req.to_packet());
+        Ok(())
+    }
+
+    /// Просит телефон положить текст в буфер обмена (`CLIPBOARD_SET`). Ответ придёт событием `Status` с кодом 27 и
+    /// `detail` = `"<request_id> <JSON>"`. Ошибка — сессия не активна, `caps::CLIPBOARD_SET` не согласован или текст
+    /// некорректен (`BadRequest`).
+    pub fn clipboard_set(&mut self, req: &ClipboardSetReq) -> Result<(), LaunchError> {
+        if self.state != State::Active {
+            return Err(LaunchError::NotActive);
+        }
+        if self.negotiated_caps & caps::CLIPBOARD_SET == 0 {
+            return Err(LaunchError::Unsupported);
+        }
+        if !req.valid() {
+            return Err(LaunchError::BadRequest);
         }
         self.send_packet(req.to_packet());
         Ok(())

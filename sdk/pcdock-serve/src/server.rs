@@ -777,7 +777,12 @@ fn map_input(msg: ClientMsg) -> Result<(PhoneId, InputCmd), String> {
         ClientMsg::TypeText { phone, request, text } => {
             (phone, InputCmd::App(AppRequest::TypeText { request, text }))
         }
-        ClientMsg::SetWifi { phone, request, on } => (phone, InputCmd::App(AppRequest::SetWifi { request, on })),
+        ClientMsg::SetWifi { phone, request, on } => {
+            (phone, InputCmd::App(AppRequest::SetWifi { request, on }))
+        }
+        ClientMsg::SetClipboard { phone, request, text } => {
+            (phone, InputCmd::App(AppRequest::SetClipboard { request, text }))
+        }
         ClientMsg::Auth { .. }
         | ClientMsg::List
         | ClientMsg::Watch { .. }

@@ -97,6 +97,9 @@ pub enum AppRequest {
     /// Включить (`on`) или выключить Wi-Fi телефона (`WIFI_SET`, ответ `STATUS` 26). Ответ `"<request> <JSON>"`:
     /// `{"ok":true,"enabled":bool,"method":"api"|"quick_settings"|"already","ms"}` или `{"ok":false,"error","ms"}`.
     SetWifi { request: u32, on: bool },
+    /// Положить текст в буфер обмена телефона (`CLIPBOARD_SET`, ответ `STATUS` 27): те же правила текста, что у
+    /// `TypeText`. Ответ `"<request> <JSON>"`: `{"ok":true,"ms"}` или `{"ok":false,"error","ms"}`.
+    SetClipboard { request: u32, text: String },
 }
 
 impl AppRequest {
@@ -111,6 +114,7 @@ impl AppRequest {
             Self::HttpLocal { .. } => 24,
             Self::TypeText { .. } => 25,
             Self::SetWifi { .. } => 26,
+            Self::SetClipboard { .. } => 27,
         }
     }
 
@@ -123,7 +127,8 @@ impl AppRequest {
             | Self::IpCheck { request, .. }
             | Self::HttpLocal { request, .. }
             | Self::TypeText { request, .. }
-            | Self::SetWifi { request, .. } => *request,
+            | Self::SetWifi { request, .. }
+            | Self::SetClipboard { request, .. } => *request,
         }
     }
 }
