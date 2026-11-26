@@ -180,13 +180,21 @@ impl UiNode {
         let c = self.class.as_str();
         if c.ends_with("EditText") || c.ends_with("AutoCompleteTextView") {
             "field"
-        } else if self.checkable || c.ends_with("Switch") || c.ends_with("CheckBox") || c.ends_with("ToggleButton") {
+        } else if self.checkable
+            || c.ends_with("Switch")
+            || c.ends_with("CheckBox")
+            || c.ends_with("ToggleButton")
+        {
             "switch"
         } else if c.ends_with("Button") || self.clickable {
             "button"
         } else if c.ends_with("ImageView") || c.ends_with("ImageButton") {
             "image"
-        } else if self.scrollable || c.ends_with("RecyclerView") || c.ends_with("ListView") || c.ends_with("ScrollView") {
+        } else if self.scrollable
+            || c.ends_with("RecyclerView")
+            || c.ends_with("ListView")
+            || c.ends_with("ScrollView")
+        {
             "list"
         } else if c.ends_with("TextView") || !self.text.is_empty() {
             "text"
@@ -243,7 +251,10 @@ impl UiTree {
     pub fn elements(&self) -> Vec<&UiNode> {
         self.nodes
             .iter()
-            .filter(|n| n.visible(self) && (!n.text.is_empty() || !n.desc.is_empty() || !n.id.is_empty() || n.clickable))
+            .filter(|n| {
+                n.visible(self)
+                    && (!n.text.is_empty() || !n.desc.is_empty() || !n.id.is_empty() || n.clickable)
+            })
             .collect()
     }
 }
@@ -283,10 +294,16 @@ mod tests {
         let t = parse_dump(DUMP).unwrap();
         let by = |s: Selector| t.find(&s).len();
         assert_eq!(by(Selector { text: Some("Войти & продолжить".into()), ..Default::default() }), 1);
-        assert_eq!(by(Selector { text_contains: Some("ОЙТИ".into()), ignore_case: true, ..Default::default() }), 1);
+        assert_eq!(
+            by(Selector { text_contains: Some("ОЙТИ".into()), ignore_case: true, ..Default::default() }),
+            1
+        );
         assert_eq!(by(Selector { id: Some("login".into()), ..Default::default() }), 1);
         assert_eq!(by(Selector { id: Some("com.app:id/login".into()), ..Default::default() }), 1);
-        assert_eq!(by(Selector { class: Some("EditText".into()), focused: Some(true), ..Default::default() }), 1);
+        assert_eq!(
+            by(Selector { class: Some("EditText".into()), focused: Some(true), ..Default::default() }),
+            1
+        );
         assert_eq!(by(Selector { checked: Some(true), ..Default::default() }), 1);
         // варианты «или»
         let any = Selector {
@@ -315,7 +332,10 @@ mod tests {
 
     #[test]
     fn urls_are_taken_from_text() {
-        assert_eq!(first_url("смотри https://example.com/p/abc/. тут").as_deref(), Some("https://example.com/p/abc/"));
+        assert_eq!(
+            first_url("смотри https://example.com/p/abc/. тут").as_deref(),
+            Some("https://example.com/p/abc/")
+        );
         assert_eq!(first_url("нет ссылки"), None);
     }
 }

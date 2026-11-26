@@ -171,6 +171,15 @@ pub enum ClientMsg {
     SetBlocklist {
         packages: Vec<String>,
     },
+    /// Выход в сеть (`online`), локальный адрес и интерфейс.
+    NetworkInfo {
+        phone: u32,
+    },
+    /// Режим полёта.
+    SetAirplaneMode {
+        phone: u32,
+        on: bool,
+    },
     /// Мобильные данные.
     SetMobileData {
         phone: u32,

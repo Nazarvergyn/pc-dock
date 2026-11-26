@@ -392,7 +392,9 @@ impl Handler<ClientState> for Handle {
             ClientMsg::UiFind { phone, selector } => {
                 self.device_call(hub, client, id, phone, Ok(DeviceOp::UiFind { selector }))
             }
-            ClientMsg::UiElements { phone } => self.device_call(hub, client, id, phone, Ok(DeviceOp::UiElements)),
+            ClientMsg::UiElements { phone } => {
+                self.device_call(hub, client, id, phone, Ok(DeviceOp::UiElements))
+            }
             ClientMsg::UiAt { phone, x, y } => {
                 let op = if (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y) {
                     Ok(DeviceOp::UiAt { x, y })
@@ -401,7 +403,9 @@ impl Handler<ClientState> for Handle {
                 };
                 self.device_call(hub, client, id, phone, op)
             }
-            ClientMsg::UiFocused { phone } => self.device_call(hub, client, id, phone, Ok(DeviceOp::UiFocused)),
+            ClientMsg::UiFocused { phone } => {
+                self.device_call(hub, client, id, phone, Ok(DeviceOp::UiFocused))
+            }
             ClientMsg::WaitFor { phone, selector, timeout, gone } => {
                 let op = Ok(DeviceOp::WaitFor { selector, timeout: timeout.unwrap_or(10.0), gone });
                 self.device_call(hub, client, id, phone, op)
@@ -417,6 +421,12 @@ impl Handler<ClientState> for Handle {
                 if id.is_some() {
                     reply(ServerMsg::Ok);
                 }
+            }
+            ClientMsg::NetworkInfo { phone } => {
+                self.device_call(hub, client, id, phone, Ok(DeviceOp::NetworkInfo))
+            }
+            ClientMsg::SetAirplaneMode { phone, on } => {
+                self.device_call(hub, client, id, phone, Ok(DeviceOp::SetAirplane { on }))
             }
             ClientMsg::Button { phone, name } => {
                 let op = if super::device::button_keycode(&name).is_some() {
@@ -883,6 +893,8 @@ fn map_input(msg: ClientMsg) -> Result<(PhoneId, InputCmd), String> {
         | ClientMsg::StayAwake { .. }
         | ClientMsg::ScreenState { .. }
         | ClientMsg::Button { .. }
+        | ClientMsg::NetworkInfo { .. }
+        | ClientMsg::SetAirplaneMode { .. }
         | ClientMsg::LaunchApp { .. }
         | ClientMsg::ListApps { .. }
         | ClientMsg::ForegroundApp { .. }

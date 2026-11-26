@@ -12,5 +12,5 @@ pub mod ui;
 pub use device::{AdbDevice, DeviceBackend, DeviceOp};
 pub use files::{FileBackend, FileOptions, FileWriter};
 pub use protocol::{ClientMsg, ServerMsg};
-pub use ui::Selector;
 pub use server::{Serve, PROTOCOL_VERSION};
+pub use ui::Selector;

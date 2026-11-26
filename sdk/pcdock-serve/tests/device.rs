@@ -227,6 +227,8 @@ fn selectors_reach_the_backend_and_bad_ones_are_rejected() {
     assert_eq!(r["ev"], "Error");
     let r = c.ask(json!({"op": "UiAt", "phone": p, "x": 2.0, "y": 0.5}));
     assert_eq!(r["ev"], "Error");
-    let r = c.ask(json!({"op": "WaitFor", "phone": p, "selector": {"text": "Готово"}, "timeout": 3, "gone": true}));
+    let r = c.ask(
+        json!({"op": "WaitFor", "phone": p, "selector": {"text": "Готово"}, "timeout": 3, "gone": true}),
+    );
     assert_eq!(r["op"], "WaitFor");
 }

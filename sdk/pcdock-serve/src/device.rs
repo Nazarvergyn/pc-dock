@@ -14,29 +14,73 @@ use crate::ui::{parse_dump, Selector};
 pub enum DeviceOp {
     Info,
     Stats,
-    AppInfo { packages: Vec<String> },
-    ForceStop { package: String },
-    ClearAppData { package: String },
-    Uninstall { package: String, keep_data: bool },
-    Install { path: String, allow_downgrade: bool, sha256: Option<String> },
-    Logcat { lines: u32, package: Option<String>, level: Option<char> },
-    SetMobileData { on: bool },
-    StayAwake { on: bool },
+    AppInfo {
+        packages: Vec<String>,
+    },
+    ForceStop {
+        package: String,
+    },
+    ClearAppData {
+        package: String,
+    },
+    Uninstall {
+        package: String,
+        keep_data: bool,
+    },
+    Install {
+        path: String,
+        allow_downgrade: bool,
+        sha256: Option<String>,
+    },
+    Logcat {
+        lines: u32,
+        package: Option<String>,
+        level: Option<char>,
+    },
+    SetMobileData {
+        on: bool,
+    },
+    StayAwake {
+        on: bool,
+    },
     ScreenState,
-    Button { name: String },
-    LaunchApp { package: String, activity: Option<String> },
+    Button {
+        name: String,
+    },
+    LaunchApp {
+        package: String,
+        activity: Option<String>,
+    },
     /// `all`: все пакеты; иначе только те, у которых есть значок запуска.
-    ListApps { all: bool },
+    ListApps {
+        all: bool,
+    },
     /// Какое приложение сейчас на переднем плане.
     ForegroundApp,
     UiDump,
-    UiFind { selector: Selector },
+    UiFind {
+        selector: Selector,
+    },
     UiElements,
-    UiAt { x: f64, y: f64 },
+    UiAt {
+        x: f64,
+        y: f64,
+    },
     UiFocused,
     /// Ждать появления (`gone`: исчезновения) элемента, не дольше `timeout` секунд.
-    WaitFor { selector: Selector, timeout: f64, gone: bool },
-    TypeText { text: String },
+    WaitFor {
+        selector: Selector,
+        timeout: f64,
+        gone: bool,
+    },
+    TypeText {
+        text: String,
+    },
+    /// Есть ли выход в сеть и какой локальный адрес.
+    NetworkInfo,
+    SetAirplane {
+        on: bool,
+    },
 }
 
 impl DeviceOp {
@@ -65,6 +109,8 @@ impl DeviceOp {
             Self::UiFocused => "UiFocused",
             Self::WaitFor { .. } => "WaitFor",
             Self::TypeText { .. } => "TypeText",
+            Self::NetworkInfo => "NetworkInfo",
+            Self::SetAirplane { .. } => "SetAirplaneMode",
         }
     }
 }
@@ -360,6 +406,15 @@ pub fn parse_foreground(out: &str) -> Value {
     }
 }
 
+/// `ip route get 1.1.1.1`: `… dev rmnet0 src 10.1.2.3 …`.
+pub fn parse_route(out: &str) -> (Option<String>, Option<String>) {
+    let word = |key: &str| {
+        let mut it = out.split_whitespace();
+        it.find(|w| *w == key).and_then(|_| it.next()).map(str::to_string)
+    };
+    (word("src"), word("dev"))
+}
+
 // ---------- исполнение по ADB ----------
 
 impl AdbDevice {
@@ -508,7 +563,8 @@ impl DeviceBackend for AdbDevice {
                         return Err(out.trim().to_string());
                     }
                 } else {
-                    let out = self.sh(serial, &format!("monkey -p {package} -c android.intent.category.LAUNCHER 1"))?;
+                    let out = self
+                        .sh(serial, &format!("monkey -p {package} -c android.intent.category.LAUNCHER 1"))?;
                     if out.contains("No activities found") || out.contains("monkey aborted") {
                         return Err(format!("{package}: нет значка запуска или приложение не установлено"));
                     }
@@ -526,9 +582,9 @@ impl DeviceBackend for AdbDevice {
                 };
                 Ok(json!({ "packages": out }))
             }
-            DeviceOp::ForegroundApp => {
-                Ok(parse_foreground(&self.sh(serial, "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'")?))
-            }
+            DeviceOp::ForegroundApp => Ok(parse_foreground(
+                &self.sh(serial, "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'")?,
+            )),
             DeviceOp::UiDump => {
                 let tree = self.tree(serial)?;
                 Ok(json!({ "width": tree.width, "height": tree.height,
@@ -536,7 +592,9 @@ impl DeviceBackend for AdbDevice {
             }
             DeviceOp::UiFind { selector } => {
                 let tree = self.tree(serial)?;
-                Ok(json!({ "elements": tree.find(selector).iter().map(|n| n.to_json(&tree)).collect::<Vec<_>>() }))
+                Ok(
+                    json!({ "elements": tree.find(selector).iter().map(|n| n.to_json(&tree)).collect::<Vec<_>>() }),
+                )
             }
             DeviceOp::UiElements => {
                 let tree = self.tree(serial)?;
@@ -549,12 +607,34 @@ impl DeviceBackend for AdbDevice {
             }
             DeviceOp::UiFocused => {
                 let tree = self.tree(serial)?;
-                let sel = Selector { focused: Some(true), class: Some("EditText".into()), ..Default::default() };
+                let sel =
+                    Selector { focused: Some(true), class: Some("EditText".into()), ..Default::default() };
                 Ok(json!({ "element": tree.find(&sel).first().map(|n| n.to_json(&tree)) }))
             }
             DeviceOp::WaitFor { selector, timeout, gone } => self.wait_for(serial, selector, *timeout, *gone),
             DeviceOp::TypeText { text } => {
                 self.sh(serial, &format!("input text {}", input_text_arg(text)?))?;
+                Ok(json!({}))
+            }
+            DeviceOp::NetworkInfo => {
+                let ping = self.sh(serial, "ping -c 1 -W 2 1.1.1.1")?;
+                let route = self.sh(serial, "ip route get 1.1.1.1").unwrap_or_default();
+                let (ip, iface) = parse_route(&route);
+                Ok(json!({ "online": ping.contains(" 1 received") || ping.contains("1 packets received"),
+                           "local_ip": ip, "interface": iface }))
+            }
+            DeviceOp::SetAirplane { on } => {
+                let out = self.sh(
+                    serial,
+                    if *on {
+                        "cmd connectivity airplane-mode enable"
+                    } else {
+                        "cmd connectivity airplane-mode disable"
+                    },
+                )?;
+                if out.contains("Exception") || out.contains("Error") {
+                    return Err(out.trim().to_string());
+                }
                 Ok(json!({}))
             }
             DeviceOp::Button { name } => {
@@ -649,9 +729,20 @@ mod tests {
     }
 
     #[test]
+    fn route_is_parsed() {
+        assert_eq!(
+            parse_route("1.1.1.1 via 10.0.0.1 dev rmnet0 src 10.1.2.3 uid 2000"),
+            (Some("10.1.2.3".into()), Some("rmnet0".into()))
+        );
+        assert_eq!(parse_route(""), (None, None));
+    }
+
+    #[test]
     fn blocklist_matches_names_and_masks() {
         let l = vec!["com.bad.app".to_string(), "org.evil.*".to_string(), "*.cloner".to_string()];
-        assert!(is_blocked(&l, "com.bad.app") && is_blocked(&l, "org.evil.x") && is_blocked(&l, "a.b.cloner"));
+        assert!(
+            is_blocked(&l, "com.bad.app") && is_blocked(&l, "org.evil.x") && is_blocked(&l, "a.b.cloner")
+        );
         assert!(!is_blocked(&l, "com.bad.app2") && !is_blocked(&l, "org.good") && !is_blocked(&[], "x.y"));
     }
 

@@ -17,6 +17,9 @@
 //! Команды над телефоном (работают по ADB): `device_info()`, `stats()`, `app_info(pkg|{pkgs})`, `installed(pkg)`, `force_stop(pkg)`,
 //! `clear_data(pkg)`, `uninstall(pkg, opts)`, `install_apk(path, opts)`, `logcat(opts)`, `mobile_data(on)`, `stay_awake(on)`,
 //! `screen()`, `button(name)`.
+//! Экран: `launch(пакет, {activity})`, `apps({all})`, `foreground()`, `ui()`, `find(цель)`, `find_one(цель)`, `wait_for(цель, сек)`,
+//! `wait_gone(цель, сек)`, `tap_on(цель, {timeout})`, `type_text(текст)`, `type_into(цель, текст)`, `focused()`, `element_at(x, y)`,
+//! `network()`, `airplane(on)`. Цель: строка (`"Текст"`, `"~часть"`, `"id:имя"`, `"desc:подпись"`, варианты через `|`) или таблица-селектор.
 //! Кадр (`frame`): `seq`, `pts`, `bytes`, `width`, `height`, `save(name)`.
 
 use std::cell::RefCell;
@@ -367,6 +370,88 @@ struct FrameHandle {
     st: Arc<State>,
 }
 
+/// Значение Lua в JSON (таблица-последовательность становится массивом, остальные объектами).
+fn lua_to_json(v: &Value, depth: usize) -> mlua::Result<Json> {
+    if depth > 16 {
+        return Err(mlua::Error::runtime("таблица слишком глубокая"));
+    }
+    Ok(match v {
+        Value::Nil => Json::Null,
+        Value::Boolean(b) => json!(b),
+        Value::Integer(i) => json!(i),
+        Value::Number(n) => json!(n),
+        Value::String(s) => json!(s.to_str()?.to_string()),
+        Value::Table(t) => {
+            let len = t.raw_len();
+            if len > 0 {
+                Json::Array(
+                    (1..=len)
+                        .map(|i| lua_to_json(&t.raw_get::<Value>(i)?, depth + 1))
+                        .collect::<mlua::Result<_>>()?,
+                )
+            } else {
+                let mut m = serde_json::Map::new();
+                for pair in t.pairs::<String, Value>() {
+                    let (k, val) = pair?;
+                    m.insert(k, lua_to_json(&val, depth + 1)?);
+                }
+                Json::Object(m)
+            }
+        }
+        _ => return Err(mlua::Error::runtime("значение нельзя передать телефону")),
+    })
+}
+
+/// Цель поиска: строка (`Текст`, `~часть текста`, `id:имя`, `desc:подпись`, `desc~часть`, варианты через `|`) или готовый селектор.
+fn target_json(v: &Value) -> mlua::Result<Json> {
+    fn one(s: &str) -> Json {
+        let s = s.trim();
+        if let Some(v) = s.strip_prefix("id:") {
+            json!({"id": v.trim()})
+        } else if let Some(v) = s.strip_prefix("desc~") {
+            json!({"desc_contains": v.trim()})
+        } else if let Some(v) = s.strip_prefix("desc:") {
+            json!({"desc": v.trim()})
+        } else if let Some(v) = s.strip_prefix('~') {
+            json!({"text_contains": v.trim()})
+        } else {
+            json!({"text": s})
+        }
+    }
+    match v {
+        Value::String(s) => {
+            let s = s.to_str()?;
+            let alts: Vec<Json> = s.split('|').filter(|a| !a.trim().is_empty()).map(one).collect();
+            match alts.len() {
+                0 => Err(mlua::Error::runtime("цель поиска пустая")),
+                1 => Ok(alts.into_iter().next().unwrap()),
+                _ => Ok(json!({ "any": alts })),
+            }
+        }
+        Value::Table(t) => lua_to_json(&Value::Table(t.clone()), 0),
+        _ => Err(mlua::Error::runtime("цель поиска: строка или таблица")),
+    }
+}
+
+/// Ждёт появления или исчезновения элемента кусками по 2 с, чтобы остановка прогона срабатывала вовремя.
+fn wait_target(t: &PhoneHandle, target: &Value, timeout: f64, gone: bool) -> mlua::Result<(bool, Json)> {
+    let sel = target_json(target)?;
+    let end = Instant::now() + Duration::from_secs_f64(timeout.clamp(0.0, 600.0));
+    loop {
+        let left = end.saturating_duration_since(Instant::now()).as_secs_f64();
+        let r = device_json(
+            t,
+            json!({"op": "WaitFor", "selector": sel, "timeout": left.min(2.0), "gone": gone}),
+        )?;
+        if r["ok"].as_bool() == Some(true) {
+            return Ok((true, r["elements"].clone()));
+        }
+        if left <= 2.0 {
+            return Ok((false, r["elements"].clone()));
+        }
+    }
+}
+
 /// Операция над телефоном; ошибка телефона или демона становится ошибкой Lua.
 fn device_json(t: &PhoneHandle, msg: Json) -> mlua::Result<Json> {
     t.st.check_alive()?;
@@ -533,6 +618,65 @@ impl UserData for PhoneHandle {
         methods.add_method("wake", |_, t, ()| {
             t.st.check_alive()?;
             t.st.backend.wake(t.id).map_err(mlua::Error::runtime)
+        });
+        methods.add_method("launch", |_, t, (pkg, o): (String, Option<Table>)| {
+            device_json(t, json!({"op": "LaunchApp", "package": pkg, "activity": opt_str(&o, "activity")}))
+                .map(|_| ())
+        });
+        methods.add_method("apps", |lua, t, o: Option<Table>| {
+            let r = device_json(t, json!({"op": "ListApps", "all": opt_bool(&o, "all")}))?;
+            json_to_lua(lua, &r["packages"])
+        });
+        methods.add_method("foreground", |lua, t, ()| device_call(lua, t, json!({"op": "ForegroundApp"})));
+        methods.add_method("ui", |lua, t, ()| {
+            let r = device_json(t, json!({"op": "UiElements"}))?;
+            json_to_lua(lua, &r["elements"])
+        });
+        methods.add_method("find", |lua, t, target: Value| {
+            let r = device_json(t, json!({"op": "UiFind", "selector": target_json(&target)?}))?;
+            json_to_lua(lua, &r["elements"])
+        });
+        methods.add_method("find_one", |lua, t, target: Value| {
+            let r = device_json(t, json!({"op": "UiFind", "selector": target_json(&target)?}))?;
+            json_to_lua(lua, &r["elements"][0])
+        });
+        methods.add_method("wait_for", |lua, t, (target, timeout): (Value, Option<f64>)| {
+            let (ok, els) = wait_target(t, &target, timeout.unwrap_or(10.0), false)?;
+            if ok {
+                json_to_lua(lua, &els[0])
+            } else {
+                Ok(Value::Nil)
+            }
+        });
+        methods.add_method("wait_gone", |_, t, (target, timeout): (Value, Option<f64>)| {
+            wait_target(t, &target, timeout.unwrap_or(10.0), true).map(|(ok, _)| ok)
+        });
+        methods.add_method("tap_on", |lua, t, (target, o): (Value, Option<Table>)| {
+            let timeout = opt_secs(&o, "timeout", 0.0).as_secs_f64();
+            let (ok, els) = wait_target(t, &target, timeout, false)?;
+            if !ok {
+                return Ok(Value::Nil);
+            }
+            let (x, y) =
+                (els[0]["x"].as_f64().unwrap_or(0.5) as f32, els[0]["y"].as_f64().unwrap_or(0.5) as f32);
+            t.touch(0, x, y, &o)?;
+            t.touch(2, x, y, &o)?;
+            json_to_lua(lua, &els[0])
+        });
+        methods.add_method("type_text", |_, t, text: String| {
+            device_json(t, json!({"op": "TypeText", "text": text})).map(|_| ())
+        });
+        methods.add_method("focused", |lua, t, ()| {
+            let r = device_json(t, json!({"op": "UiFocused"}))?;
+            json_to_lua(lua, &r["element"])
+        });
+        methods.add_method("element_at", |lua, t, (x, y): (f64, f64)| {
+            let r = device_json(t, json!({"op": "UiAt", "x": x, "y": y}))?;
+            json_to_lua(lua, &r["element"])
+        });
+        methods.add_method("network", |lua, t, ()| device_call(lua, t, json!({"op": "NetworkInfo"})));
+        methods.add_method("airplane", |_, t, on: bool| {
+            device_json(t, json!({"op": "SetAirplaneMode", "on": on})).map(|_| ())
         });
         methods.add_method("device_info", |lua, t, ()| device_call(lua, t, json!({"op": "DeviceInfo"})));
         methods.add_method("stats", |lua, t, ()| device_call(lua, t, json!({"op": "DeviceStats"})));
@@ -1162,6 +1306,8 @@ fn install(lua: &Lua, st: &Arc<State>, cfg: &RunConfig, hooks: &Rc<RefCell<Hooks
             Ok(PhoneHandle { id, st: s.clone() })
         })?,
     )?;
+    // Стандартная библиотека сценариев (retry, find_any, tap_any, human_tap, net_restart, ...).
+    lua.load(include_str!("std.lua")).set_name("std.lua").exec()?;
     Ok(())
 }
 
@@ -1277,6 +1423,21 @@ mod tests {
                     .map(|p| json!({"package": p, "installed": p == "com.have.app", "version_code": 7}))
                     .collect::<Vec<_>>()})),
                 "Logcat" => Ok(json!({"text": "line1\nline2"})),
+                "UiFind" => {
+                    let sel = msg["selector"].to_string();
+                    if sel.contains("Войти") {
+                        Ok(json!({"elements": [{"text": "Войти", "x": 0.5, "y": 0.6}]}))
+                    } else {
+                        Ok(json!({"elements": []}))
+                    }
+                }
+                "WaitFor" => {
+                    let found = msg["selector"].to_string().contains("Войти");
+                    let gone = msg["gone"].as_bool() == Some(true);
+                    Ok(json!({"ok": found != gone,
+                              "elements": if found { json!([{"text": "Войти", "x": 0.5, "y": 0.6}]) } else { json!([]) }}))
+                }
+                "NetworkInfo" => Ok(json!({"online": true, "local_ip": "10.0.0.5"})),
                 "StayAwake" => Ok(json!({"previous": "0"})),
                 "InstallApk" => Err("Failure [INSTALL_FAILED_VERSION_DOWNGRADE]".into()),
                 _ => Ok(json!({})),
@@ -1461,6 +1622,46 @@ mod tests {
         assert_eq!(r.status, "error");
         assert!(r.tests[0].error.as_ref().unwrap().contains("вышло время"), "{:?}", r.tests[0].error);
         assert!(t0.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn targets_and_standard_library_work() {
+        assert_eq!(target_json(&Value::Nil).is_err(), true);
+        let fake = Fake::new();
+        let (r, _) = run(
+            r#"
+            local p = phones()[1]
+            -- цели: строка с вариантами и таблица
+            local el = p:find_one("Нет такого|Войти")
+            assert.eq(el.text, "Войти")
+            assert.eq(p:find_one({text = "Войти"}).y, 0.6)
+            assert.eq(#p:find("Пусто"), 0)
+            -- ожидание и нажатие по цели
+            assert.truthy(p:wait_for("Войти", 1))
+            assert.falsy(p:wait_for("Пусто", 0))
+            assert.truthy(p:wait_gone("Пусто", 1))
+            assert.truthy(p:tap_on("Войти"))
+            assert.falsy(p:tap_on("Пусто"))
+            -- стандартная библиотека
+            local found, idx = find_any(p, {"Пусто", "Войти"})
+            assert.eq(idx, 2)
+            assert.truthy(tap_any(p, {"Войти"}))
+            assert.eq(first_url("смотри https://example.com/a/b. вот"), "https://example.com/a/b")
+            local n = 0
+            assert.eq(retry(3, 0, function() n = n + 1; return n == 2 and "ok" end), "ok")
+            assert.truthy(wait_online(p, 1))
+            human_tap(p, 0.5, 0.5)
+            local res = net_restart(p, {attempts = 1, off_time = 0})
+            assert.eq(res.attempts, 1)
+            assert.eq(res.old_ip, "10.0.0.5")
+            "#,
+            &fake,
+        );
+        assert_eq!(r.status, "passed", "{r:?}");
+        let log = fake.log();
+        assert!(log.iter().any(|l| l.contains(r#""any""#) && l.contains("Нет такого")));
+        assert!(log.iter().any(|l| l.contains(r#""op":"SetMobileData""#) && l.contains("false")));
+        assert!(log.iter().any(|l| l.starts_with("touch 1 0 0.50 0.60")), "касание по центру найденного");
     }
 
     #[test]
