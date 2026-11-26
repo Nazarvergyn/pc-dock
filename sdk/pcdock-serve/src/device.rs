@@ -218,7 +218,7 @@ pub fn parse_package(name: &str, out: &str) -> Value {
     }
     let field = |key: &str| -> Option<String> {
         out.lines().find_map(|l| {
-            l.trim().split_whitespace().find_map(|w| w.strip_prefix(key).map(|v| v.to_string()))
+            l.split_whitespace().find_map(|w| w.strip_prefix(key).map(|v| v.to_string()))
         })
     };
     let version_code = field("versionCode=").and_then(|v| v.parse::<u64>().ok());
