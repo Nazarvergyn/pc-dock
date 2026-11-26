@@ -1626,7 +1626,7 @@ mod tests {
 
     #[test]
     fn targets_and_standard_library_work() {
-        assert_eq!(target_json(&Value::Nil).is_err(), true);
+        assert!(target_json(&Value::Nil).is_err());
         let fake = Fake::new();
         let (r, _) = run(
             r#"
