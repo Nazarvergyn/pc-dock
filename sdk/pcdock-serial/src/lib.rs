@@ -196,6 +196,10 @@ impl<S: Read + Write + Send> PhoneLink for StreamLink<S> {
                 s.wake();
                 Ok(())
             }
+            InputCmd::Command { req, body } => {
+                s.command(*req, body);
+                Ok(())
+            }
             InputCmd::SetStream { video, audio, max_fps } => {
                 s.set_stream(SetStream {
                     video: *video,

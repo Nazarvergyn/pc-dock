@@ -24,7 +24,7 @@ use pcdock_farm::{Farm, FarmEvent};
 use pcdock_net::{Handler, Hub};
 use serde_json::{json, Value};
 
-use super::device::{check_package, is_blocked, DeviceBackend, DeviceOp};
+use super::device::{check_package, companion_body, is_blocked, DeviceBackend, DeviceOp};
 use super::files::{FileOptions, DEFAULT_ROOTS, MAX_FILE};
 use super::protocol::{encode_audio, encode_video, ClientMsg, ServerMsg, PKG_AUDIO, PKG_FILE, PKG_VIDEO};
 
@@ -67,6 +67,9 @@ struct Shared {
     blocklist: Mutex<Vec<String>>,
     /// Последние ошибки (не больше `MAX_ERRORS`): для `Health`.
     errors: Mutex<std::collections::VecDeque<Value>>,
+    /// Команды компаньону, ждущие ответа: номер запроса → кому отдать `(ok, тело)`.
+    pending: Mutex<HashMap<u32, SyncSender<(bool, String)>>>,
+    next_req: AtomicU32,
     next_transfer: AtomicU32,
 }
 
@@ -121,6 +124,8 @@ impl Serve {
             device,
             blocklist: Mutex::new(Vec::new()),
             errors: Mutex::new(Default::default()),
+            pending: Mutex::new(HashMap::new()),
+            next_req: AtomicU32::new(1),
             next_transfer: AtomicU32::new(1),
         });
         let hub = Hub::new(Handle { shared: shared.clone() }, token);
@@ -158,6 +163,12 @@ impl Serve {
                         // Телефон (пере)подключился и снова не знает, что от него нужно.
                         shared.refresh_demand(&hub, *phone, true);
                     }
+                    if let FarmEvent::CommandResult { req, ok, body, .. } = ev {
+                        if let Some(tx) = shared.pending.lock().unwrap().remove(&req) {
+                            let _ = tx.send((ok, body));
+                        }
+                        continue;
+                    }
                     match &ev {
                         FarmEvent::LinkDown { phone, detail } => {
                             shared.note_error(*phone, "link_down", detail)
@@ -186,6 +197,27 @@ impl Serve {
 const MAX_ERRORS: usize = 100;
 
 impl Shared {
+    /// Команда компаньону на телефоне и ожидание ответа (до 15 с).
+    fn companion_call(&self, phone: PhoneId, body: Value) -> Result<Value, String> {
+        let req = self.next_req.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        self.pending.lock().unwrap().insert(req, tx);
+        let sent =
+            self.daemon.lock().unwrap().command(phone, InputCmd::Command { req, body: body.to_string() });
+        if let Err(e) = sent {
+            self.pending.lock().unwrap().remove(&req);
+            return Err(e);
+        }
+        match rx.recv_timeout(Duration::from_secs(15)) {
+            Ok((true, text)) => serde_json::from_str(&text).map_err(|e| format!("ответ компаньона: {e}")),
+            Ok((false, text)) => Err(text),
+            Err(_) => {
+                self.pending.lock().unwrap().remove(&req);
+                Err("компаньон на телефоне не ответил (приложение не запущено или старая версия)".into())
+            }
+        }
+    }
+
     /// Запоминает ошибку для `Health`.
     fn note_error(&self, phone: PhoneId, kind: &str, detail: &str) {
         let at = std::time::SystemTime::now()
@@ -555,7 +587,7 @@ impl Handle {
         let Some(backend) = self.shared.device.clone() else {
             return fail("команды над телефоном выключены (pcdockd --no-device-ops)".into());
         };
-        let serial = match self
+        let info = match self
             .shared
             .daemon
             .lock()
@@ -564,11 +596,27 @@ impl Handle {
             .into_iter()
             .find(|i| i.id == phone)
             .ok_or_else(|| format!("нет трубки {phone}"))
-            .and_then(|i| i.serial.ok_or("у телефона неизвестен серийник: нужен ADB".to_string()))
         {
-            Ok(s) => s,
+            Ok(i) => i,
             Err(e) => return fail(e),
         };
+        // Буфер обмена по ADB недоступен; без серийника (AOA) ADB тоже нет: идём через компаньона на телефоне.
+        let via_companion =
+            matches!(op, DeviceOp::GetClipboard | DeviceOp::SetClipboard { .. }) || info.serial.is_none();
+        let companion = if via_companion { companion_body(&op) } else { None };
+        if via_companion && companion.is_none() && info.serial.is_none() {
+            return fail("у телефона неизвестен серийник: нужен ADB (компаньон эту команду не умеет)".into());
+        }
+        if companion.is_some() && info.state != PhoneState::Ready {
+            let hint = info.state.hint();
+            return fail(format!(
+                "компаньон недоступен: телефон в состоянии {}{}{}",
+                state_name(info.state),
+                if hint.is_empty() { "" } else { ". " },
+                hint
+            ));
+        }
+        let serial = info.serial.clone().unwrap_or_default();
         let roots = match &self.shared.files {
             Some(f) => f.roots.clone(),
             None => DEFAULT_ROOTS.iter().map(|s| s.to_string()).collect(),
@@ -576,20 +624,26 @@ impl Handle {
         let hub = hub.clone();
         thread::Builder::new()
             .name(format!("device-{}", op.name()))
-            .spawn(move || match backend.run(&serial, &op, &roots) {
-                Ok(mut data) => {
-                    if matches!(op, DeviceOp::ForegroundApp) {
-                        let blocked = data["package"]
-                            .as_str()
-                            .is_some_and(|p| is_blocked(&shared.blocklist.lock().unwrap(), p));
-                        data["blocked"] = json!(blocked);
+            .spawn(move || {
+                let result = match companion {
+                    Some(body) => shared.companion_call(phone, body),
+                    None => backend.run(&serial, &op, &roots),
+                };
+                match result {
+                    Ok(mut data) => {
+                        if matches!(op, DeviceOp::ForegroundApp) {
+                            let blocked = data["package"]
+                                .as_str()
+                                .is_some_and(|p| is_blocked(&shared.blocklist.lock().unwrap(), p));
+                            data["blocked"] = json!(blocked);
+                        }
+                        let msg = ServerMsg::DeviceResult { phone, op: op.name().to_string(), data };
+                        hub.reply(client, id, to_value(&msg));
                     }
-                    let msg = ServerMsg::DeviceResult { phone, op: op.name().to_string(), data };
-                    hub.reply(client, id, to_value(&msg));
-                }
-                Err(e) => {
-                    shared.note_error(phone, op.name(), &e);
-                    hub.error(client, id, e)
+                    Err(e) => {
+                        shared.note_error(phone, op.name(), &e);
+                        hub.error(client, id, e)
+                    }
                 }
             })
             .expect("не встал поток операции над телефоном");
@@ -883,8 +937,8 @@ fn map_daemon_event(ev: FarmEvent) -> (PhoneId, ServerMsg) {
             (phone, ServerMsg::State { phone, state: state_name(state).into(), detail })
         }
         FarmEvent::Lost { phone } => (phone, ServerMsg::Lost { phone }),
-        FarmEvent::Video { .. } | FarmEvent::Audio { .. } => {
-            unreachable!("видео и звук идут бинарными пакетами")
+        FarmEvent::Video { .. } | FarmEvent::Audio { .. } | FarmEvent::CommandResult { .. } => {
+            unreachable!("видео, звук и ответы компаньона идут не через эту функцию")
         }
     }
 }

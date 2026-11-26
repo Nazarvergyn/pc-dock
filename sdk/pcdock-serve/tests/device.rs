@@ -186,7 +186,7 @@ fn disabled_backend_unknown_phone_and_missing_serial_are_errors() {
     let mut c = Conn::open(serve(None, Some(Arc::new(Fake::default()))));
     let p = phone_id(&mut c);
     let r = c.ask(json!({"op": "DeviceInfo", "phone": p}));
-    assert!(r["detail"].as_str().unwrap().contains("серийник"), "{r}");
+    assert!(r["detail"].as_str().unwrap().contains("компаньон"), "{r}");
 }
 
 #[test]

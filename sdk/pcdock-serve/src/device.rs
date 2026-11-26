@@ -200,6 +200,26 @@ pub fn button_keycode(name: &str) -> Option<&'static str> {
     })
 }
 
+/// Команда для компаньона на телефоне (работает без ADB): JSON `{"op": …}`. `None`: компаньон эту операцию не умеет.
+pub fn companion_body(op: &DeviceOp) -> Option<Value> {
+    Some(match op {
+        DeviceOp::Info => json!({"op": "Info"}),
+        DeviceOp::LaunchApp { package, activity } => {
+            json!({"op": "LaunchApp", "package": package, "activity": activity})
+        }
+        DeviceOp::ForceStop { package } => json!({"op": "ForceStop", "package": package}),
+        DeviceOp::ListApps { all } => json!({"op": "ListApps", "all": all}),
+        DeviceOp::AppInfo { packages } => json!({"op": "AppInfo", "packages": packages}),
+        DeviceOp::ForegroundApp => json!({"op": "ForegroundApp"}),
+        DeviceOp::GetClipboard => json!({"op": "GetClipboard"}),
+        DeviceOp::SetClipboard { text } => json!({"op": "SetClipboard", "text": text}),
+        DeviceOp::Button { name } => json!({"op": "Button", "name": name}),
+        DeviceOp::ScreenState => json!({"op": "ScreenState"}),
+        DeviceOp::NetworkInfo => json!({"op": "NetworkInfo"}),
+        _ => return None,
+    })
+}
+
 // ---------- разбор вывода команд (без телефона, проверяется тестами) ----------
 
 /// Вывод `getprop`: строки `[ключ]: [значение]`.

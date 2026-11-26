@@ -67,6 +67,13 @@ pub enum FarmEvent {
         code: u16,
         detail: String,
     },
+    /// Ответ компаньона на команду.
+    CommandResult {
+        phone: PhoneId,
+        req: u32,
+        ok: bool,
+        body: String,
+    },
     PeerSilent {
         phone: PhoneId,
     },
@@ -733,6 +740,7 @@ impl Farm {
                 | FarmEvent::AudioConfig { phone, .. }
                 | FarmEvent::Audio { phone, .. }
                 | FarmEvent::Status { phone, .. }
+                | FarmEvent::CommandResult { phone, .. }
                 | FarmEvent::PeerSilent { phone }
                 | FarmEvent::Malformed { phone, .. }
                 | FarmEvent::Disconnected { phone, .. }
@@ -935,6 +943,7 @@ fn map_event(id: PhoneId, ev: Event) -> FarmEvent {
         }
         Event::Audio(f) => FarmEvent::Audio { phone: id, pts_us: f.pts_us, data: f.data },
         Event::Status(s) => FarmEvent::Status { phone: id, code: s.code, detail: s.detail },
+        Event::CommandResult(r) => FarmEvent::CommandResult { phone: id, req: r.req, ok: r.ok, body: r.body },
         Event::PeerSilent => FarmEvent::PeerSilent { phone: id },
         Event::Malformed(detail) => FarmEvent::Malformed { phone: id, detail },
         Event::Disconnected(reason) => FarmEvent::Disconnected { phone: id, reason: format!("{reason:?}") },
