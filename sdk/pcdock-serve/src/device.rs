@@ -103,6 +103,11 @@ pub enum DeviceOp {
     CompanionPermissions,
     /// Перезапустить приложение-компаньон (остановка и запуск главного окна).
     CompanionRestart,
+    /// Установить APK компаньона, выдать права и запустить.
+    CompanionInstall {
+        path: String,
+        sha256: Option<String>,
+    },
 }
 
 /// Пакет приложения-компаньона на телефоне.
@@ -144,6 +149,7 @@ impl DeviceOp {
             Self::PublicIp => "PublicIp",
             Self::CompanionPermissions => "CompanionPermissions",
             Self::CompanionRestart => "CompanionRestart",
+            Self::CompanionInstall { .. } => "CompanionInstall",
         }
     }
 }
@@ -799,6 +805,14 @@ impl DeviceBackend for AdbDevice {
                     }
                 }
                 Ok(json!({ "granted": done, "failed": failed }))
+            }
+            DeviceOp::CompanionInstall { path, sha256 } => {
+                let install =
+                    DeviceOp::Install { path: path.clone(), allow_downgrade: true, sha256: sha256.clone() };
+                self.run(serial, &install, roots)?;
+                let perms = self.run(serial, &DeviceOp::CompanionPermissions, roots)?;
+                self.run(serial, &DeviceOp::CompanionRestart, roots)?;
+                Ok(perms)
             }
             DeviceOp::CompanionRestart => {
                 self.sh(serial, &format!("am force-stop {COMPANION_PACKAGE}"))?;

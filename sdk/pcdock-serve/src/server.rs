@@ -1109,6 +1109,7 @@ fn map_input(msg: ClientMsg) -> Result<(PhoneId, InputCmd), String> {
         | ClientMsg::PublicIp { .. }
         | ClientMsg::CompanionPermissions { .. }
         | ClientMsg::CompanionRestart { .. }
+        | ClientMsg::CompanionInstall { .. }
         | ClientMsg::SetAirplaneMode { .. }
         | ClientMsg::LaunchApp { .. }
         | ClientMsg::ListApps { .. }

@@ -805,6 +805,13 @@ impl UserData for PhoneHandle {
         methods.add_method("companion_permissions", |lua, t, ()| {
             device_call(lua, t, json!({"op": "CompanionPermissions"}))
         });
+        methods.add_method("companion_install", |lua, t, (path, o): (String, Option<Table>)| {
+            device_call(
+                lua,
+                t,
+                json!({"op": "CompanionInstall", "path": path, "sha256": opt_str(&o, "sha256")}),
+            )
+        });
         methods.add_method("companion_restart", |_, t, ()| {
             device_json(t, json!({"op": "CompanionRestart"})).map(|_| ())
         });

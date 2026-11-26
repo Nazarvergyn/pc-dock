@@ -215,6 +215,13 @@ pub enum ClientMsg {
     CompanionPermissions {
         phone: u32,
     },
+    /// Установить APK компаньона (путь на телефоне), выдать права и запустить. Ответ как у `CompanionPermissions`.
+    CompanionInstall {
+        phone: u32,
+        path: String,
+        #[serde(default)]
+        sha256: Option<String>,
+    },
     /// Перезапустить приложение-компаньон на телефоне.
     CompanionRestart {
         phone: u32,
