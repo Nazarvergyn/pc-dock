@@ -87,6 +87,12 @@ end)
 | `p:type(text)` | набор латиницы, цифр и пробела |
 | `p:scroll(ticks)`, `p:scroll_h(ticks)` | колесо |
 | `p:wake()`, `p:enable(kind, on)` | побудка; включить/выключить устройство (`"touch"`, `"mouse"`, `"keyboard"`) |
+| `p:device_info()`, `p:stats()` | сведения о телефоне (модель, Android, ABI, экран); батарея, процессор, память |
+| `p:app_info(пакет)` / `p:app_info({пакеты})`, `p:installed(пакет)` | версия, включено ли; установлено ли |
+| `p:force_stop(пакет)`, `p:clear_data(пакет)`, `p:uninstall(пакет, {keep_data})` | остановить, стереть данные, удалить |
+| `p:install_apk(путь_на_телефоне, {allow_downgrade, sha256})` | установить APK (его кладёт на телефон `FilePut`); ошибка несёт причину |
+| `p:logcat({lines, package, level})` | текст журнала |
+| `p:mobile_data(on)`, `p:stay_awake(on)`, `p:screen()`, `p:button(имя)` | мобильные данные; «не гасить экран» (возвращает `previous`); `on`, `locked`; кнопка (`back`, `home`, `recents`, …) |
 | `p:frame(opts)` | кадр экрана; `opts`: `timeout` (5 с), `fresh` (дождаться нового) |
 | `p:wait_change(timeout)` | ждёт, пока картинка изменится; возвращает кадр или `nil` |
 | `p:push(dest, data, opts)`, `p:pull(src, max)`, `p:ls(path)`, `p:rm(path)` | файлы на телефоне (нужен `pcdockd --files`); `opts.media` |

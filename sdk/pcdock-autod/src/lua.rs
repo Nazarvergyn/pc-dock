@@ -14,6 +14,9 @@
 //! Телефон (`phone`): `id`, `state()`, `info()`, `wait_ready(timeout)`, `tap(x, y, opts)`, `swipe(x1, y1, x2, y2, opts)`,
 //! `touch(phase, x, y, opts)`, `key(name|usage, opts)`, `type(text)`, `scroll(ticks)`, `scroll_h(ticks)`, `wake()`,
 //! `enable(kind, on)`, `frame(opts)`, `wait_frame(opts)`, `wait_change(timeout)`. Координаты: доли экрана 0..1.
+//! Команды над телефоном (работают по ADB): `device_info()`, `stats()`, `app_info(pkg|{pkgs})`, `installed(pkg)`, `force_stop(pkg)`,
+//! `clear_data(pkg)`, `uninstall(pkg, opts)`, `install_apk(path, opts)`, `logcat(opts)`, `mobile_data(on)`, `stay_awake(on)`,
+//! `screen()`, `button(name)`.
 //! Кадр (`frame`): `seq`, `pts`, `bytes`, `width`, `height`, `save(name)`.
 
 use std::cell::RefCell;
@@ -275,6 +278,14 @@ fn opt_f32(t: &Option<Table>, key: &str) -> Option<f32> {
     t.as_ref().and_then(|t| t.get::<Option<f64>>(key).ok().flatten()).map(|x| x as f32)
 }
 
+fn opt_str(t: &Option<Table>, key: &str) -> Option<String> {
+    t.as_ref().and_then(|t| t.get::<Option<String>>(key).ok().flatten())
+}
+
+fn opt_bool(t: &Option<Table>, key: &str) -> bool {
+    t.as_ref().and_then(|t| t.get::<Option<bool>>(key).ok().flatten()).unwrap_or(false)
+}
+
 fn opt_secs(t: &Option<Table>, key: &str, default: f64) -> Duration {
     Duration::from_secs_f64(
         t.as_ref().and_then(|t| t.get::<Option<f64>>(key).ok().flatten()).unwrap_or(default).max(0.0),
@@ -354,6 +365,16 @@ struct FrameHandle {
     f: Frame,
     phone: u32,
     st: Arc<State>,
+}
+
+/// Операция над телефоном; ошибка телефона или демона становится ошибкой Lua.
+fn device_json(t: &PhoneHandle, msg: Json) -> mlua::Result<Json> {
+    t.st.check_alive()?;
+    t.st.backend.device(t.id, msg).map_err(mlua::Error::runtime)
+}
+
+fn device_call(lua: &Lua, t: &PhoneHandle, msg: Json) -> mlua::Result<Value> {
+    json_to_lua(lua, &device_json(t, msg)?)
 }
 
 fn info_table(lua: &Lua, i: &PhoneInfo) -> mlua::Result<Table> {
@@ -512,6 +533,68 @@ impl UserData for PhoneHandle {
         methods.add_method("wake", |_, t, ()| {
             t.st.check_alive()?;
             t.st.backend.wake(t.id).map_err(mlua::Error::runtime)
+        });
+        methods.add_method("device_info", |lua, t, ()| device_call(lua, t, json!({"op": "DeviceInfo"})));
+        methods.add_method("stats", |lua, t, ()| device_call(lua, t, json!({"op": "DeviceStats"})));
+        methods.add_method("app_info", |lua, t, pkgs: Value| {
+            // Одно имя: таблица с полями приложения; список имён: список таблиц.
+            let (list, single) = match pkgs {
+                Value::String(s) => (vec![s.to_str()?.to_string()], true),
+                Value::Table(tb) => {
+                    (tb.sequence_values::<String>().collect::<mlua::Result<Vec<_>>>()?, false)
+                }
+                _ => return Err(mlua::Error::runtime("app_info: имя пакета или список имён")),
+            };
+            let r = device_json(t, json!({"op": "AppInfo", "packages": list}))?;
+            let apps = r["apps"].clone();
+            if single {
+                json_to_lua(lua, &apps[0])
+            } else {
+                json_to_lua(lua, &apps)
+            }
+        });
+        methods.add_method("installed", |_, t, pkg: String| {
+            let r = device_json(t, json!({"op": "AppInfo", "packages": [pkg]}))?;
+            Ok(r["apps"][0]["installed"].as_bool().unwrap_or(false))
+        });
+        methods.add_method("force_stop", |_, t, pkg: String| {
+            device_json(t, json!({"op": "ForceStop", "package": pkg})).map(|_| ())
+        });
+        methods.add_method("clear_data", |_, t, pkg: String| {
+            device_json(t, json!({"op": "ClearAppData", "package": pkg})).map(|_| ())
+        });
+        methods.add_method("uninstall", |_, t, (pkg, o): (String, Option<Table>)| {
+            device_json(
+                t,
+                json!({"op": "UninstallApp", "package": pkg, "keep_data": opt_bool(&o, "keep_data")}),
+            )
+            .map(|_| ())
+        });
+        methods.add_method("install_apk", |_, t, (path, o): (String, Option<Table>)| {
+            device_json(
+                t,
+                json!({"op": "InstallApk", "path": path, "allow_downgrade": opt_bool(&o, "allow_downgrade"),
+                       "sha256": opt_str(&o, "sha256")}),
+            )
+            .map(|_| ())
+        });
+        methods.add_method("logcat", |_, t, o: Option<Table>| {
+            let lines = o.as_ref().and_then(|t| t.get::<Option<u32>>("lines").ok().flatten());
+            let r = device_json(
+                t,
+                json!({"op": "Logcat", "lines": lines, "package": opt_str(&o, "package"), "level": opt_str(&o, "level")}),
+            )?;
+            Ok(r["text"].as_str().unwrap_or("").to_string())
+        });
+        methods.add_method("mobile_data", |_, t, on: bool| {
+            device_json(t, json!({"op": "SetMobileData", "on": on})).map(|_| ())
+        });
+        methods.add_method("stay_awake", |lua, t, on: bool| {
+            device_call(lua, t, json!({"op": "StayAwake", "on": on}))
+        });
+        methods.add_method("screen", |lua, t, ()| device_call(lua, t, json!({"op": "ScreenState"})));
+        methods.add_method("button", |_, t, name: String| {
+            device_json(t, json!({"op": "Button", "name": name})).map(|_| ())
         });
         methods.add_method("enable", |_, t, (kind, on): (String, bool)| {
             t.st.check_alive()?;
@@ -1187,6 +1270,18 @@ mod tests {
             self.files.lock().unwrap().remove(path);
             Ok(())
         }
+        fn device(&self, phone: u32, msg: Json) -> Result<Json, String> {
+            self.log.lock().unwrap().push(format!("device {phone} {msg}"));
+            match msg["op"].as_str().unwrap_or("") {
+                "AppInfo" => Ok(json!({"apps": msg["packages"].as_array().unwrap().iter()
+                    .map(|p| json!({"package": p, "installed": p == "com.have.app", "version_code": 7}))
+                    .collect::<Vec<_>>()})),
+                "Logcat" => Ok(json!({"text": "line1\nline2"})),
+                "StayAwake" => Ok(json!({"previous": "0"})),
+                "InstallApk" => Err("Failure [INSTALL_FAILED_VERSION_DOWNGRADE]".into()),
+                _ => Ok(json!({})),
+            }
+        }
         fn latest_frame(&self, _phone: u32) -> Option<Frame> {
             self.frames.lock().unwrap().last().cloned()
         }
@@ -1366,6 +1461,35 @@ mod tests {
         assert_eq!(r.status, "error");
         assert!(r.tests[0].error.as_ref().unwrap().contains("вышло время"), "{:?}", r.tests[0].error);
         assert!(t0.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn device_commands_return_data_and_errors() {
+        let fake = Fake::new();
+        let (r, _) = run(
+            r#"
+            local p = phones()[1]
+            assert.truthy(p:installed("com.have.app"))
+            assert.falsy(p:installed("com.not.here"))
+            assert.eq(p:app_info("com.have.app").version_code, 7)
+            local list = p:app_info({"com.have.app", "com.not.here"})
+            assert.eq(#list, 2)
+            assert.eq(p:logcat({lines = 10, level = "E"}), "line1\nline2")
+            assert.eq(p:stay_awake(true).previous, "0")
+            p:force_stop("com.have.app")
+            p:uninstall("com.have.app", {keep_data = true})
+            p:button("back")
+            local ok, err = pcall(function() p:install_apk("/sdcard/a.apk", {allow_downgrade = false}) end)
+            assert.falsy(ok)
+            assert.contains(tostring(err), "VERSION_DOWNGRADE")
+            "#,
+            &fake,
+        );
+        assert_eq!(r.status, "passed", "{r:?}");
+        let log = fake.log();
+        assert!(log.iter().any(|l| l.contains(r#""op":"ForceStop""#) && l.contains("com.have.app")));
+        assert!(log.iter().any(|l| l.contains(r#""keep_data":true"#)));
+        assert!(log.iter().any(|l| l.contains(r#""lines":10"#) && l.contains(r#""level":"E""#)));
     }
 
     #[test]

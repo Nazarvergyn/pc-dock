@@ -132,7 +132,10 @@ fn results_carry_the_operation_name_and_request_id() {
     let mut c = Conn::open(serve(Some("SER1"), Some(fake.clone())));
     let p = phone_id(&mut c);
     let r = c.ask(json!({"op": "DeviceInfo", "phone": p}));
-    assert_eq!((r["ev"].as_str(), r["op"].as_str(), r["data"]["model"].as_str()), (Some("DeviceResult"), Some("DeviceInfo"), Some("Fake 1")));
+    assert_eq!(
+        (r["ev"].as_str(), r["op"].as_str(), r["data"]["model"].as_str()),
+        (Some("DeviceResult"), Some("DeviceInfo"), Some("Fake 1"))
+    );
     let r = c.ask(json!({"op": "ForceStop", "phone": p, "package": "com.example.app"}));
     assert_eq!(r["op"], "ForceStop");
     let calls = fake.calls.lock().unwrap();

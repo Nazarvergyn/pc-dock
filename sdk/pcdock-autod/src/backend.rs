@@ -88,6 +88,11 @@ pub trait Backend: Send + Sync {
     fn file_delete(&self, _phone: u32, _path: &str) -> Result<(), String> {
         Err("передача файлов не поддерживается".into())
     }
+    /// Операция над телефоном (`DeviceInfo`, `AppInfo`, `InstallApk`, …): `msg` это команда протокола `pcdockd`
+    /// без номера телефона, ответ это поле `data` результата.
+    fn device(&self, _phone: u32, _msg: Value) -> Result<Value, String> {
+        Err("команды над телефоном не поддерживаются".into())
+    }
 }
 
 /// Приёмник данных и итога передачи файла: данные и событие `FileDone`/`FileFailed` могут прийти в любом порядке.
@@ -417,6 +422,12 @@ impl Backend for FarmBackend {
         self.op(json!({"op": "FileDelete", "phone": phone, "path": path}))
     }
 
+    fn device(&self, phone: u32, mut msg: Value) -> Result<Value, String> {
+        msg["phone"] = json!(phone);
+        let r = self.client.request(msg).map_err(|e| e.to_string())?;
+        Ok(r.get("data").cloned().unwrap_or(Value::Null))
+    }
+
     fn wait_frame(&self, phone: u32, after: Option<u64>, timeout: Duration) -> Option<Frame> {
         let deadline = Instant::now() + timeout;
         let mut map = self.frames.frames.lock().unwrap();
@@ -578,5 +589,8 @@ impl Backend for ReconnectBackend {
     }
     fn file_delete(&self, phone: u32, path: &str) -> Result<(), String> {
         self.get()?.file_delete(phone, path)
+    }
+    fn device(&self, phone: u32, msg: Value) -> Result<Value, String> {
+        self.get()?.device(phone, msg)
     }
 }

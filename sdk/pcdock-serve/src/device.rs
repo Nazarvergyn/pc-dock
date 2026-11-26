@@ -137,7 +137,8 @@ pub fn device_info(props: &str, size: &str, density: &str) -> Value {
         }
     }
     let dpi = parse_wm(density, "density").and_then(|s| s.trim().parse::<u32>().ok());
-    let abis: Vec<&str> = get_str(&p, "ro.product.cpu.abilist").split(',').filter(|s| !s.is_empty()).collect();
+    let abis: Vec<&str> =
+        get_str(&p, "ro.product.cpu.abilist").split(',').filter(|s| !s.is_empty()).collect();
     json!({
         "manufacturer": get("ro.product.manufacturer"),
         "brand": get("ro.product.brand"),
@@ -256,9 +257,14 @@ pub fn parse_screen_state(power: &str, window: &str) -> Value {
     let wake = power.lines().find_map(|l| l.trim().strip_prefix("mWakefulness=")).map(str::trim);
     let locked = window.lines().any(|l| {
         let l = l.trim();
-        ["isKeyguardShowing=true", "mKeyguardShowing=true", "mShowingLockscreen=true", "mDreamingLockscreen=true"]
-            .iter()
-            .any(|k| l.contains(k))
+        [
+            "isKeyguardShowing=true",
+            "mKeyguardShowing=true",
+            "mShowingLockscreen=true",
+            "mDreamingLockscreen=true",
+        ]
+        .iter()
+        .any(|k| l.contains(k))
     });
     json!({
         "wakefulness": wake,
@@ -407,7 +413,11 @@ mod tests {
     fn getprop_and_wm_are_parsed() {
         let props = "[ro.product.model]: [Redmi A5]\n[ro.build.version.release]: [15]\n[ro.build.version.sdk]: [35]\n\
                      [ro.product.cpu.abilist]: [arm64-v8a,armeabi-v7a]\n[ro.serialno]: [ABC]\nмусор\n";
-        let v = device_info(props, "Physical size: 720x1600\nOverride size: 540x1200\n", "Physical density: 320\n");
+        let v = device_info(
+            props,
+            "Physical size: 720x1600\nOverride size: 540x1200\n",
+            "Physical density: 320\n",
+        );
         assert_eq!(v["model"], "Redmi A5");
         assert_eq!(v["sdk"], 35);
         assert_eq!(v["abis"], json!(["arm64-v8a", "armeabi-v7a"]));
@@ -423,7 +433,10 @@ mod tests {
         assert_eq!(b["level"], 87);
         assert_eq!(b["temperature_c"], 29.1);
         assert_eq!(b["charging"], true);
-        assert_eq!(parse_meminfo("MemTotal:        3800000 kB\nMemFree: 1 kB\nMemAvailable:    1900000 kB\n"), (Some(3_800_000), Some(1_900_000)));
+        assert_eq!(
+            parse_meminfo("MemTotal:        3800000 kB\nMemFree: 1 kB\nMemAvailable:    1900000 kB\n"),
+            (Some(3_800_000), Some(1_900_000))
+        );
         let a = "cpu  100 0 100 800 0 0 0 0 0 0\ncpu0 1 1 1 1\n";
         let b2 = "cpu  150 0 150 900 0 0 0 0 0 0\n";
         assert_eq!(cpu_percent(a, b2), Some(50.0));
@@ -443,7 +456,10 @@ mod tests {
     #[test]
     fn pm_results_and_screen_state() {
         assert!(pm_result("Performing Streamed Install\nSuccess\n").is_ok());
-        assert_eq!(pm_result("Failure [INSTALL_FAILED_VERSION_DOWNGRADE]\n").unwrap_err(), "Failure [INSTALL_FAILED_VERSION_DOWNGRADE]");
+        assert_eq!(
+            pm_result("Failure [INSTALL_FAILED_VERSION_DOWNGRADE]\n").unwrap_err(),
+            "Failure [INSTALL_FAILED_VERSION_DOWNGRADE]"
+        );
         let s = parse_screen_state("  mWakefulness=Awake\n", "  mShowingLockscreen=true\n");
         assert_eq!((s["on"].clone(), s["locked"].clone()), (json!(true), json!(true)));
         let s = parse_screen_state("  mWakefulness=Asleep\n", "");

@@ -42,6 +42,13 @@
 Если демон запущен с `--token`, первой командой должна быть `{"op":"Auth","token":"…"}`; ответ `{"ev":"Authed"}`. До этого любые другие команды
 получают `Error`, события не приходят. На неверный токен ответ задерживается на 0,5 с.
 
+### Команды над телефоном
+
+Команды `DeviceInfo`, `DeviceStats`, `AppInfo`, `ForceStop`, `ClearAppData`, `UninstallApp`, `InstallApk`, `Logcat`, `SetMobileData`,
+`StayAwake`, `ScreenState`, `Button` отвечают событием `{"ev":"DeviceResult","phone":N,"op":"ИМЯ","data":{…}}` (с тем же `id`). Выполняются
+по ADB в отдельном потоке (установка не задерживает остальных); у телефона должен быть известен серийник и доступен ADB, иначе ответ `Error`.
+Демон запуска `pcdockd --no-device-ops` их отключает.
+
 ### Команды и ответы
 
 Команда это JSON-объект с полем `op` и необязательным числовым `id`. Если `id` есть, ответ на команду несёт то же `id`:
@@ -82,6 +89,17 @@
 | `DeviceEnable` | `phone, kind, on` | `kind`: 0 касание, 1 мышь, 2 клавиатура |
 | `ReleaseAll`, `RequestFrame`, `Wake` | `phone` | |
 | `SetTransport` | `phone`, `transport` (`usb`, `adb`, `serial`) | перевести телефон на другой путь; `Ok` значит «принято», итог придёт событием `Appeared` (успех) или `Warning` (путь недоступен) |
+| `DeviceInfo` | `phone` | `DeviceResult`: `manufacturer`, `model`, `android`, `sdk`, `abis`, `serial`, `screen_w`, `screen_h`, `dpi` |
+| `DeviceStats` | `phone` | `battery` (`level`, `temperature_c`, `charging`), `cpu_percent`, `mem_total_kb`, `mem_available_kb` |
+| `AppInfo` | `phone`, `packages` | `apps`: по пакету `installed`, `version_code`, `version_name`, `enabled`, `first_install`, `last_update` |
+| `ForceStop`, `ClearAppData` | `phone`, `package` | остановить приложение; стереть его данные |
+| `UninstallApp` | `phone`, `package`, `keep_data?` | удалить приложение |
+| `InstallApk` | `phone`, `path`, `allow_downgrade?`, `sha256?` | установить APK, уже лежащий на телефоне в разрешённой папке (сначала `FilePut`); `sha256` проверяется на телефоне; ошибка несёт причину `pm` |
+| `Logcat` | `phone`, `lines?` (500, до 5000), `package?`, `level?` (`V D I W E F`) | `data.text` |
+| `SetMobileData` | `phone`, `on` | мобильные данные |
+| `StayAwake` | `phone`, `on` | `data.previous`: прежнее значение настройки |
+| `ScreenState` | `phone` | `wakefulness`, `on`, `locked` |
+| `Button` | `phone`, `name` | `back home recents menu power wakeup sleep volume_up volume_down volume_mute enter delete tab` |
 | `SetStream` | `phone, video, audio` | |
 | `FilePut` | `phone, dest, size, media?` | `FileReady {transfer}`, затем данные клиента (тип 3), итог `FileDone`/`FileFailed` |
 | `FileGet` | `phone, src` | `FileInfo {transfer, size}`, данные сервера (тип 3), итог `FileDone`/`FileFailed` |
