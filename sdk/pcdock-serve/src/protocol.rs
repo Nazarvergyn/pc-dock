@@ -199,6 +199,18 @@ pub enum ClientMsg {
     PublicIp {
         phone: u32,
     },
+    /// Правила выбора пути на ходу. `prefer`: `usb`/`adb`/`serial` предпочесть, `auto` сбросить; с `serial` для одного
+    /// телефона. `fallback_secs`: через сколько секунд пробовать другой путь (0: не переключаться); `scan_secs`: период поиска.
+    SetConnectPolicy {
+        #[serde(default)]
+        serial: Option<String>,
+        #[serde(default)]
+        prefer: Option<String>,
+        #[serde(default)]
+        fallback_secs: Option<f64>,
+        #[serde(default)]
+        scan_secs: Option<f64>,
+    },
     /// Состояние демона: версия, протокол, телефоны. Ответ `Health`.
     Health,
     /// Выход в сеть (`online`), локальный адрес и интерфейс.

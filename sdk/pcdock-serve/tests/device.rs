@@ -267,3 +267,17 @@ fn role_tokens_limit_commands() {
     let r = c.ask(json!({"op": "FileList", "phone": 1, "path": "/sdcard"}));
     assert_eq!(r["ev"], "Error");
 }
+
+#[test]
+fn connect_policy_is_applied_and_validated() {
+    let mut c = Conn::open(serve(Some("SER1"), None));
+    let r = c.ask(json!({"op": "SetConnectPolicy", "serial": "SER1", "prefer": "adb", "fallback_secs": 0, "scan_secs": 5}));
+    assert_eq!(r["ev"], "Ok", "{r}");
+    let r = c.ask(json!({"op": "SetConnectPolicy", "prefer": "auto"}));
+    assert_eq!(r["ev"], "Ok", "{r}");
+    for bad in [json!({"prefer": "wifi"}), json!({"scan_secs": 0}), json!({"fallback_secs": -1})] {
+        let mut m = bad.clone();
+        m["op"] = json!("SetConnectPolicy");
+        assert_eq!(c.ask(m)["ev"], "Error", "{bad}");
+    }
+}

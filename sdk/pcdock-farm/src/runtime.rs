@@ -464,6 +464,51 @@ impl Farm {
         Ok(())
     }
 
+    /// Правила выбора пути на ходу. `prefer`: `Some(Some(t))` предпочесть путь, `Some(None)` сбросить предпочтение;
+    /// с `serial` это касается одного телефона, без него общего порядка. `fallback_secs`: через сколько секунд пробовать
+    /// другой путь (0 — не переключаться). `scan_secs`: как часто искать телефоны.
+    pub fn set_connect_policy(
+        &mut self,
+        serial: Option<&str>,
+        prefer: Option<Option<Transport>>,
+        fallback_secs: Option<f64>,
+        scan_secs: Option<f64>,
+    ) -> Result<(), String> {
+        let auto = self.auto.as_mut().ok_or("обнаружение не включено")?;
+        for v in [fallback_secs, scan_secs].into_iter().flatten() {
+            if !v.is_finite() || !(0.0..=86400.0).contains(&v) {
+                return Err("секунды: от 0 до 86400".into());
+            }
+        }
+        if scan_secs == Some(0.0) {
+            return Err("scan_secs: больше 0".into());
+        }
+        match (serial, prefer) {
+            (Some(sn), Some(Some(t))) => {
+                auto.cfg.prefer.insert(sn.to_string(), t);
+            }
+            (Some(sn), Some(None)) => {
+                auto.cfg.prefer.remove(sn);
+            }
+            (None, Some(Some(t))) => {
+                auto.cfg.order.retain(|x| *x != t);
+                auto.cfg.order.insert(0, t);
+            }
+            (None, Some(None)) => {
+                auto.cfg.order = vec![Transport::Usb, Transport::Adb, Transport::Serial];
+            }
+            (_, None) => {}
+        }
+        if let Some(f) = fallback_secs {
+            auto.cfg.fallback_after = (f > 0.0).then(|| Duration::from_secs_f64(f));
+        }
+        if let Some(e) = scan_secs {
+            auto.cfg.every = Duration::from_secs_f64(e);
+        }
+        auto.last_scan = None;
+        Ok(())
+    }
+
     /// Сведения обо всех телефонах (по возрастанию номера).
     pub fn phones_info(&self) -> Vec<PhoneInfo> {
         let mut v: Vec<PhoneInfo> = self.slots.values().map(|s| s.meta.clone()).collect();

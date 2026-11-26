@@ -593,6 +593,30 @@ impl Handler<ClientState> for Handle {
                 };
                 self.device_call(hub, client, id, phone, op)
             }
+            ClientMsg::SetConnectPolicy { serial, prefer, fallback_secs, scan_secs } => {
+                let prefer = match prefer.as_deref() {
+                    None => None,
+                    Some("auto") => Some(None),
+                    Some("usb") => Some(Some(pcdock_core::link::Transport::Usb)),
+                    Some("adb") => Some(Some(pcdock_core::link::Transport::Adb)),
+                    Some("serial") => Some(Some(pcdock_core::link::Transport::Serial)),
+                    Some(_) => return fail("prefer: usb, adb, serial или auto".into()),
+                };
+                let r = self.shared.daemon.lock().unwrap().set_connect_policy(
+                    serial.as_deref(),
+                    prefer,
+                    fallback_secs,
+                    scan_secs,
+                );
+                match r {
+                    Ok(()) => {
+                        if id.is_some() {
+                            reply(ServerMsg::Ok);
+                        }
+                    }
+                    Err(e) => fail(e),
+                }
+            }
             ClientMsg::SetTransport { phone, transport } => {
                 let t = match transport.as_str() {
                     "usb" => pcdock_core::link::Transport::Usb,
@@ -1095,6 +1119,7 @@ fn map_input(msg: ClientMsg) -> Result<(PhoneId, InputCmd), String> {
         | ClientMsg::WaitFor { .. }
         | ClientMsg::TypeText { .. }
         | ClientMsg::SetBlocklist { .. }
+        | ClientMsg::SetConnectPolicy { .. }
         | ClientMsg::SetTransport { .. } => return Err(bad("не команда ввода")),
     })
 }

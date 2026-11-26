@@ -83,6 +83,7 @@
 | `op` | Поля | Ответ |
 |---|---|---|
 | `List` | | `Phones {phones, details}`; `details`: для каждого `{phone, state, transport, address, serial, name, display}` |
+| `SetConnectPolicy` | `serial?`, `prefer?` (`usb`/`adb`/`serial`/`auto`), `fallback_secs?`, `scan_secs?` | правила выбора пути на ходу: предпочтение (для телефона или общее), через сколько секунд пробовать другой путь (0: не переключаться), период поиска; `Ok` |
 | `Health` | | `Health {server, protocol, phones, errors}`; `phones` как `details` в `List`; `errors`: последние 100 ошибок `{at, phone, kind, detail}` (обрыв связи, предупреждения, битые пакеты, сбои команд над телефоном) |
 | `Watch` | `phone`, `fps?`, `on_change?`, `audio?` | `Watched`; затем последний кадр из кэша. Повторный `Watch` меняет условия |
 | `Unwatch` | `phone` | `Watched {on:false}` |
