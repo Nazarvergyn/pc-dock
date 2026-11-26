@@ -142,12 +142,34 @@ impl Conn {
         }
     }
 
+    /// Следующий JSON-ответ, не считая рассылок о состояниях телефонов.
+    fn reply(&mut self) -> Value {
+        loop {
+            let v = self.json();
+            if !["State", "Appeared", "Lost", "Connected", "Display", "AudioConfig", "Status", "Warning"]
+                .contains(&v["ev"].as_str().unwrap_or(""))
+            {
+                return v;
+            }
+        }
+    }
+
     /// Следующее JSON-сообщение сервера как `ServerMsg`, не считая рассылки о состояниях телефонов
     /// (они приходят всем и могут вклиниться между ответами).
     fn msg(&mut self) -> ServerMsg {
         loop {
             let m: ServerMsg = serde_json::from_value(self.json()).unwrap();
-            if !matches!(m, ServerMsg::State { .. } | ServerMsg::Appeared { .. } | ServerMsg::Lost { .. }) {
+            if !matches!(
+                m,
+                ServerMsg::State { .. }
+                    | ServerMsg::Appeared { .. }
+                    | ServerMsg::Lost { .. }
+                    | ServerMsg::Connected { .. }
+                    | ServerMsg::Display { .. }
+                    | ServerMsg::AudioConfig { .. }
+                    | ServerMsg::Status { .. }
+                    | ServerMsg::Warning { .. }
+            ) {
                 return m;
             }
         }
@@ -243,31 +265,31 @@ fn request_ids_are_echoed_in_replies() {
     c.expect_hello();
 
     c.send_raw(r#"{"op":"List","id":41}"#);
-    let v = c.json();
+    let v = c.reply();
     assert_eq!(v["ev"], "Phones");
     assert_eq!(v["id"], 41);
 
     // Команда без собственного ответа: `Ok` с тем же номером.
     c.send_raw(r#"{"op":"Wake","phone":3,"id":42}"#);
-    let v = c.json();
+    let v = c.reply();
     assert_eq!((v["ev"].as_str(), v["id"].as_u64()), (Some("Ok"), Some(42)));
 
     // Ошибка тоже несёт номер запроса.
     c.send_raw(r#"{"op":"Wake","phone":99,"id":43}"#);
-    let v = c.json();
+    let v = c.reply();
     assert_eq!((v["ev"].as_str(), v["id"].as_u64()), (Some("Error"), Some(43)));
 
     // Выбор пути: неизвестное имя и телефон без обнаружения дают ошибку с номером запроса.
     c.send_raw(r#"{"op":"SetTransport","phone":3,"transport":"wifi","id":44}"#);
-    let v = c.json();
+    let v = c.reply();
     assert_eq!((v["ev"].as_str(), v["id"].as_u64()), (Some("Error"), Some(44)));
     c.send_raw(r#"{"op":"SetTransport","phone":3,"transport":"adb","id":45}"#);
-    let v = c.json();
+    let v = c.reply();
     assert_eq!((v["ev"].as_str(), v["id"].as_u64()), (Some("Error"), Some(45)));
 
     // Без номера всё как раньше: ответа `Ok` нет, ошибка без `id`.
     c.send_raw(r#"{"op":"Wake","phone":99}"#);
-    let v = c.json();
+    let v = c.reply();
     assert_eq!(v["ev"], "Error");
     assert!(v.get("id").is_none());
 }

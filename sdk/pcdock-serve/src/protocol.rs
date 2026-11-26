@@ -61,6 +61,74 @@ pub enum ClientMsg {
     FileCancel {
         transfer: u32,
     },
+    /// Сведения о телефоне (модель, Android, ABI, экран). Ответ: `DeviceResult`.
+    DeviceInfo {
+        phone: u32,
+    },
+    /// Батарея, температура, процессор, память.
+    DeviceStats {
+        phone: u32,
+    },
+    /// Приложения по именам пакетов: установлено ли, версия, включено ли.
+    AppInfo {
+        phone: u32,
+        packages: Vec<String>,
+    },
+    /// Остановить приложение.
+    ForceStop {
+        phone: u32,
+        package: String,
+    },
+    /// Стереть данные приложения.
+    ClearAppData {
+        phone: u32,
+        package: String,
+    },
+    /// Удалить приложение (`keep_data`: оставить данные).
+    UninstallApp {
+        phone: u32,
+        package: String,
+        #[serde(default)]
+        keep_data: bool,
+    },
+    /// Установить APK, уже лежащий на телефоне (положите его командой `FilePut`). `sha256` проверяется на телефоне.
+    InstallApk {
+        phone: u32,
+        path: String,
+        #[serde(default)]
+        allow_downgrade: bool,
+        #[serde(default)]
+        sha256: Option<String>,
+    },
+    /// Журнал системы: последние `lines` строк (по умолчанию 500), по приложению и уровню (`V D I W E F`).
+    Logcat {
+        phone: u32,
+        #[serde(default)]
+        lines: Option<u32>,
+        #[serde(default)]
+        package: Option<String>,
+        #[serde(default)]
+        level: Option<String>,
+    },
+    /// Мобильные данные.
+    SetMobileData {
+        phone: u32,
+        on: bool,
+    },
+    /// Не давать экрану гаснуть (при выключении вернуть прежнее значение из ответа `previous`).
+    StayAwake {
+        phone: u32,
+        on: bool,
+    },
+    /// Экран включён ли, заблокирован ли.
+    ScreenState {
+        phone: u32,
+    },
+    /// Системная кнопка по имени: `back home recents menu power wakeup sleep volume_up volume_down volume_mute enter delete tab`.
+    Button {
+        phone: u32,
+        name: String,
+    },
     Unwatch {
         phone: u32,
     },
@@ -178,6 +246,12 @@ pub enum ServerMsg {
         phone: u32,
         path: String,
         names: Vec<String>,
+    },
+    /// Результат операции над телефоном (`DeviceInfo`, `AppInfo`, `InstallApk` …): `op` имя команды, `data` объект.
+    DeviceResult {
+        phone: u32,
+        op: String,
+        data: serde_json::Value,
     },
     /// Пароль принят.
     Authed,

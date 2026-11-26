@@ -34,6 +34,10 @@ struct Args {
     #[arg(long = "files")]
     files: bool,
 
+    /// Выключить команды над телефоном (сведения, приложения, установка, журнал, питание, сеть, кнопки). Они работают по ADB.
+    #[arg(long = "no-device-ops")]
+    no_device_ops: bool,
+
     /// Папка на телефоне, доступная для файлов (можно несколько раз). По умолчанию: /sdcard,
     /// /storage/emulated/0, /data/local/tmp.
     #[arg(long = "files-root")]
@@ -211,7 +215,9 @@ fn main() {
     if let Some(f) = &files {
         log::info!("передача файлов включена, папки: {}", f.roots.join(", "));
     }
-    let serve = Serve::with_options(daemon, token, files);
+    let device: Option<std::sync::Arc<dyn pcdock_serve::DeviceBackend>> = (!args.no_device_ops)
+        .then(|| std::sync::Arc::new(pcdock_serve::AdbDevice::new(args.adb_server.clone())) as _);
+    let serve = Serve::with_device(daemon, token, files, device);
     if !args.no_tcp {
         match args.tcp.as_deref().unwrap_or("") {
             "" => {}

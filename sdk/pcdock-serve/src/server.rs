@@ -24,7 +24,8 @@ use pcdock_farm::{Farm, FarmEvent};
 use pcdock_net::{Handler, Hub};
 use serde_json::{json, Value};
 
-use super::files::{FileOptions, MAX_FILE};
+use super::device::{check_package, DeviceBackend, DeviceOp};
+use super::files::{FileOptions, DEFAULT_ROOTS, MAX_FILE};
 use super::protocol::{encode_audio, encode_video, ClientMsg, ServerMsg, PKG_AUDIO, PKG_FILE, PKG_VIDEO};
 
 /// Версия протокола приложения (приходит клиенту в `Hello`).
@@ -62,6 +63,7 @@ struct Shared {
     daemon: Arc<Mutex<Farm>>,
     demand: Mutex<HashMap<PhoneId, Demand>>,
     files: Option<FileOptions>,
+    device: Option<Arc<dyn DeviceBackend>>,
     next_transfer: AtomicU32,
 }
 
@@ -99,10 +101,21 @@ impl Serve {
 
     /// С паролем и передачей файлов (`files`: `None` — файлы выключены).
     pub fn with_options(daemon: Farm, token: Option<String>, files: Option<FileOptions>) -> Self {
+        Self::with_device(daemon, token, files, None)
+    }
+
+    /// С паролем, файлами и командами над телефоном (`device`: `None` — такие команды выключены).
+    pub fn with_device(
+        daemon: Farm,
+        token: Option<String>,
+        files: Option<FileOptions>,
+        device: Option<Arc<dyn DeviceBackend>>,
+    ) -> Self {
         let shared = Arc::new(Shared {
             daemon: Arc::new(Mutex::new(daemon)),
             demand: Mutex::new(HashMap::new()),
             files,
+            device,
             next_transfer: AtomicU32::new(1),
         });
         let hub = Hub::new(Handle { shared: shared.clone() }, token);
@@ -319,6 +332,58 @@ impl Handler<ClientState> for Handle {
                     fail(format!("нет передачи {transfer}"))
                 }
             }
+            ClientMsg::DeviceInfo { phone } => self.device_call(hub, client, id, phone, Ok(DeviceOp::Info)),
+            ClientMsg::DeviceStats { phone } => self.device_call(hub, client, id, phone, Ok(DeviceOp::Stats)),
+            ClientMsg::AppInfo { phone, packages } => {
+                let op = if packages.is_empty() || packages.len() > 200 {
+                    Err("packages: от 1 до 200 имён".to_string())
+                } else {
+                    packages.iter().try_for_each(|p| check_package(p)).map(|_| DeviceOp::AppInfo { packages })
+                };
+                self.device_call(hub, client, id, phone, op)
+            }
+            ClientMsg::ForceStop { phone, package } => {
+                let op = check_package(&package).map(|_| DeviceOp::ForceStop { package });
+                self.device_call(hub, client, id, phone, op)
+            }
+            ClientMsg::ClearAppData { phone, package } => {
+                let op = check_package(&package).map(|_| DeviceOp::ClearAppData { package });
+                self.device_call(hub, client, id, phone, op)
+            }
+            ClientMsg::UninstallApp { phone, package, keep_data } => {
+                let op = check_package(&package).map(|_| DeviceOp::Uninstall { package, keep_data });
+                self.device_call(hub, client, id, phone, op)
+            }
+            ClientMsg::InstallApk { phone, path, allow_downgrade, sha256 } => {
+                let op = Ok(DeviceOp::Install { path, allow_downgrade, sha256 });
+                self.device_call(hub, client, id, phone, op)
+            }
+            ClientMsg::Logcat { phone, lines, package, level } => {
+                let level = match level.as_deref() {
+                    None => Ok(None),
+                    Some(l) if l.len() == 1 && "VDIWEF".contains(l) => Ok(l.chars().next()),
+                    Some(_) => Err("level: одна из V D I W E F".to_string()),
+                };
+                let op = level.map(|level| DeviceOp::Logcat { lines: lines.unwrap_or(500), package, level });
+                self.device_call(hub, client, id, phone, op)
+            }
+            ClientMsg::SetMobileData { phone, on } => {
+                self.device_call(hub, client, id, phone, Ok(DeviceOp::SetMobileData { on }))
+            }
+            ClientMsg::StayAwake { phone, on } => {
+                self.device_call(hub, client, id, phone, Ok(DeviceOp::StayAwake { on }))
+            }
+            ClientMsg::ScreenState { phone } => {
+                self.device_call(hub, client, id, phone, Ok(DeviceOp::ScreenState))
+            }
+            ClientMsg::Button { phone, name } => {
+                let op = if super::device::button_keycode(&name).is_some() {
+                    Ok(DeviceOp::Button { name })
+                } else {
+                    Err(format!("неизвестная кнопка: {name}"))
+                };
+                self.device_call(hub, client, id, phone, op)
+            }
             ClientMsg::SetTransport { phone, transport } => {
                 let t = match transport.as_str() {
                     "usb" => pcdock_core::link::Transport::Usb,
@@ -355,6 +420,54 @@ impl Handler<ClientState> for Handle {
 }
 
 impl Handle {
+    /// Операция над телефоном: проверки, потом выполнение в своём потоке (установка идёт долго, чтение клиента не ждёт).
+    fn device_call(
+        &self,
+        hub: &Hub<ClientState>,
+        client: u64,
+        id: Option<u64>,
+        phone: PhoneId,
+        op: Result<DeviceOp, String>,
+    ) {
+        let fail = |detail: String| hub.error(client, id, detail);
+        let op = match op {
+            Ok(op) => op,
+            Err(e) => return fail(format!("плохая команда: {e}")),
+        };
+        let Some(backend) = self.shared.device.clone() else {
+            return fail("команды над телефоном выключены (pcdockd --no-device-ops)".into());
+        };
+        let serial = match self
+            .shared
+            .daemon
+            .lock()
+            .unwrap()
+            .phones_info()
+            .into_iter()
+            .find(|i| i.id == phone)
+            .ok_or_else(|| format!("нет трубки {phone}"))
+            .and_then(|i| i.serial.ok_or("у телефона неизвестен серийник: нужен ADB".to_string()))
+        {
+            Ok(s) => s,
+            Err(e) => return fail(e),
+        };
+        let roots = match &self.shared.files {
+            Some(f) => f.roots.clone(),
+            None => DEFAULT_ROOTS.iter().map(|s| s.to_string()).collect(),
+        };
+        let hub = hub.clone();
+        thread::Builder::new()
+            .name(format!("device-{}", op.name()))
+            .spawn(move || match backend.run(&serial, &op, &roots) {
+                Ok(data) => {
+                    let msg = ServerMsg::DeviceResult { phone, op: op.name().to_string(), data };
+                    hub.reply(client, id, to_value(&msg));
+                }
+                Err(e) => hub.error(client, id, e),
+            })
+            .expect("не встал поток операции над телефоном");
+    }
+
     /// Передача файлов включена, путь разрешён, у телефона известен серийник.
     fn file_target(&self, phone: PhoneId, path: &str) -> Result<(&FileOptions, String), String> {
         let files = self.shared.files.as_ref().ok_or("передача файлов выключена (pcdockd --files)")?;
@@ -704,6 +817,18 @@ fn map_input(msg: ClientMsg) -> Result<(PhoneId, InputCmd), String> {
         | ClientMsg::FileList { .. }
         | ClientMsg::FileDelete { .. }
         | ClientMsg::FileCancel { .. }
+        | ClientMsg::DeviceInfo { .. }
+        | ClientMsg::DeviceStats { .. }
+        | ClientMsg::AppInfo { .. }
+        | ClientMsg::ForceStop { .. }
+        | ClientMsg::ClearAppData { .. }
+        | ClientMsg::UninstallApp { .. }
+        | ClientMsg::InstallApk { .. }
+        | ClientMsg::Logcat { .. }
+        | ClientMsg::SetMobileData { .. }
+        | ClientMsg::StayAwake { .. }
+        | ClientMsg::ScreenState { .. }
+        | ClientMsg::Button { .. }
         | ClientMsg::SetTransport { .. } => return Err(bad("не команда ввода")),
     })
 }
