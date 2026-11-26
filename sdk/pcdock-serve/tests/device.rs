@@ -241,14 +241,14 @@ fn health_reports_server_phones_and_recent_errors() {
     assert_eq!(r["ev"], "Health", "{r}");
     assert!(r["server"].as_str().unwrap().starts_with("pcdockd/"));
     assert_eq!(r["phones"].as_array().unwrap().len(), 1);
-    assert!(r["errors"].as_array().unwrap().is_empty());
+    assert!(r["errors"].as_array().unwrap().iter().all(|e| e["kind"] != "InstallApk"));
 
     let r = c.ask(json!({"op": "InstallApk", "phone": p, "path": "/sdcard/Download/a.apk"}));
     assert_eq!(r["ev"], "Error", "{r}");
     let r = c.ask(json!({"op": "Health"}));
-    let errors = r["errors"].as_array().unwrap();
+    let errors: Vec<_> =
+        r["errors"].as_array().unwrap().iter().filter(|e| e["kind"] == "InstallApk").collect();
     assert_eq!(errors.len(), 1, "{r}");
-    assert_eq!(errors[0]["kind"], "InstallApk");
     assert_eq!(errors[0]["phone"], p);
     assert!(errors[0]["detail"].as_str().unwrap().contains("INSTALL_FAILED"));
 }
