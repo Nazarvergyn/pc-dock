@@ -267,6 +267,14 @@ impl Handler<ClientState> for Handle {
                 let details = info.iter().map(phone_json).collect();
                 reply(ServerMsg::Phones { phones, details })
             }
+            ClientMsg::Health => {
+                let info = self.shared.daemon.lock().unwrap().phones_info();
+                reply(ServerMsg::Health {
+                    server: format!("pcdockd/{}", env!("CARGO_PKG_VERSION")),
+                    protocol: PROTOCOL_VERSION,
+                    phones: info.iter().map(phone_json).collect(),
+                })
+            }
             ClientMsg::Watch { phone, fps, on_change, audio } => {
                 if !self.shared.daemon.lock().unwrap().phones().contains(&phone) {
                     return fail(format!("нет трубки {phone}"));
@@ -894,6 +902,7 @@ fn map_input(msg: ClientMsg) -> Result<(PhoneId, InputCmd), String> {
         | ClientMsg::ScreenState { .. }
         | ClientMsg::Button { .. }
         | ClientMsg::NetworkInfo { .. }
+        | ClientMsg::Health
         | ClientMsg::SetAirplaneMode { .. }
         | ClientMsg::LaunchApp { .. }
         | ClientMsg::ListApps { .. }

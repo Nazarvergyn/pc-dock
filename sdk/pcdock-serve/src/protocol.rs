@@ -171,6 +171,8 @@ pub enum ClientMsg {
     SetBlocklist {
         packages: Vec<String>,
     },
+    /// Состояние демона: версия, протокол, телефоны. Ответ `Health`.
+    Health,
     /// Выход в сеть (`online`), локальный адрес и интерфейс.
     NetworkInfo {
         phone: u32,
@@ -325,6 +327,12 @@ pub enum ServerMsg {
     },
     /// Пароль принят.
     Authed,
+    /// Ответ на `Health`: версия сервера, протокол, подробности по телефонам.
+    Health {
+        server: String,
+        protocol: u32,
+        phones: Vec<serde_json::Value>,
+    },
     /// Список телефонов: номера и подробности (состояние, путь, серийник, имя, экран).
     Phones {
         phones: Vec<u32>,
@@ -478,6 +486,7 @@ mod tests {
     fn json_commands_roundtrip() {
         let msgs = vec![
             ClientMsg::List,
+            ClientMsg::Health,
             ClientMsg::Watch { phone: 7, fps: Some(5.0), on_change: true, audio: false },
             ClientMsg::TouchEx {
                 phone: 7,
