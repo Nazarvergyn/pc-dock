@@ -387,7 +387,6 @@ pub fn parse_signatures(out: &str) -> Vec<String> {
 /// Пакеты, чьи окна считаются системными диалогами.
 const DIALOG_PACKAGES: &[&str] = &[
     "android",
-    "com.android.systemui",
     "com.android.permissioncontroller",
     "com.google.android.permissioncontroller",
     "com.android.packageinstaller",
@@ -520,17 +519,20 @@ pub fn parse_launchable(out: &str) -> Vec<String> {
 
 /// Окно в фокусе из `dumpsys window`: `mCurrentFocus=Window{… u0 пакет/Активность}`.
 pub fn parse_foreground(out: &str) -> Value {
-    let line = out
-        .lines()
-        .find(|l| l.contains("mCurrentFocus=") && !l.contains("mCurrentFocus=null"))
-        .or_else(|| out.lines().find(|l| l.contains("mFocusedApp=") && !l.contains("mFocusedApp=null")));
-    let comp = line.and_then(|l| {
-        let inner = l.trim_end().trim_end_matches('}');
-        inner.rsplit(' ').next().map(str::to_string)
-    });
-    match comp.as_deref().and_then(|c| c.split_once('/')) {
-        Some((pkg, act)) => json!({"package": pkg, "activity": act}),
-        None => json!({"package": comp, "activity": null}),
+    // Окно в фокусе без `пакет/активность` (шторка `NotificationShade`, экран блокировки) не годится:
+    // тогда берём приложение, которое система считает сфокусированным.
+    let component = |key: &str| -> Option<String> {
+        out.lines()
+            .filter(|l| l.contains(key))
+            .find_map(|l| l.split_whitespace().map(|w| w.trim_end_matches('}')).find(|w| w.contains('/')))
+            .map(str::to_string)
+    };
+    match component("mCurrentFocus=").or_else(|| component("mFocusedApp=")) {
+        Some(c) => {
+            let (pkg, act) = c.split_once('/').unwrap_or((&c, ""));
+            json!({"package": pkg, "activity": act})
+        }
+        None => json!({"package": null, "activity": null}),
     }
 }
 
@@ -824,7 +826,10 @@ impl DeviceBackend for AdbDevice {
                 Ok(json!({}))
             }
             DeviceOp::PublicIp => {
-                let out = self.sh(serial, "toybox wget -q -T 5 -O - http://api.ipify.org")?;
+                let out = self.sh(
+                    serial,
+                    "curl -s -m 5 http://api.ipify.org || toybox wget -q -T 5 -O - http://api.ipify.org",
+                )?;
                 parse_ip(&out)
                     .map(|ip| json!({ "ip": ip }))
                     .ok_or_else(|| "внешний адрес не получен".to_string())
@@ -940,6 +945,11 @@ mod tests {
         let f = parse_foreground("  mCurrentFocus=Window{a1b2 u0 com.app/com.app.Main}\n");
         assert_eq!((f["package"].clone(), f["activity"].clone()), (json!("com.app"), json!("com.app.Main")));
         assert!(parse_foreground("  mCurrentFocus=null\n")["package"].is_null());
+        let shade = parse_foreground(
+            "  mCurrentFocus=Window{a133aa7 u0 NotificationShade}\n  mFocusedApp=ActivityRecord{f37 u10 org.telegram.messenger/.DefaultIcon t1000049}\n",
+        );
+        assert_eq!(shade["package"], "org.telegram.messenger");
+        assert_eq!(shade["activity"], ".DefaultIcon");
     }
 
     #[test]

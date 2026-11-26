@@ -281,3 +281,27 @@ fn connect_policy_is_applied_and_validated() {
         assert_eq!(c.ask(m)["ev"], "Error", "{bad}");
     }
 }
+
+#[test]
+fn every_device_command_reaches_the_backend() {
+    let fake = Arc::new(Fake::default());
+    let mut c = Conn::open(serve(Some("SER1"), Some(fake.clone())));
+    let p = phone_id(&mut c);
+    let cmds = [
+        ("SystemDialog", json!({})),
+        ("ExitInfo", json!({"package": "com.a.b"})),
+        ("SetPackageVerifier", json!({"on": false})),
+        ("PublicIp", json!({})),
+        ("CompanionPermissions", json!({})),
+        ("CompanionRestart", json!({})),
+        ("CompanionInstall", json!({"path": "/data/local/tmp/a.apk"})),
+    ];
+    for (op, extra) in cmds {
+        let mut m = extra.clone();
+        m["op"] = json!(op);
+        m["phone"] = json!(p);
+        let r = c.ask(m);
+        assert_eq!(r["ev"], "DeviceResult", "{op}: {r}");
+    }
+    assert_eq!(fake.calls.lock().unwrap().len(), 7);
+}

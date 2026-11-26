@@ -579,6 +579,15 @@ impl Handler<ClientState> for Handle {
                 self.device_call(hub, client, id, phone, Ok(DeviceOp::SetClipboard { text }))
             }
             ClientMsg::PublicIp { phone } => self.device_call(hub, client, id, phone, Ok(DeviceOp::PublicIp)),
+            ClientMsg::CompanionPermissions { phone } => {
+                self.device_call(hub, client, id, phone, Ok(DeviceOp::CompanionPermissions))
+            }
+            ClientMsg::CompanionRestart { phone } => {
+                self.device_call(hub, client, id, phone, Ok(DeviceOp::CompanionRestart))
+            }
+            ClientMsg::CompanionInstall { phone, path, sha256 } => {
+                self.device_call(hub, client, id, phone, Ok(DeviceOp::CompanionInstall { path, sha256 }))
+            }
             ClientMsg::NetworkInfo { phone } => {
                 self.device_call(hub, client, id, phone, Ok(DeviceOp::NetworkInfo))
             }
@@ -695,6 +704,9 @@ impl Handle {
         let companion = if via_companion { companion_body(&op) } else { None };
         if via_companion && companion.is_none() && info.serial.is_none() {
             return fail("у телефона неизвестен серийник: нужен ADB (компаньон эту команду не умеет)".into());
+        }
+        if companion.is_some() && info.transport == Some(pcdock_core::link::Transport::Adb) {
+            return fail("компаньон работает по USB-аксессуару (AOA); по ADB эта команда недоступна".into());
         }
         if companion.is_some() && info.state != PhoneState::Ready {
             let hint = info.state.hint();
