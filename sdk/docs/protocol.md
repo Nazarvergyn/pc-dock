@@ -83,7 +83,7 @@
 | `op` | Поля | Ответ |
 |---|---|---|
 | `List` | | `Phones {phones, details}`; `details`: для каждого `{phone, state, transport, address, serial, name, display}` |
-| `Health` | | `Health {server, protocol, phones}`; `phones` как `details` в `List` |
+| `Health` | | `Health {server, protocol, phones, errors}`; `phones` как `details` в `List`; `errors`: последние 100 ошибок `{at, phone, kind, detail}` (обрыв связи, предупреждения, битые пакеты, сбои команд над телефоном) |
 | `Watch` | `phone`, `fps?`, `on_change?`, `audio?` | `Watched`; затем последний кадр из кэша. Повторный `Watch` меняет условия |
 | `Unwatch` | `phone` | `Watched {on:false}` |
 | `Snapshot` | `phone` | `Ok` (если был `id`) и один видеопакет только вам; нет кадра: `Error` |

@@ -232,3 +232,23 @@ fn selectors_reach_the_backend_and_bad_ones_are_rejected() {
     );
     assert_eq!(r["op"], "WaitFor");
 }
+
+#[test]
+fn health_reports_server_phones_and_recent_errors() {
+    let mut c = Conn::open(serve(Some("SER1"), Some(Arc::new(Fake::default()))));
+    let p = phone_id(&mut c);
+    let r = c.ask(json!({"op": "Health"}));
+    assert_eq!(r["ev"], "Health", "{r}");
+    assert!(r["server"].as_str().unwrap().starts_with("pcdockd/"));
+    assert_eq!(r["phones"].as_array().unwrap().len(), 1);
+    assert!(r["errors"].as_array().unwrap().is_empty());
+
+    let r = c.ask(json!({"op": "InstallApk", "phone": p, "path": "/sdcard/Download/a.apk"}));
+    assert_eq!(r["ev"], "Error", "{r}");
+    let r = c.ask(json!({"op": "Health"}));
+    let errors = r["errors"].as_array().unwrap();
+    assert_eq!(errors.len(), 1, "{r}");
+    assert_eq!(errors[0]["kind"], "InstallApk");
+    assert_eq!(errors[0]["phone"], p);
+    assert!(errors[0]["detail"].as_str().unwrap().contains("INSTALL_FAILED"));
+}

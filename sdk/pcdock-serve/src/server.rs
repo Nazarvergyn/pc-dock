@@ -65,6 +65,8 @@ struct Shared {
     files: Option<FileOptions>,
     device: Option<Arc<dyn DeviceBackend>>,
     blocklist: Mutex<Vec<String>>,
+    /// Последние ошибки (не больше `MAX_ERRORS`): для `Health`.
+    errors: Mutex<std::collections::VecDeque<Value>>,
     next_transfer: AtomicU32,
 }
 
@@ -118,6 +120,7 @@ impl Serve {
             files,
             device,
             blocklist: Mutex::new(Vec::new()),
+            errors: Mutex::new(Default::default()),
             next_transfer: AtomicU32::new(1),
         });
         let hub = Hub::new(Handle { shared: shared.clone() }, token);
@@ -155,6 +158,22 @@ impl Serve {
                         // Телефон (пере)подключился и снова не знает, что от него нужно.
                         shared.refresh_demand(&hub, *phone, true);
                     }
+                    match &ev {
+                        FarmEvent::LinkDown { phone, detail } => {
+                            shared.note_error(*phone, "link_down", detail)
+                        }
+                        FarmEvent::Warning { phone, detail } => shared.note_error(*phone, "warning", detail),
+                        FarmEvent::Malformed { phone, detail } => {
+                            shared.note_error(*phone, "malformed", detail)
+                        }
+                        FarmEvent::Disconnected { phone, reason } => {
+                            shared.note_error(*phone, "disconnected", reason)
+                        }
+                        FarmEvent::PeerSilent { phone } => {
+                            shared.note_error(*phone, "peer_silent", "телефон не ответил на HELLO")
+                        }
+                        _ => {}
+                    }
                     route(&hub, ev);
                 }
                 thread::sleep(Duration::from_millis(5));
@@ -163,7 +182,23 @@ impl Serve {
     }
 }
 
+/// Сколько последних ошибок помнит демон.
+const MAX_ERRORS: usize = 100;
+
 impl Shared {
+    /// Запоминает ошибку для `Health`.
+    fn note_error(&self, phone: PhoneId, kind: &str, detail: &str) {
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut e = self.errors.lock().unwrap();
+        if e.len() >= MAX_ERRORS {
+            e.pop_front();
+        }
+        e.push_back(json!({ "at": at, "phone": phone, "kind": kind, "detail": detail }));
+    }
+
     /// Пересчитывает, что нужно телефону, по подпискам всех клиентов и сообщает ему, если изменилось
     /// (или если `force`: телефон только что подключился и ничего не знает).
     fn refresh_demand(&self, hub: &Hub<ClientState>, phone: PhoneId, force: bool) {
@@ -273,6 +308,7 @@ impl Handler<ClientState> for Handle {
                     server: format!("pcdockd/{}", env!("CARGO_PKG_VERSION")),
                     protocol: PROTOCOL_VERSION,
                     phones: info.iter().map(phone_json).collect(),
+                    errors: self.shared.errors.lock().unwrap().iter().cloned().collect(),
                 })
             }
             ClientMsg::Watch { phone, fps, on_change, audio } => {
@@ -551,7 +587,10 @@ impl Handle {
                     let msg = ServerMsg::DeviceResult { phone, op: op.name().to_string(), data };
                     hub.reply(client, id, to_value(&msg));
                 }
-                Err(e) => hub.error(client, id, e),
+                Err(e) => {
+                    shared.note_error(phone, op.name(), &e);
+                    hub.error(client, id, e)
+                }
             })
             .expect("не встал поток операции над телефоном");
     }

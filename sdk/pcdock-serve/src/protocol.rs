@@ -360,6 +360,8 @@ pub enum ServerMsg {
         server: String,
         protocol: u32,
         phones: Vec<serde_json::Value>,
+        /// Последние ошибки (до 100): `{at, phone, kind, detail}`; `at` в секундах Unix.
+        errors: Vec<serde_json::Value>,
     },
     /// Список телефонов: номера и подробности (состояние, путь, серийник, имя, экран).
     Phones {
