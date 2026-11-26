@@ -6,6 +6,7 @@ pub mod events;
 pub mod jpeg;
 pub mod lua;
 pub mod params;
+pub mod record;
 pub mod runs;
 pub mod schedule;
 pub mod service;

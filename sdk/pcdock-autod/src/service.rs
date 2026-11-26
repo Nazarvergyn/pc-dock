@@ -134,8 +134,16 @@ impl Handler<()> for Service {
                     .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect());
                 let timeout = msg["timeout"].as_f64().filter(|t| *t > 0.0).map(Duration::from_secs_f64);
                 let args = if msg["args"].is_null() { json!({}) } else { msg["args"].clone() };
-                let stay = msg["stay_awake"].as_bool().unwrap_or(false);
-                match self.runs.start_with(&script, phones, args, only, timeout, stay) {
+                let opts = crate::runs::RunOptions {
+                    stay_awake: msg["stay_awake"].as_bool().unwrap_or(false),
+                    device_logs: msg["device_logs"].as_bool().unwrap_or(false),
+                    exit_info: msg["exit_info"]
+                        .as_array()
+                        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                        .unwrap_or_default(),
+                    record_fps: msg["record"].as_f64().filter(|f| *f > 0.0 && *f <= 30.0),
+                };
+                match self.runs.start_with(&script, phones, args, only, timeout, opts) {
                     Ok(run) => {
                         reply(
                             json!({"ev": "RunStarted", "run": run.id, "script": run.script_id, "name": run.script_name, "phones": run.phones}),

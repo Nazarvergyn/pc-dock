@@ -20,7 +20,7 @@
 //! `set_clipboard(текст)`, `public_ip()`.
 //! Экран: `launch(пакет, {activity})`, `apps({all})`, `foreground()`, `ui()`, `find(цель)`, `find_one(цель)`, `wait_for(цель, сек)`,
 //! `wait_gone(цель, сек)`, `tap_on(цель, {timeout})`, `type_text(текст)`, `type_into(цель, текст)`, `focused()`, `element_at(x, y)`,
-//! `network()`, `airplane(on)`. Цель: строка (`"Текст"`, `"~часть"`, `"id:имя"`, `"desc:подпись"`, варианты через `|`) или таблица-селектор.
+//! `network()`, `airplane(on)`, `ui_tiles()` (готовый список элементов для показа), `human(on)` (касания «как человек» на весь прогон). Цель: строка (`"Текст"`, `"~часть"`, `"id:имя"`, `"desc:подпись"`, варианты через `|`) или таблица-селектор.
 //! Кадр (`frame`): `seq`, `pts`, `bytes`, `width`, `height`, `save(name)`.
 
 use std::cell::RefCell;
@@ -40,6 +40,9 @@ use crate::backend::{Backend, Frame, PhoneInfo};
 use crate::events::Sink;
 use crate::jpeg::jpeg_size;
 
+/// Действие в конце прогона (до `run_end`).
+pub type Finalizer = Arc<dyn Fn(&Arc<dyn Sink>) + Send + Sync>;
+
 /// Параметры прогона.
 pub struct RunConfig {
     /// Телефоны, выделенные прогону.
@@ -52,6 +55,8 @@ pub struct RunConfig {
     pub timeout: Option<Duration>,
     /// Куда складывать вложения (кадры); `None` — не сохранять.
     pub artifacts: Option<PathBuf>,
+    /// Вызывается после тестов, до события `run_end` (запись экрана, журналы телефона).
+    pub finalizer: Option<Finalizer>,
 }
 
 /// Итог одного теста.
@@ -106,6 +111,8 @@ struct State {
     fatal: AtomicBool,
     failure_shots: Mutex<u32>,
     acquired: Mutex<Vec<u32>>,
+    /// Режим «как человек»: касания с разбросом точки, силы и времени (`p:human(true)`).
+    human: AtomicBool,
 }
 
 impl State {
@@ -508,7 +515,45 @@ impl UserData for FrameHandle {
     }
 }
 
+/// Случайное число 0..1 (xorshift, зерно из часов): криптостойкость не нужна.
+fn rand01() -> f32 {
+    use std::cell::Cell;
+    thread_local!(static S: Cell<u64> = Cell::new(
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1) | 1
+    ));
+    S.with(|s| {
+        let mut x = s.get();
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        s.set(x);
+        (x >> 40) as f32 / (1u64 << 24) as f32
+    })
+}
+
 impl PhoneHandle {
+    /// Касание (нажатие и отпускание в одной точке). В режиме «как человек» точка, сила, пятно и время удержания
+    /// получают разброс, если не заданы в `o`.
+    fn tap_at(&self, x: f32, y: f32, o: &Option<Table>) -> mlua::Result<()> {
+        if !self.st.human.load(Ordering::SeqCst) {
+            self.touch(0, x, y, o)?;
+            self.st.sleep(opt_secs(o, "hold", 0.05))?;
+            return self.touch(2, x, y, o);
+        }
+        let j = opt_f32(o, "jitter").unwrap_or(0.01);
+        let nx = (x + (rand01() * 2.0 - 1.0) * j).clamp(0.0, 1.0);
+        let ny = (y + (rand01() * 2.0 - 1.0) * j).clamp(0.0, 1.0);
+        let pressure = opt_f32(o, "pressure").unwrap_or(0.5 + rand01() * 0.3);
+        let size = opt_f32(o, "size").unwrap_or(0.04 + rand01() * 0.03);
+        let hold = opt_f32(o, "hold").unwrap_or(0.04 + rand01() * 0.08) as f64;
+        let b = &self.st.backend;
+        self.st.check_alive()?;
+        b.touch(self.id, 0, nx, ny, Some(pressure), Some(size), 0).map_err(mlua::Error::runtime)?;
+        self.st.sleep(Duration::from_secs_f64(hold))?;
+        b.touch(self.id, 2, nx, ny, Some(pressure), Some(size), 0).map_err(mlua::Error::runtime)?;
+        self.st.sleep(Duration::from_secs_f64(0.05 + rand01() as f64 * 0.15))
+    }
+
     fn touch(&self, phase: u32, x: f32, y: f32, o: &Option<Table>) -> mlua::Result<()> {
         self.st.check_alive()?;
         let finger = o.as_ref().and_then(|t| t.get::<Option<u8>>("finger").ok().flatten()).unwrap_or(0);
@@ -546,10 +591,10 @@ impl UserData for PhoneHandle {
                 t.st.sleep(Duration::from_millis(100))?;
             }
         });
-        methods.add_method("tap", |_, t, (x, y, o): (f32, f32, Option<Table>)| {
-            t.touch(0, x, y, &o)?;
-            t.st.sleep(opt_secs(&o, "hold", 0.05))?;
-            t.touch(2, x, y, &o)
+        methods.add_method("tap", |_, t, (x, y, o): (f32, f32, Option<Table>)| t.tap_at(x, y, &o));
+        methods.add_method("human", |_, t, on: bool| {
+            t.st.human.store(on, Ordering::SeqCst);
+            Ok(())
         });
         methods.add_method("touch", |_, t, (phase, x, y, o): (Value, f32, f32, Option<Table>)| {
             let phase = match &phase {
@@ -629,6 +674,10 @@ impl UserData for PhoneHandle {
             json_to_lua(lua, &r["packages"])
         });
         methods.add_method("foreground", |lua, t, ()| device_call(lua, t, json!({"op": "ForegroundApp"})));
+        methods.add_method("ui_tiles", |lua, t, ()| {
+            let r = device_json(t, json!({"op": "UiElements"}))?;
+            json_to_lua(lua, &r["elements"])
+        });
         methods.add_method("ui", |lua, t, ()| {
             let r = device_json(t, json!({"op": "UiElements"}))?;
             json_to_lua(lua, &r["elements"])
@@ -660,8 +709,7 @@ impl UserData for PhoneHandle {
             }
             let (x, y) =
                 (els[0]["x"].as_f64().unwrap_or(0.5) as f32, els[0]["y"].as_f64().unwrap_or(0.5) as f32);
-            t.touch(0, x, y, &o)?;
-            t.touch(2, x, y, &o)?;
+            t.tap_at(x, y, &o)?;
             json_to_lua(lua, &els[0])
         });
         methods.add_method("type_text", |_, t, text: String| {
@@ -1030,6 +1078,7 @@ pub fn run_script(
         fatal: AtomicBool::new(false),
         failure_shots: Mutex::new(0),
         acquired: Mutex::new(Vec::new()),
+        human: AtomicBool::new(false),
     });
     sink.emit("run_start", json!({"script": script_name, "phones": cfg.phones, "args": cfg.args}));
 
@@ -1054,6 +1103,9 @@ pub fn run_script(
         tests: results,
         duration_ms: started.elapsed().as_millis() as u64,
     };
+    if let Some(f) = &cfg.finalizer {
+        f(&sink);
+    }
     sink.emit("run_end", report.to_json());
     report
 }
@@ -1491,6 +1543,7 @@ mod tests {
             only: None,
             timeout: Some(Duration::from_secs(20)),
             artifacts: None,
+            finalizer: None,
         }
     }
 
@@ -1684,6 +1737,33 @@ mod tests {
         assert!(log.iter().any(|l| l.contains(r#""any""#) && l.contains("Нет такого")));
         assert!(log.iter().any(|l| l.contains(r#""op":"SetMobileData""#) && l.contains("false")));
         assert!(log.iter().any(|l| l.starts_with("touch 1 0 0.50 0.60")), "касание по центру найденного");
+    }
+
+    #[test]
+    fn human_mode_jitters_taps_and_new_device_methods_reach_the_backend() {
+        let fake = Fake::new();
+        let (r, _) = run(
+            r#"
+            local p = phones()[1]
+            p:tap(0.5, 0.5)
+            p:human(true)
+            p:tap(0.5, 0.5)
+            p:system_dialog("allow")
+            p:exit_info("com.have.app")
+            p:package_verifier(false)
+            p:public_ip()
+            "#,
+            &fake,
+        );
+        assert_eq!(r.status, "passed", "{r:?}");
+        let log = fake.log();
+        let touches: Vec<_> = log.iter().filter(|l| l.starts_with("touch")).collect();
+        assert_eq!(touches.len(), 4, "{log:?}");
+        assert!(touches[0].contains("p=None"), "{touches:?}");
+        assert!(touches[2].contains("p=Some"), "{touches:?}");
+        for op in ["SystemDialog", "ExitInfo", "SetPackageVerifier", "PublicIp"] {
+            assert!(log.iter().any(|l| l.contains(op)), "{op}: {log:?}");
+        }
     }
 
     #[test]

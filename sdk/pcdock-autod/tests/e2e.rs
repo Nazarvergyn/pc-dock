@@ -616,3 +616,24 @@ fn schedules_are_stored_checked_and_started_when_due() {
     c.request(json!({"op": "ScheduleDelete", "schedule": sid})).unwrap();
     assert!(c.request(json!({"op": "ScheduleDelete", "schedule": sid})).is_err());
 }
+
+#[test]
+fn run_options_save_device_logs_and_report_failures_as_log_events() {
+    let e = env("opts");
+    let c = e.client();
+    let events = c.take_events().unwrap();
+    let id = e.put(&c, "Опции", r#"test("t", function() assert.truthy(phones()[1]:wait_ready(5)) end)"#);
+    let started = c
+        .request(
+            json!({"op": "Run", "script": id, "device_logs": true, "exit_info": ["com.a.b"], "record": 5}),
+        )
+        .unwrap();
+    let run = started["run"].as_str().unwrap().to_string();
+    let (evs, end) = follow(&events, &run);
+    assert_eq!(end["status"], "passed");
+    // Команды над телефоном в этом демоне выключены, поэтому журналы не сохранены, но прогон об этом сообщил.
+    let logs: Vec<String> =
+        evs.iter().filter(|v| v["kind"] == "log").map(|v| v["text"].to_string()).collect();
+    assert!(logs.iter().any(|t| t.contains("phone-1-logcat.txt")), "{logs:?}");
+    assert!(logs.iter().any(|t| t.contains("phone-1-exit-com.a.b.txt")), "{logs:?}");
+}

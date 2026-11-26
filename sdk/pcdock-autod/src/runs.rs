@@ -20,6 +20,18 @@ fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
+/// Обвязка прогона.
+#[derive(Clone, Debug, Default)]
+pub struct RunOptions {
+    /// Не давать экранам гаснуть на время прогона.
+    pub stay_awake: bool,
+    /// В конце сохранить `logcat` каждого телефона (и `ExitInfo` для пакетов из `exit_info`) в папку прогона.
+    pub device_logs: bool,
+    pub exit_info: Vec<String>,
+    /// Записывать экран каждого телефона с таким числом кадров в секунду (mp4, если на ПК есть `ffmpeg`, иначе JPEG-кадры).
+    pub record_fps: Option<f64>,
+}
+
 /// Один прогон.
 pub struct Run {
     pub id: String,
@@ -164,7 +176,7 @@ impl Runs {
         only: Option<Vec<String>>,
         timeout: Option<Duration>,
     ) -> Result<Arc<Run>, String> {
-        self.start_with(script_id, phones, args, only, timeout, false)
+        self.start_with(script_id, phones, args, only, timeout, RunOptions::default())
     }
 
     /// То же с обвязкой: `stay_awake` держит экраны телефонов включёнными на время прогона и возвращает прежнюю настройку.
@@ -175,7 +187,7 @@ impl Runs {
         args: Value,
         only: Option<Vec<String>>,
         timeout: Option<Duration>,
-        stay_awake: bool,
+        opts: RunOptions,
     ) -> Result<Arc<Run>, String> {
         let (meta, source) = self.store.get(script_id)?;
         let args = crate::params::apply(&crate::params::parse_schema(&source)?, &args)?;
@@ -227,11 +239,32 @@ impl Runs {
         std::thread::Builder::new()
             .name(format!("run-{id}"))
             .spawn(move || {
-                let cfg = RunConfig { phones: r.phones.clone(), args: args.clone(), only, timeout, artifacts: Some(r.dir.clone()) };
+                let recorders: Vec<_> = match opts.record_fps {
+                    Some(fps) => r.phones.iter().map(|p| crate::record::start(me.backend.clone(), *p, fps, &r.dir)).collect(),
+                    None => Vec::new(),
+                };
+                let recorders = Mutex::new(recorders);
+                let (fin_backend, fin_dir, fin_phones, fin_opts) =
+                    (me.backend.clone(), r.dir.clone(), r.phones.clone(), opts.clone());
+                let finalizer: crate::lua::Finalizer = Arc::new(move |sink| {
+                    for rec in recorders.lock().unwrap().drain(..) {
+                        match rec.finish() {
+                            Ok(Some(path)) => sink.emit("log", json!({"level": "info", "text": format!("запись: {}", path.display())})),
+                            Ok(None) => {}
+                            Err(e) => sink.emit("log", json!({"level": "warn", "text": format!("запись: {e}")})),
+                        }
+                    }
+                    if fin_opts.device_logs {
+                        for p in &fin_phones {
+                            crate::record::save_device_logs(fin_backend.as_ref(), *p, &fin_opts.exit_info, &fin_dir, sink);
+                        }
+                    }
+                });
+                let cfg = RunConfig { phones: r.phones.clone(), args: args.clone(), only, timeout, artifacts: Some(r.dir.clone()), finalizer: Some(finalizer) };
                 let sink: Arc<dyn Sink> = r.log.clone();
                 // Обвязка: экран не гаснет, пока идёт прогон (если телефон это умеет); прежняя настройка возвращается.
                 let mut restore: Vec<u32> = Vec::new();
-                if stay_awake {
+                if opts.stay_awake {
                     for p in &r.phones {
                         match me.backend.device(*p, json!({"op": "StayAwake", "on": true})) {
                             Ok(v) if v["previous"].as_str() == Some("0") => restore.push(*p),
