@@ -217,9 +217,8 @@ pub fn parse_package(name: &str, out: &str) -> Value {
         return json!({"package": name, "installed": false});
     }
     let field = |key: &str| -> Option<String> {
-        out.lines().find_map(|l| {
-            l.split_whitespace().find_map(|w| w.strip_prefix(key).map(|v| v.to_string()))
-        })
+        out.lines()
+            .find_map(|l| l.split_whitespace().find_map(|w| w.strip_prefix(key).map(|v| v.to_string())))
     };
     let version_code = field("versionCode=").and_then(|v| v.parse::<u64>().ok());
     // `enabled=` у пользователя: 0 по умолчанию, 1 включено; 2, 3, 4 выключено.
