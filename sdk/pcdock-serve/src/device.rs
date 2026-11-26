@@ -81,6 +81,24 @@ pub enum DeviceOp {
     SetAirplane {
         on: bool,
     },
+    /// Системное окно (разрешение, установщик, сбой): есть ли оно и какие кнопки; `action`: `allow` или `deny` нажимает кнопку.
+    SystemDialog {
+        action: Option<String>,
+    },
+    /// Причины последних завершений приложения (`dumpsys activity exit-info`).
+    ExitInfo {
+        package: String,
+    },
+    /// Проверка приложений при установке по ADB (включена или нет).
+    SetPackageVerifier {
+        on: bool,
+    },
+    GetClipboard,
+    SetClipboard {
+        text: String,
+    },
+    /// Внешний адрес телефона.
+    PublicIp,
 }
 
 impl DeviceOp {
@@ -111,6 +129,12 @@ impl DeviceOp {
             Self::TypeText { .. } => "TypeText",
             Self::NetworkInfo => "NetworkInfo",
             Self::SetAirplane { .. } => "SetAirplaneMode",
+            Self::SystemDialog { .. } => "SystemDialog",
+            Self::ExitInfo { .. } => "ExitInfo",
+            Self::SetPackageVerifier { .. } => "SetPackageVerifier",
+            Self::GetClipboard => "GetClipboard",
+            Self::SetClipboard { .. } => "SetClipboard",
+            Self::PublicIp => "PublicIp",
         }
     }
 }
@@ -314,7 +338,76 @@ pub fn parse_package(name: &str, out: &str) -> Value {
         "enabled": enabled,
         "first_install": line_value(out, "firstInstallTime="),
         "last_update": line_value(out, "lastUpdateTime="),
+        "signatures": parse_signatures(out),
     })
+}
+
+/// Подпись пакета: `signatures=PackageSignatures{… version:3, signatures:[abcd1234], past signatures:[]}`.
+pub fn parse_signatures(out: &str) -> Vec<String> {
+    let Some(line) = out.lines().find(|l| l.contains("signatures:[")) else { return Vec::new() };
+    let inner = line.split("signatures:[").nth(1).and_then(|s| s.split(']').next()).unwrap_or("");
+    inner.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+}
+
+/// Пакеты, чьи окна считаются системными диалогами.
+const DIALOG_PACKAGES: &[&str] = &[
+    "android",
+    "com.android.systemui",
+    "com.android.permissioncontroller",
+    "com.google.android.permissioncontroller",
+    "com.android.packageinstaller",
+    "com.google.android.packageinstaller",
+    "com.miui.securitycenter",
+    "com.miui.packageinstaller",
+    "com.coloros.safecenter",
+    "com.oplus.securitypermission",
+];
+
+const ALLOW_TEXTS: &[&str] = &[
+    "allow",
+    "while using the app",
+    "only this time",
+    "ok",
+    "install",
+    "разрешить",
+    "при использовании приложения",
+    "только в этот раз",
+    "ок",
+    "установить",
+];
+const DENY_TEXTS: &[&str] = &["deny", "don't allow", "cancel", "запретить", "не разрешать", "отмена"];
+
+/// Системный диалог на экране: `present`, пакет, кнопки и (для `action`) выбранная кнопка.
+pub fn system_dialog(tree: &crate::ui::UiTree, action: Option<&str>) -> Result<Value, String> {
+    let nodes: Vec<_> = tree
+        .nodes
+        .iter()
+        .filter(|n| n.visible(tree) && DIALOG_PACKAGES.contains(&n.package.as_str()))
+        .collect();
+    if nodes.is_empty() {
+        return Ok(json!({ "present": false, "buttons": [] }));
+    }
+    let buttons: Vec<_> = nodes.iter().filter(|n| n.clickable && !n.text.is_empty()).collect();
+    let words = match action {
+        None => None,
+        Some("allow") => Some(ALLOW_TEXTS),
+        Some("deny") => Some(DENY_TEXTS),
+        Some(a) => return Err(format!("action: allow или deny, не {a:?}")),
+    };
+    let pressed = words.and_then(|w| buttons.iter().find(|b| w.contains(&b.text.to_lowercase().as_str())));
+    Ok(json!({
+        "present": true,
+        "package": nodes[0].package,
+        "texts": nodes.iter().filter(|n| !n.text.is_empty() && !n.clickable).map(|n| n.text.clone()).collect::<Vec<_>>(),
+        "buttons": buttons.iter().map(|n| n.to_json(tree)).collect::<Vec<_>>(),
+        "target": pressed.map(|n| n.to_json(tree)),
+    }))
+}
+
+/// Строка похожа на IPv4 или IPv6.
+pub fn parse_ip(out: &str) -> Option<String> {
+    let s = out.trim();
+    s.parse::<std::net::IpAddr>().ok().map(|_| s.to_string())
 }
 
 fn line_value(out: &str, key: &str) -> Option<String> {
@@ -637,6 +730,36 @@ impl DeviceBackend for AdbDevice {
                 }
                 Ok(json!({}))
             }
+            DeviceOp::SystemDialog { action } => {
+                let tree = self.tree(serial)?;
+                let r = system_dialog(&tree, action.as_deref())?;
+                if let Some(t) = r.get("target").filter(|t| !t.is_null()) {
+                    let (x, y) = (t["x"].as_f64().unwrap_or(0.5), t["y"].as_f64().unwrap_or(0.5));
+                    let (px, py) = ((x * tree.width as f64) as i32, (y * tree.height as f64) as i32);
+                    self.sh(serial, &format!("input tap {px} {py}"))?;
+                }
+                Ok(r)
+            }
+            DeviceOp::ExitInfo { package } => {
+                check_package(package)?;
+                Ok(json!({ "text": self.sh(serial, &format!("dumpsys activity exit-info {package}"))? }))
+            }
+            DeviceOp::SetPackageVerifier { on } => {
+                let v = if *on { 1 } else { 0 };
+                self.sh(serial, &format!("settings put global verifier_verify_adb_installs {v}"))?;
+                self.sh(serial, &format!("settings put global package_verifier_enable {v}"))?;
+                Ok(json!({}))
+            }
+            DeviceOp::GetClipboard | DeviceOp::SetClipboard { .. } => Err(
+                "буфер обмена по ADB недоступен (Android закрывает его фоновым процессам); нужен компаньон"
+                    .into(),
+            ),
+            DeviceOp::PublicIp => {
+                let out = self.sh(serial, "toybox wget -q -T 5 -O - http://api.ipify.org")?;
+                parse_ip(&out)
+                    .map(|ip| json!({ "ip": ip }))
+                    .ok_or_else(|| "внешний адрес не получен".to_string())
+            }
             DeviceOp::Button { name } => {
                 let code = button_keycode(name).ok_or_else(|| format!("неизвестная кнопка: {name}"))?;
                 self.sh(serial, &format!("input keyevent {code}"))?;
@@ -649,6 +772,28 @@ impl DeviceBackend for AdbDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dialogs_ips_and_signatures() {
+        let xml = r#"<hierarchy rotation="0"><node index="0" text="" resource-id="" class="android.widget.FrameLayout" package="com.google.android.permissioncontroller" bounds="[0,0][1000,2000]"><node text="Allow app to use camera?" class="android.widget.TextView" package="com.google.android.permissioncontroller" clickable="false" bounds="[100,600][900,700]"/><node text="Allow" class="android.widget.Button" package="com.google.android.permissioncontroller" clickable="true" bounds="[100,800][900,900]"/><node text="Deny" class="android.widget.Button" package="com.google.android.permissioncontroller" clickable="true" bounds="[100,1000][900,1100]"/></node></hierarchy>"#;
+        let tree = parse_dump(xml).unwrap();
+        let r = system_dialog(&tree, Some("deny")).unwrap();
+        assert_eq!(r["present"], true);
+        assert_eq!(r["target"]["text"], "Deny");
+        assert_eq!(r["buttons"].as_array().unwrap().len(), 2);
+        assert!(system_dialog(&tree, Some("x")).is_err());
+        let none = parse_dump(
+            r#"<hierarchy rotation="0"><node text="a" package="com.app" bounds="[0,0][10,10]"/></hierarchy>"#,
+        )
+        .unwrap();
+        assert_eq!(system_dialog(&none, None).unwrap()["present"], false);
+        assert_eq!(parse_ip(" 1.2.3.4\n"), Some("1.2.3.4".into()));
+        assert_eq!(parse_ip("<html>"), None);
+        assert_eq!(
+            parse_signatures("    signatures=PackageSignatures{1a2b version:3, signatures:[abcd, ef01], past signatures:[]}"),
+            vec!["abcd", "ef01"]
+        );
+    }
 
     #[test]
     fn package_names_are_checked() {

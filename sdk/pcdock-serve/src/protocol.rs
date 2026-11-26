@@ -171,6 +171,34 @@ pub enum ClientMsg {
     SetBlocklist {
         packages: Vec<String>,
     },
+    /// Системное окно (разрешение, установщик, сбой). `action`: `allow` или `deny` нажимает кнопку. `data.present`, `data.buttons`.
+    SystemDialog {
+        phone: u32,
+        #[serde(default)]
+        action: Option<String>,
+    },
+    /// Причины последних завершений приложения. `data.text`.
+    ExitInfo {
+        phone: u32,
+        package: String,
+    },
+    /// Проверка приложений при установке по ADB.
+    SetPackageVerifier {
+        phone: u32,
+        on: bool,
+    },
+    /// Буфер обмена телефона (нужен компаньон).
+    GetClipboard {
+        phone: u32,
+    },
+    SetClipboard {
+        phone: u32,
+        text: String,
+    },
+    /// Внешний адрес телефона. `data.ip`.
+    PublicIp {
+        phone: u32,
+    },
     /// Состояние демона: версия, протокол, телефоны. Ответ `Health`.
     Health,
     /// Выход в сеть (`online`), локальный адрес и интерфейс.

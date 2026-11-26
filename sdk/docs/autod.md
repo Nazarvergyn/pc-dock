@@ -141,6 +141,7 @@ end)
 | `p:force_stop(пакет)`, `p:clear_data(пакет)`, `p:uninstall(пакет, {keep_data})` | остановить, стереть данные, удалить |
 | `p:install_apk(путь_на_телефоне, {allow_downgrade, sha256})` | установить APK (его кладёт на телефон `FilePut`); ошибка несёт причину |
 | `p:logcat({lines, package, level})` | текст журнала |
+| `p:system_dialog(действие?)`, `p:exit_info(пакет)`, `p:package_verifier(on)`, `p:get_clipboard()`, `p:set_clipboard(текст)`, `p:public_ip()` | системное окно (`allow`/`deny` нажимает кнопку; `present`, `buttons`); причины завершения приложения; проверка приложений при установке; буфер обмена (только через компаньон); внешний адрес |
 | `p:mobile_data(on)`, `p:stay_awake(on)`, `p:screen()`, `p:button(имя)` | мобильные данные; «не гасить экран» (возвращает `previous`); `on`, `locked`; кнопка (`back`, `home`, `recents`, …) |
 | `p:frame(opts)` | кадр экрана; `opts`: `timeout` (5 с), `fresh` (дождаться нового) |
 | `p:wait_change(timeout)` | ждёт, пока картинка изменится; возвращает кадр или `nil` |

@@ -430,6 +430,22 @@ impl Handler<ClientState> for Handle {
                     reply(ServerMsg::Ok);
                 }
             }
+            ClientMsg::SystemDialog { phone, action } => {
+                self.device_call(hub, client, id, phone, Ok(DeviceOp::SystemDialog { action }))
+            }
+            ClientMsg::ExitInfo { phone, package } => {
+                self.device_call(hub, client, id, phone, Ok(DeviceOp::ExitInfo { package }))
+            }
+            ClientMsg::SetPackageVerifier { phone, on } => {
+                self.device_call(hub, client, id, phone, Ok(DeviceOp::SetPackageVerifier { on }))
+            }
+            ClientMsg::GetClipboard { phone } => {
+                self.device_call(hub, client, id, phone, Ok(DeviceOp::GetClipboard))
+            }
+            ClientMsg::SetClipboard { phone, text } => {
+                self.device_call(hub, client, id, phone, Ok(DeviceOp::SetClipboard { text }))
+            }
+            ClientMsg::PublicIp { phone } => self.device_call(hub, client, id, phone, Ok(DeviceOp::PublicIp)),
             ClientMsg::NetworkInfo { phone } => {
                 self.device_call(hub, client, id, phone, Ok(DeviceOp::NetworkInfo))
             }
@@ -903,6 +919,12 @@ fn map_input(msg: ClientMsg) -> Result<(PhoneId, InputCmd), String> {
         | ClientMsg::Button { .. }
         | ClientMsg::NetworkInfo { .. }
         | ClientMsg::Health
+        | ClientMsg::SystemDialog { .. }
+        | ClientMsg::ExitInfo { .. }
+        | ClientMsg::SetPackageVerifier { .. }
+        | ClientMsg::GetClipboard { .. }
+        | ClientMsg::SetClipboard { .. }
+        | ClientMsg::PublicIp { .. }
         | ClientMsg::SetAirplaneMode { .. }
         | ClientMsg::LaunchApp { .. }
         | ClientMsg::ListApps { .. }

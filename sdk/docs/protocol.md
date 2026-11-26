@@ -103,6 +103,11 @@
 | `InstallApk` | `phone`, `path`, `allow_downgrade?`, `sha256?` | установить APK, уже лежащий на телефоне в разрешённой папке (сначала `FilePut`); `sha256` проверяется на телефоне; ошибка несёт причину `pm` |
 | `Logcat` | `phone`, `lines?` (500, до 5000), `package?`, `level?` (`V D I W E F`) | `data.text` |
 | `SetMobileData` | `phone`, `on` | мобильные данные |
+| `SystemDialog` | `phone`, `action?` (`allow`/`deny`) | `data.present`, `data.package`, `data.texts`, `data.buttons`, `data.target` (нажатая кнопка) |
+| `ExitInfo` | `phone`, `package` | `data.text`: `dumpsys activity exit-info` |
+| `SetPackageVerifier` | `phone`, `on` | проверка приложений при установке по ADB |
+| `GetClipboard`, `SetClipboard` | `phone` / `phone`, `text` | `data.text`; по ADB ошибка, нужен компаньон |
+| `PublicIp` | `phone` | `data.ip` |
 | `StayAwake` | `phone`, `on` | `data.previous`: прежнее значение настройки |
 | `ScreenState` | `phone` | `wakefulness`, `on`, `locked` |
 | `Button` | `phone`, `name` | `back home recents menu power wakeup sleep volume_up volume_down volume_mute enter delete tab` |

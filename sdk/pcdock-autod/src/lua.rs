@@ -16,7 +16,8 @@
 //! `enable(kind, on)`, `frame(opts)`, `wait_frame(opts)`, `wait_change(timeout)`. Координаты: доли экрана 0..1.
 //! Команды над телефоном (работают по ADB): `device_info()`, `stats()`, `app_info(pkg|{pkgs})`, `installed(pkg)`, `force_stop(pkg)`,
 //! `clear_data(pkg)`, `uninstall(pkg, opts)`, `install_apk(path, opts)`, `logcat(opts)`, `mobile_data(on)`, `stay_awake(on)`,
-//! `screen()`, `button(name)`.
+//! `screen()`, `button(name)`, `system_dialog("allow"|"deny")`, `exit_info(pkg)`, `package_verifier(on)`, `get_clipboard()`,
+//! `set_clipboard(текст)`, `public_ip()`.
 //! Экран: `launch(пакет, {activity})`, `apps({all})`, `foreground()`, `ui()`, `find(цель)`, `find_one(цель)`, `wait_for(цель, сек)`,
 //! `wait_gone(цель, сек)`, `tap_on(цель, {timeout})`, `type_text(текст)`, `type_into(цель, текст)`, `focused()`, `element_at(x, y)`,
 //! `network()`, `airplane(on)`. Цель: строка (`"Текст"`, `"~часть"`, `"id:имя"`, `"desc:подпись"`, варианты через `|`) или таблица-селектор.
@@ -735,6 +736,27 @@ impl UserData for PhoneHandle {
         });
         methods.add_method("stay_awake", |lua, t, on: bool| {
             device_call(lua, t, json!({"op": "StayAwake", "on": on}))
+        });
+        methods.add_method("system_dialog", |lua, t, action: Option<String>| {
+            device_call(lua, t, json!({"op": "SystemDialog", "action": action}))
+        });
+        methods.add_method("exit_info", |_, t, pkg: String| {
+            let r = device_json(t, json!({"op": "ExitInfo", "package": pkg}))?;
+            Ok(r["text"].as_str().unwrap_or("").to_string())
+        });
+        methods.add_method("package_verifier", |_, t, on: bool| {
+            device_json(t, json!({"op": "SetPackageVerifier", "on": on})).map(|_| ())
+        });
+        methods.add_method("get_clipboard", |_, t, ()| {
+            let r = device_json(t, json!({"op": "GetClipboard"}))?;
+            Ok(r["text"].as_str().unwrap_or("").to_string())
+        });
+        methods.add_method("set_clipboard", |_, t, text: String| {
+            device_json(t, json!({"op": "SetClipboard", "text": text})).map(|_| ())
+        });
+        methods.add_method("public_ip", |_, t, ()| {
+            let r = device_json(t, json!({"op": "PublicIp"}))?;
+            Ok(r["ip"].as_str().unwrap_or("").to_string())
         });
         methods.add_method("screen", |lua, t, ()| device_call(lua, t, json!({"op": "ScreenState"})));
         methods.add_method("button", |_, t, name: String| {
