@@ -91,6 +91,7 @@ class ScreenCaptureService : Service(), HostLink.Listener {
     private lateinit var usbManager: UsbManager
     private lateinit var displayManager: DisplayManager
     private var captureThread: HandlerThread? = null
+    private val commandExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
     private var handler: Handler? = null
     private var receiverRegistered = false
     private var displayListenerRegistered = false
@@ -829,6 +830,16 @@ class ScreenCaptureService : Service(), HostLink.Listener {
             Proto.T_REQUEST_FRAME -> {
                 reactivateIfPaused("REQUEST_FRAME")
                 lastJpeg?.let { if (canDeliver()) deliverFrame(it, lastPtsUs) }
+            }
+
+            Proto.T_COMMAND -> {
+                reactivateIfPaused("COMMAND")
+                val (req, body) = Messages.parseCommand(p.payload) ?: return
+                // Команды выполняются вне потока приёма: запуск приложения или список пакетов могут занять время.
+                commandExecutor.execute {
+                    val r = PhoneCommands.run(this, body)
+                    l.sendControl(Messages.commandResult(req, r.ok, r.body).encode())
+                }
             }
 
             Proto.T_WAKE -> {

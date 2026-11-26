@@ -7,6 +7,8 @@
 блок-лист. В Lua: те же команды методами телефона, цели поиска строкой, стандартная библиотека (`retry`, `find_any`, `tap_any`, `human_tap`,
 `net_restart`, `wait_online` …). В `pcdock-autod`: параметры сценария (`-- @param`), цепочки, расписание, `stay_awake` на время прогона.
 
+Команда `Health` (версия, телефоны, журнал последних ошибок), `SystemDialog`, `ExitInfo`, `SetPackageVerifier`, `PublicIp`, подписи в `AppInfo`; компаньон на телефоне (пакеты `COMMAND`/`COMMAND_RESULT`): команды работают без ADB, плюс буфер обмена.
+
 ## 0.1.0-alpha.3
 
 Команда `SetTransport` (ручной выбор пути AOA/ADB/serial), установщики `install.sh` и `install.ps1`; в демо (pygame: F1/F2/F3, веб: список «Путь») переключение пути.
