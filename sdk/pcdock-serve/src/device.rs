@@ -7,6 +7,8 @@
 use pcdock_adb::{check_remote_path, Adb};
 use serde_json::{json, Value};
 
+use crate::ui::{parse_dump, Selector};
+
 /// Что можно сделать с телефоном. Результат это JSON (форма у каждой операции описана в `protocol.md`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum DeviceOp {
@@ -22,6 +24,19 @@ pub enum DeviceOp {
     StayAwake { on: bool },
     ScreenState,
     Button { name: String },
+    LaunchApp { package: String, activity: Option<String> },
+    /// `all`: все пакеты; иначе только те, у которых есть значок запуска.
+    ListApps { all: bool },
+    /// Какое приложение сейчас на переднем плане.
+    ForegroundApp,
+    UiDump,
+    UiFind { selector: Selector },
+    UiElements,
+    UiAt { x: f64, y: f64 },
+    UiFocused,
+    /// Ждать появления (`gone`: исчезновения) элемента, не дольше `timeout` секунд.
+    WaitFor { selector: Selector, timeout: f64, gone: bool },
+    TypeText { text: String },
 }
 
 impl DeviceOp {
@@ -40,6 +55,16 @@ impl DeviceOp {
             Self::StayAwake { .. } => "StayAwake",
             Self::ScreenState => "ScreenState",
             Self::Button { .. } => "Button",
+            Self::LaunchApp { .. } => "LaunchApp",
+            Self::ListApps { .. } => "ListApps",
+            Self::ForegroundApp => "ForegroundApp",
+            Self::UiDump => "UiDump",
+            Self::UiFind { .. } => "UiFind",
+            Self::UiElements => "UiElements",
+            Self::UiAt { .. } => "UiAt",
+            Self::UiFocused => "UiFocused",
+            Self::WaitFor { .. } => "WaitFor",
+            Self::TypeText { .. } => "TypeText",
         }
     }
 }
@@ -74,6 +99,15 @@ pub fn check_package(name: &str) -> Result<(), String> {
     } else {
         Err(format!("плохое имя пакета: {name:?}"))
     }
+}
+
+/// Пакет попадает в блок-лист: точное имя или маска `*` в начале/конце (`com.bad.*`, `*.cloner`).
+pub fn is_blocked(list: &[String], package: &str) -> bool {
+    list.iter().any(|p| match (p.strip_prefix('*'), p.strip_suffix('*')) {
+        (Some(suffix), _) if !suffix.contains('*') => package.ends_with(suffix),
+        (_, Some(prefix)) if !prefix.contains('*') => package.starts_with(prefix),
+        _ => p == package,
+    })
 }
 
 /// Кнопка по имени → код клавиши Android.
@@ -272,6 +306,60 @@ pub fn parse_screen_state(power: &str, window: &str) -> Value {
     })
 }
 
+/// Текст для `input text`: пробел это `%s`, остальное экранируется для shell. Только ASCII.
+pub fn input_text_arg(text: &str) -> Result<String, String> {
+    if !text.is_ascii() || text.chars().any(|c| c.is_control()) {
+        return Err("TypeText по ADB: только печатный ASCII (для остального нужен компаньон)".into());
+    }
+    let mut out = String::from("'");
+    for c in text.chars() {
+        match c {
+            ' ' => out.push_str("%s"),
+            '\'' => out.push_str("'\\''"),
+            c => out.push(c),
+        }
+    }
+    out.push('\'');
+    Ok(out)
+}
+
+/// Пакеты из `pm list packages`: строки `package:имя`.
+pub fn parse_package_list(out: &str) -> Vec<String> {
+    let mut v: Vec<String> =
+        out.lines().filter_map(|l| l.trim().strip_prefix("package:")).map(|p| p.trim().to_string()).collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Пакеты со значком запуска из `cmd package query-activities`: строки `packageName=имя`.
+pub fn parse_launchable(out: &str) -> Vec<String> {
+    let mut v: Vec<String> = out
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("packageName="))
+        .map(|p| p.trim().to_string())
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Окно в фокусе из `dumpsys window`: `mCurrentFocus=Window{… u0 пакет/Активность}`.
+pub fn parse_foreground(out: &str) -> Value {
+    let line = out
+        .lines()
+        .find(|l| l.contains("mCurrentFocus=") && !l.contains("mCurrentFocus=null"))
+        .or_else(|| out.lines().find(|l| l.contains("mFocusedApp=") && !l.contains("mFocusedApp=null")));
+    let comp = line.and_then(|l| {
+        let inner = l.trim_end().trim_end_matches('}');
+        inner.rsplit(' ').next().map(str::to_string)
+    });
+    match comp.as_deref().and_then(|c| c.split_once('/')) {
+        Some((pkg, act)) => json!({"package": pkg, "activity": act}),
+        None => json!({"package": comp, "activity": null}),
+    }
+}
+
 // ---------- исполнение по ADB ----------
 
 impl AdbDevice {
@@ -297,6 +385,29 @@ impl AdbDevice {
             "mem_total_kb": total,
             "mem_available_kb": available,
         }))
+    }
+}
+
+impl AdbDevice {
+    fn tree(&self, serial: &str) -> Result<crate::ui::UiTree, String> {
+        parse_dump(&self.sh(serial, "uiautomator dump /dev/tty")?)
+    }
+
+    fn wait_for(&self, serial: &str, sel: &Selector, timeout: f64, gone: bool) -> Result<Value, String> {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs_f64(timeout.clamp(0.0, 120.0));
+        loop {
+            // Пустой экран (блокировка, переход) это не ошибка, а «пока ничего нет».
+            let tree = self.tree(serial).ok();
+            let found: Vec<Value> =
+                tree.as_ref().map(|t| t.find(sel).iter().map(|n| n.to_json(t)).collect()).unwrap_or_default();
+            if found.is_empty() == gone {
+                return Ok(json!({ "ok": true, "elements": found }));
+            }
+            if std::time::Instant::now() >= end {
+                return Ok(json!({ "ok": false, "elements": found }));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
     }
 }
 
@@ -386,6 +497,66 @@ impl DeviceBackend for AdbDevice {
                 let window = self.sh(serial, "dumpsys window").unwrap_or_default();
                 Ok(parse_screen_state(&power, &window))
             }
+            DeviceOp::LaunchApp { package, activity } => {
+                check_package(package)?;
+                if let Some(a) = activity {
+                    if !a.chars().all(|c| c.is_ascii_alphanumeric() || "._$".contains(c)) {
+                        return Err(format!("плохое имя активности: {a:?}"));
+                    }
+                    let out = self.sh(serial, &format!("am start -n {package}/{a}"))?;
+                    if out.contains("Error") {
+                        return Err(out.trim().to_string());
+                    }
+                } else {
+                    let out = self.sh(serial, &format!("monkey -p {package} -c android.intent.category.LAUNCHER 1"))?;
+                    if out.contains("No activities found") || out.contains("monkey aborted") {
+                        return Err(format!("{package}: нет значка запуска или приложение не установлено"));
+                    }
+                }
+                Ok(json!({}))
+            }
+            DeviceOp::ListApps { all } => {
+                let out = if *all {
+                    parse_package_list(&self.sh(serial, "pm list packages")?)
+                } else {
+                    parse_launchable(&self.sh(
+                        serial,
+                        "cmd package query-activities -a android.intent.action.MAIN -c android.intent.category.LAUNCHER",
+                    )?)
+                };
+                Ok(json!({ "packages": out }))
+            }
+            DeviceOp::ForegroundApp => {
+                Ok(parse_foreground(&self.sh(serial, "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'")?))
+            }
+            DeviceOp::UiDump => {
+                let tree = self.tree(serial)?;
+                Ok(json!({ "width": tree.width, "height": tree.height,
+                           "elements": tree.nodes.iter().map(|n| n.to_json(&tree)).collect::<Vec<_>>() }))
+            }
+            DeviceOp::UiFind { selector } => {
+                let tree = self.tree(serial)?;
+                Ok(json!({ "elements": tree.find(selector).iter().map(|n| n.to_json(&tree)).collect::<Vec<_>>() }))
+            }
+            DeviceOp::UiElements => {
+                let tree = self.tree(serial)?;
+                Ok(json!({ "width": tree.width, "height": tree.height,
+                           "elements": tree.elements().iter().map(|n| n.to_json(&tree)).collect::<Vec<_>>() }))
+            }
+            DeviceOp::UiAt { x, y } => {
+                let tree = self.tree(serial)?;
+                Ok(json!({ "element": tree.at(*x, *y).map(|n| n.to_json(&tree)) }))
+            }
+            DeviceOp::UiFocused => {
+                let tree = self.tree(serial)?;
+                let sel = Selector { focused: Some(true), class: Some("EditText".into()), ..Default::default() };
+                Ok(json!({ "element": tree.find(&sel).first().map(|n| n.to_json(&tree)) }))
+            }
+            DeviceOp::WaitFor { selector, timeout, gone } => self.wait_for(serial, selector, *timeout, *gone),
+            DeviceOp::TypeText { text } => {
+                self.sh(serial, &format!("input text {}", input_text_arg(text)?))?;
+                Ok(json!({}))
+            }
             DeviceOp::Button { name } => {
                 let code = button_keycode(name).ok_or_else(|| format!("неизвестная кнопка: {name}"))?;
                 self.sh(serial, &format!("input keyevent {code}"))?;
@@ -463,6 +634,25 @@ mod tests {
         assert_eq!((s["on"].clone(), s["locked"].clone()), (json!(true), json!(true)));
         let s = parse_screen_state("  mWakefulness=Asleep\n", "");
         assert_eq!((s["on"].clone(), s["locked"].clone()), (json!(false), json!(false)));
+    }
+
+    #[test]
+    fn text_for_input_is_quoted_and_lists_are_parsed() {
+        assert_eq!(input_text_arg("a b").unwrap(), "'a%sb'");
+        assert_eq!(input_text_arg("it's").unwrap(), "'it'\\''s'");
+        assert!(input_text_arg("привет").is_err());
+        assert_eq!(parse_package_list("package:b.b\npackage:a.a\n"), vec!["a.a", "b.b"]);
+        assert_eq!(parse_launchable("  packageName=x.y\n  name=z\n  packageName=x.y\n"), vec!["x.y"]);
+        let f = parse_foreground("  mCurrentFocus=Window{a1b2 u0 com.app/com.app.Main}\n");
+        assert_eq!((f["package"].clone(), f["activity"].clone()), (json!("com.app"), json!("com.app.Main")));
+        assert!(parse_foreground("  mCurrentFocus=null\n")["package"].is_null());
+    }
+
+    #[test]
+    fn blocklist_matches_names_and_masks() {
+        let l = vec!["com.bad.app".to_string(), "org.evil.*".to_string(), "*.cloner".to_string()];
+        assert!(is_blocked(&l, "com.bad.app") && is_blocked(&l, "org.evil.x") && is_blocked(&l, "a.b.cloner"));
+        assert!(!is_blocked(&l, "com.bad.app2") && !is_blocked(&l, "org.good") && !is_blocked(&[], "x.y"));
     }
 
     #[test]

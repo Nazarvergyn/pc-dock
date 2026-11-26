@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::ui::Selector;
+
 /// Команда клиента. `phone` — трубка-получатель.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "op")]
@@ -109,6 +111,65 @@ pub enum ClientMsg {
         package: Option<String>,
         #[serde(default)]
         level: Option<String>,
+    },
+    /// Запустить приложение (`activity`: `пакет/Активность` не нужна, достаточно имени активности).
+    LaunchApp {
+        phone: u32,
+        package: String,
+        #[serde(default)]
+        activity: Option<String>,
+    },
+    /// Пакеты на телефоне: со значком запуска, а с `all` все. Ответ `data.packages`.
+    ListApps {
+        phone: u32,
+        #[serde(default)]
+        all: bool,
+    },
+    /// Приложение на переднем плане: `data.package`, `data.activity` (и `blocked`, если пакет в блок-листе).
+    ForegroundApp {
+        phone: u32,
+    },
+    /// Всё дерево экрана: `data.elements` с границами и центром в долях экрана.
+    UiDump {
+        phone: u32,
+    },
+    /// Элементы экрана по селектору (поля: `text`, `text_contains`, `id`, `desc`, `desc_contains`, `class`, `package`, `checked`,
+    /// `enabled`, `focused`, `clickable`, `scrollable`, `selected`, `ignore_case`, `any`: варианты «или»).
+    UiFind {
+        phone: u32,
+        selector: Selector,
+    },
+    /// Готовый список элементов для показа: вид (`kind`), подпись, точка нажатия.
+    UiElements {
+        phone: u32,
+    },
+    /// Элемент под точкой (доли экрана).
+    UiAt {
+        phone: u32,
+        x: f64,
+        y: f64,
+    },
+    /// Поле ввода в фокусе.
+    UiFocused {
+        phone: u32,
+    },
+    /// Ждать появления (`gone`: исчезновения) элемента, `timeout` секунд (по умолчанию 10, до 120). `data.ok`, `data.elements`.
+    WaitFor {
+        phone: u32,
+        selector: Selector,
+        #[serde(default)]
+        timeout: Option<f64>,
+        #[serde(default)]
+        gone: bool,
+    },
+    /// Набрать текст в поле в фокусе (по ADB только печатный ASCII).
+    TypeText {
+        phone: u32,
+        text: String,
+    },
+    /// Блок-лист пакетов (маска `*` в начале или в конце): запуск таких приложений командой `LaunchApp` отклоняется.
+    SetBlocklist {
+        packages: Vec<String>,
     },
     /// Мобильные данные.
     SetMobileData {

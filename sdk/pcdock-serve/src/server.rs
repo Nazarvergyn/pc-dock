@@ -24,7 +24,7 @@ use pcdock_farm::{Farm, FarmEvent};
 use pcdock_net::{Handler, Hub};
 use serde_json::{json, Value};
 
-use super::device::{check_package, DeviceBackend, DeviceOp};
+use super::device::{check_package, is_blocked, DeviceBackend, DeviceOp};
 use super::files::{FileOptions, DEFAULT_ROOTS, MAX_FILE};
 use super::protocol::{encode_audio, encode_video, ClientMsg, ServerMsg, PKG_AUDIO, PKG_FILE, PKG_VIDEO};
 
@@ -64,6 +64,7 @@ struct Shared {
     demand: Mutex<HashMap<PhoneId, Demand>>,
     files: Option<FileOptions>,
     device: Option<Arc<dyn DeviceBackend>>,
+    blocklist: Mutex<Vec<String>>,
     next_transfer: AtomicU32,
 }
 
@@ -116,6 +117,7 @@ impl Serve {
             demand: Mutex::new(HashMap::new()),
             files,
             device,
+            blocklist: Mutex::new(Vec::new()),
             next_transfer: AtomicU32::new(1),
         });
         let hub = Hub::new(Handle { shared: shared.clone() }, token);
@@ -376,6 +378,46 @@ impl Handler<ClientState> for Handle {
             ClientMsg::ScreenState { phone } => {
                 self.device_call(hub, client, id, phone, Ok(DeviceOp::ScreenState))
             }
+            ClientMsg::LaunchApp { phone, package, activity } => {
+                let op = check_package(&package).map(|_| DeviceOp::LaunchApp { package, activity });
+                self.device_call(hub, client, id, phone, op)
+            }
+            ClientMsg::ListApps { phone, all } => {
+                self.device_call(hub, client, id, phone, Ok(DeviceOp::ListApps { all }))
+            }
+            ClientMsg::ForegroundApp { phone } => {
+                self.device_call(hub, client, id, phone, Ok(DeviceOp::ForegroundApp))
+            }
+            ClientMsg::UiDump { phone } => self.device_call(hub, client, id, phone, Ok(DeviceOp::UiDump)),
+            ClientMsg::UiFind { phone, selector } => {
+                self.device_call(hub, client, id, phone, Ok(DeviceOp::UiFind { selector }))
+            }
+            ClientMsg::UiElements { phone } => self.device_call(hub, client, id, phone, Ok(DeviceOp::UiElements)),
+            ClientMsg::UiAt { phone, x, y } => {
+                let op = if (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y) {
+                    Ok(DeviceOp::UiAt { x, y })
+                } else {
+                    Err("x и y: доли экрана от 0 до 1".to_string())
+                };
+                self.device_call(hub, client, id, phone, op)
+            }
+            ClientMsg::UiFocused { phone } => self.device_call(hub, client, id, phone, Ok(DeviceOp::UiFocused)),
+            ClientMsg::WaitFor { phone, selector, timeout, gone } => {
+                let op = Ok(DeviceOp::WaitFor { selector, timeout: timeout.unwrap_or(10.0), gone });
+                self.device_call(hub, client, id, phone, op)
+            }
+            ClientMsg::TypeText { phone, text } => {
+                self.device_call(hub, client, id, phone, Ok(DeviceOp::TypeText { text }))
+            }
+            ClientMsg::SetBlocklist { packages } => {
+                if packages.len() > 10_000 || packages.iter().any(|p| p.len() > 255) {
+                    return fail("плохая команда: блок-лист слишком большой".into());
+                }
+                *self.shared.blocklist.lock().unwrap() = packages;
+                if id.is_some() {
+                    reply(ServerMsg::Ok);
+                }
+            }
             ClientMsg::Button { phone, name } => {
                 let op = if super::device::button_keycode(&name).is_some() {
                     Ok(DeviceOp::Button { name })
@@ -434,6 +476,12 @@ impl Handle {
             Ok(op) => op,
             Err(e) => return fail(format!("плохая команда: {e}")),
         };
+        if let DeviceOp::LaunchApp { package, .. } = &op {
+            if is_blocked(&self.shared.blocklist.lock().unwrap(), package) {
+                return fail(format!("{package} в блок-листе"));
+            }
+        }
+        let shared = self.shared.clone();
         let Some(backend) = self.shared.device.clone() else {
             return fail("команды над телефоном выключены (pcdockd --no-device-ops)".into());
         };
@@ -459,7 +507,13 @@ impl Handle {
         thread::Builder::new()
             .name(format!("device-{}", op.name()))
             .spawn(move || match backend.run(&serial, &op, &roots) {
-                Ok(data) => {
+                Ok(mut data) => {
+                    if matches!(op, DeviceOp::ForegroundApp) {
+                        let blocked = data["package"]
+                            .as_str()
+                            .is_some_and(|p| is_blocked(&shared.blocklist.lock().unwrap(), p));
+                        data["blocked"] = json!(blocked);
+                    }
                     let msg = ServerMsg::DeviceResult { phone, op: op.name().to_string(), data };
                     hub.reply(client, id, to_value(&msg));
                 }
@@ -829,6 +883,17 @@ fn map_input(msg: ClientMsg) -> Result<(PhoneId, InputCmd), String> {
         | ClientMsg::StayAwake { .. }
         | ClientMsg::ScreenState { .. }
         | ClientMsg::Button { .. }
+        | ClientMsg::LaunchApp { .. }
+        | ClientMsg::ListApps { .. }
+        | ClientMsg::ForegroundApp { .. }
+        | ClientMsg::UiDump { .. }
+        | ClientMsg::UiFind { .. }
+        | ClientMsg::UiElements { .. }
+        | ClientMsg::UiAt { .. }
+        | ClientMsg::UiFocused { .. }
+        | ClientMsg::WaitFor { .. }
+        | ClientMsg::TypeText { .. }
+        | ClientMsg::SetBlocklist { .. }
         | ClientMsg::SetTransport { .. } => return Err(bad("не команда ввода")),
     })
 }

@@ -188,3 +188,45 @@ fn disabled_backend_unknown_phone_and_missing_serial_are_errors() {
     let r = c.ask(json!({"op": "DeviceInfo", "phone": p}));
     assert!(r["detail"].as_str().unwrap().contains("серийник"), "{r}");
 }
+
+#[test]
+fn blocklist_stops_launch_but_not_other_apps() {
+    let fake = Arc::new(Fake::default());
+    let mut c = Conn::open(serve(Some("SER1"), Some(fake.clone())));
+    let p = phone_id(&mut c);
+    let r = c.ask(json!({"op": "SetBlocklist", "packages": ["com.bad.*", "*.cloner"]}));
+    assert_eq!(r["ev"], "Ok");
+    for pkg in ["com.bad.app", "x.y.cloner"] {
+        let r = c.ask(json!({"op": "LaunchApp", "phone": p, "package": pkg}));
+        assert_eq!(r["ev"], "Error", "{pkg}: {r}");
+        assert!(r["detail"].as_str().unwrap().contains("блок-лист"));
+    }
+    let r = c.ask(json!({"op": "LaunchApp", "phone": p, "package": "com.good.app"}));
+    assert_eq!(r["op"], "LaunchApp");
+    let calls = fake.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1, "заблокированные запуски до телефона не дошли");
+}
+
+#[test]
+fn selectors_reach_the_backend_and_bad_ones_are_rejected() {
+    let fake = Arc::new(Fake::default());
+    let mut c = Conn::open(serve(Some("SER1"), Some(fake.clone())));
+    let p = phone_id(&mut c);
+    let r = c.ask(json!({"op": "UiFind", "phone": p,
+        "selector": {"text": "OK", "any": [{"id": "a"}, {"desc_contains": "b"}]}}));
+    assert_eq!(r["op"], "UiFind");
+    match &fake.calls.lock().unwrap()[0].1 {
+        DeviceOp::UiFind { selector } => {
+            assert_eq!(selector.text.as_deref(), Some("OK"));
+            assert_eq!(selector.any.len(), 2);
+        }
+        other => panic!("{other:?}"),
+    }
+    // опечатка в селекторе не молчит
+    let r = c.ask(json!({"op": "UiFind", "phone": p, "selector": {"txt": "OK"}}));
+    assert_eq!(r["ev"], "Error");
+    let r = c.ask(json!({"op": "UiAt", "phone": p, "x": 2.0, "y": 0.5}));
+    assert_eq!(r["ev"], "Error");
+    let r = c.ask(json!({"op": "WaitFor", "phone": p, "selector": {"text": "Готово"}, "timeout": 3, "gone": true}));
+    assert_eq!(r["op"], "WaitFor");
+}
