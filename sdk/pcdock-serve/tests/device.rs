@@ -252,3 +252,18 @@ fn health_reports_server_phones_and_recent_errors() {
     assert_eq!(errors[0]["phone"], p);
     assert!(errors[0]["detail"].as_str().unwrap().contains("INSTALL_FAILED"));
 }
+
+#[test]
+fn role_tokens_limit_commands() {
+    let serve = Serve::with_device(Farm::new(), Some("boss".into()), None, None);
+    serve.add_role_token("eyes", "view").unwrap();
+    assert!(serve.add_role_token("x", "root").is_err());
+    let addr = serve.run_tcp("127.0.0.1:0").unwrap();
+    let mut c = Conn::open(addr);
+    assert_eq!(c.ask(json!({"op": "Auth", "token": "eyes"}))["ev"], "Authed");
+    assert_eq!(c.ask(json!({"op": "Health"}))["ev"], "Health");
+    let r = c.ask(json!({"op": "Wake", "phone": 1}));
+    assert!(r["detail"].as_str().unwrap().contains("роль view"), "{r}");
+    let r = c.ask(json!({"op": "FileList", "phone": 1, "path": "/sdcard"}));
+    assert_eq!(r["ev"], "Error");
+}

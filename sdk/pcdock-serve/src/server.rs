@@ -134,6 +134,15 @@ impl Serve {
         serve
     }
 
+    /// Токен с ограниченной ролью (`view`, `input`, `nofiles`); см. `role_allows`.
+    pub fn add_role_token(&self, token: &str, role: &str) -> Result<(), String> {
+        if !["view", "input", "nofiles"].contains(&role) {
+            return Err(format!("роль {role}: нужна view, input или nofiles"));
+        }
+        self.hub.add_role_token(token, role);
+        Ok(())
+    }
+
     /// Доступ к ферме (добавить трубку, положить команду напрямую).
     pub fn daemon(&self) -> &Arc<Mutex<Farm>> {
         &self.shared.daemon
@@ -190,6 +199,57 @@ impl Serve {
                 thread::sleep(Duration::from_millis(5));
             })
             .expect("не встал поток раздач");
+    }
+}
+
+const VIEW_OPS: &[&str] = &[
+    "Auth",
+    "List",
+    "Health",
+    "Watch",
+    "Unwatch",
+    "Snapshot",
+    "RequestFrame",
+    "SetStream",
+    "DeviceInfo",
+    "DeviceStats",
+    "AppInfo",
+    "ListApps",
+    "ForegroundApp",
+    "UiDump",
+    "UiFind",
+    "UiElements",
+    "UiAt",
+    "UiFocused",
+    "WaitFor",
+    "ScreenState",
+    "NetworkInfo",
+];
+const INPUT_OPS: &[&str] = &[
+    "TouchEx",
+    "CursorMoveAbs",
+    "CursorMoveRel",
+    "CursorResync",
+    "MouseButton",
+    "Scroll",
+    "ScrollH",
+    "Key",
+    "DeviceEnable",
+    "ReleaseAll",
+    "Wake",
+    "Button",
+    "TypeText",
+];
+const FILE_OPS: &[&str] = &["FilePut", "FileGet", "FileList", "FileDelete", "FileCancel"];
+
+/// Роли токенов: `full` всё; `view` только просмотр и чтение; `input` просмотр и ввод; `nofiles` всё, кроме файлов.
+pub fn role_allows(role: &str, op: &str) -> bool {
+    match role {
+        "full" => true,
+        "view" => VIEW_OPS.contains(&op),
+        "input" => VIEW_OPS.contains(&op) || INPUT_OPS.contains(&op),
+        "nofiles" => !FILE_OPS.contains(&op),
+        _ => false,
     }
 }
 
@@ -320,6 +380,11 @@ impl Handler<ClientState> for Handle {
     }
 
     fn on_json(&self, hub: &Hub<ClientState>, client: u64, id: Option<u64>, msg: Value) {
+        let role = hub.role_of(client);
+        let op = msg.get("op").and_then(Value::as_str).unwrap_or("");
+        if !role_allows(&role, op) {
+            return hub.error(client, id, format!("роль {role} не разрешает команду {op}"));
+        }
         let msg: ClientMsg = match serde_json::from_value(msg) {
             Ok(m) => m,
             Err(e) => return hub.error(client, id, format!("плохая команда: {e}")),
