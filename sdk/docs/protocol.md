@@ -108,6 +108,9 @@
 | `ExitInfo` | `phone`, `package` | `data.text`: `dumpsys activity exit-info` |
 | `SetPackageVerifier` | `phone`, `on` | проверка приложений при установке по ADB |
 | `GetClipboard`, `SetClipboard` | `phone` / `phone`, `text` | `data.text`; по ADB ошибка, нужен компаньон |
+| `CompanionPermissions` | `phone` | выдать компаньону права по ADB; `data.granted`, `data.failed` |
+| `CompanionRestart` | `phone` | остановить и запустить приложение-компаньон |
+| `CompanionInstall` | | это `InstallApk` с путём к APK компаньона (`app-debug.apk`), затем `CompanionPermissions` и `CompanionRestart` |
 | `PublicIp` | `phone` | `data.ip` |
 | `StayAwake` | `phone`, `on` | `data.previous`: прежнее значение настройки |
 | `ScreenState` | `phone` | `wakefulness`, `on`, `locked` |

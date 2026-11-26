@@ -211,6 +211,14 @@ pub enum ClientMsg {
         #[serde(default)]
         scan_secs: Option<f64>,
     },
+    /// Выдать компаньону права по ADB (статистика использования, уведомления). `data.granted`, `data.failed`.
+    CompanionPermissions {
+        phone: u32,
+    },
+    /// Перезапустить приложение-компаньон на телефоне.
+    CompanionRestart {
+        phone: u32,
+    },
     /// Состояние демона: версия, протокол, телефоны. Ответ `Health`.
     Health,
     /// Выход в сеть (`online`), локальный адрес и интерфейс.

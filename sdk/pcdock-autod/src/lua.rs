@@ -802,6 +802,12 @@ impl UserData for PhoneHandle {
         methods.add_method("set_clipboard", |_, t, text: String| {
             device_json(t, json!({"op": "SetClipboard", "text": text})).map(|_| ())
         });
+        methods.add_method("companion_permissions", |lua, t, ()| {
+            device_call(lua, t, json!({"op": "CompanionPermissions"}))
+        });
+        methods.add_method("companion_restart", |_, t, ()| {
+            device_json(t, json!({"op": "CompanionRestart"})).map(|_| ())
+        });
         methods.add_method("public_ip", |_, t, ()| {
             let r = device_json(t, json!({"op": "PublicIp"}))?;
             Ok(r["ip"].as_str().unwrap_or("").to_string())

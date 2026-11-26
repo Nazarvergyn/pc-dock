@@ -1107,6 +1107,8 @@ fn map_input(msg: ClientMsg) -> Result<(PhoneId, InputCmd), String> {
         | ClientMsg::GetClipboard { .. }
         | ClientMsg::SetClipboard { .. }
         | ClientMsg::PublicIp { .. }
+        | ClientMsg::CompanionPermissions { .. }
+        | ClientMsg::CompanionRestart { .. }
         | ClientMsg::SetAirplaneMode { .. }
         | ClientMsg::LaunchApp { .. }
         | ClientMsg::ListApps { .. }

@@ -99,7 +99,14 @@ pub enum DeviceOp {
     },
     /// Внешний адрес телефона.
     PublicIp,
+    /// Выдать компаньону права, которые выдаются по ADB (статистика использования, уведомления).
+    CompanionPermissions,
+    /// Перезапустить приложение-компаньон (остановка и запуск главного окна).
+    CompanionRestart,
 }
+
+/// Пакет приложения-компаньона на телефоне.
+pub const COMPANION_PACKAGE: &str = "com.device.media";
 
 impl DeviceOp {
     /// Имя операции в ответе.
@@ -135,6 +142,8 @@ impl DeviceOp {
             Self::GetClipboard => "GetClipboard",
             Self::SetClipboard { .. } => "SetClipboard",
             Self::PublicIp => "PublicIp",
+            Self::CompanionPermissions => "CompanionPermissions",
+            Self::CompanionRestart => "CompanionRestart",
         }
     }
 }
@@ -774,6 +783,32 @@ impl DeviceBackend for AdbDevice {
                 "буфер обмена по ADB недоступен (Android закрывает его фоновым процессам); нужен компаньон"
                     .into(),
             ),
+            DeviceOp::CompanionPermissions => {
+                let mut done = Vec::new();
+                let mut failed = Vec::new();
+                for cmd in [
+                    format!("appops set {COMPANION_PACKAGE} GET_USAGE_STATS allow"),
+                    format!("pm grant {COMPANION_PACKAGE} android.permission.POST_NOTIFICATIONS"),
+                ] {
+                    match self.sh(serial, &cmd) {
+                        Ok(out) if !out.contains("Exception") && !out.contains("Unknown permission") => {
+                            done.push(cmd)
+                        }
+                        Ok(out) => failed.push(format!("{cmd}: {}", out.trim())),
+                        Err(e) => failed.push(format!("{cmd}: {e}")),
+                    }
+                }
+                Ok(json!({ "granted": done, "failed": failed }))
+            }
+            DeviceOp::CompanionRestart => {
+                self.sh(serial, &format!("am force-stop {COMPANION_PACKAGE}"))?;
+                let out = self
+                    .sh(serial, &format!("am start -n {COMPANION_PACKAGE}/com.device.media.MainActivity"))?;
+                if out.contains("Error") || out.contains("Exception") {
+                    return Err(out.trim().to_string());
+                }
+                Ok(json!({}))
+            }
             DeviceOp::PublicIp => {
                 let out = self.sh(serial, "toybox wget -q -T 5 -O - http://api.ipify.org")?;
                 parse_ip(&out)
