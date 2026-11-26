@@ -49,6 +49,11 @@
 по ADB в отдельном потоке (установка не задерживает остальных); у телефона должен быть известен серийник и доступен ADB, иначе ответ `Error`.
 Демон запуска `pcdockd --no-device-ops` их отключает.
 
+Элемент экрана (`UiFind`, `UiDump` …): `text`, `desc`, `id`, `class`, `package`, `kind`, `bounds` `[l,t,r,b]` в пикселях, `x`, `y` (центр), `w`, `h` в долях экрана
+(готовы для касания), `clickable`, `enabled`, `checked`, `focused`, `scrollable`. Селектор: `text`, `text_contains`, `id` (целиком или короткое имя), `desc`,
+`desc_contains`, `class`, `package`, `checked`, `enabled`, `focused`, `clickable`, `scrollable`, `selected`, `ignore_case`, `any` (список вариантов «или»);
+неизвестное поле это ошибка.
+
 ### Команды и ответы
 
 Команда это JSON-объект с полем `op` и необязательным числовым `id`. Если `id` есть, ответ на команду несёт то же `id`:
@@ -100,6 +105,17 @@
 | `StayAwake` | `phone`, `on` | `data.previous`: прежнее значение настройки |
 | `ScreenState` | `phone` | `wakefulness`, `on`, `locked` |
 | `Button` | `phone`, `name` | `back home recents menu power wakeup sleep volume_up volume_down volume_mute enter delete tab` |
+| `LaunchApp` | `phone`, `package`, `activity?` | запустить приложение (пакет из блок-листа отклоняется) |
+| `ListApps` | `phone`, `all?` | `data.packages`: со значком запуска, с `all` все |
+| `ForegroundApp` | `phone` | `data.package`, `data.activity`, `data.blocked` |
+| `UiDump`, `UiElements` | `phone` | `data.elements`: все элементы экрана / готовый список для показа (`kind`: `button field switch image list text other`) |
+| `UiFind` | `phone`, `selector` | `data.elements` по селектору |
+| `UiAt`, `UiFocused` | `phone`, `x`, `y` / `phone` | `data.element`: под точкой / поле ввода в фокусе |
+| `WaitFor` | `phone`, `selector`, `timeout?`, `gone?` | ждать появления (исчезновения) элемента; `data.ok`, `data.elements` |
+| `TypeText` | `phone`, `text` | набрать текст в поле в фокусе (по ADB печатный ASCII) |
+| `NetworkInfo` | `phone` | `data.online`, `data.local_ip`, `data.interface` |
+| `SetAirplaneMode` | `phone`, `on` | режим полёта |
+| `SetBlocklist` | `packages` | блок-лист пакетов (маска `*` в начале или конце), общий на демон; `Ok` |
 | `SetStream` | `phone, video, audio` | |
 | `FilePut` | `phone, dest, size, media?` | `FileReady {transfer}`, затем данные клиента (тип 3), итог `FileDone`/`FileFailed` |
 | `FileGet` | `phone, src` | `FileInfo {transfer, size}`, данные сервера (тип 3), итог `FileDone`/`FileFailed` |
@@ -173,11 +189,29 @@
 | `Runs` | | `Runs {runs:[{run, script, name, phones, started, finished, status}]}` |
 | `RunInfo` | `run` | `Run {run, summary, report, artifacts}` |
 | `Subscribe` | `run, from?` | `Ok`; затем события с номера `from` (история, потом живой поток) |
+| `ScriptParams` | `script` | `ScriptParams {script, params:[{name, type, required, default, description}]}` из комментариев `-- @param` |
+| `RunChain` | `steps, rounds?, round_pause?, name?, follow?` | `ChainStarted {chain, name}`; затем события цепочки |
+| `Chains` | | `Chains {chains}` |
+| `ChainInfo` | `chain` | `Chain {chain, summary, report}` |
+| `StopChain` | `chain` | `Ok` |
+| `ScheduleList` | | `Schedules {schedules}` |
+| `SchedulePut` | `schedule?, name, rule, target, enabled?, skip_if_running?` | `ScheduleSaved {schedule}` |
+| `ScheduleDelete` | `schedule` | `Ok` |
 | `Artifacts` | `run` | `Artifacts {run, names}` |
 | `Artifact` | `run, name` | `Artifact {run, name, size}` и пакет типа 4: `[длина имени u8][имя][содержимое]` |
 
 `Run`: `phones` телефоны, выделяемые прогону (по умолчанию все готовые); телефон занимается эксклюзивно, пока прогон идёт; `args` параметры, доступные
-сценарию как `args`; `tests` выполнить только тесты с этими именами; `timeout` срок прогона в секундах.
+сценарию как `args`; `tests` выполнить только тесты с этими именами; `timeout` срок прогона в секундах; `stay_awake` не давать экранам гаснуть на время
+прогона (прежняя настройка возвращается). Если в сценарии есть `-- @param`, `args` проверяются по схеме (тип, обязательность, лишние поля) и дополняются значениями по умолчанию.
+
+`RunChain`: `steps` список `{script, args?, phones?, on_fail?, retries?, pause?, timeout?}`, `rounds` кругов (1), `round_pause` секунд между кругами.
+`on_fail`: `stop` (по умолчанию), `continue`, `retry` (повторить `retries` раз, потом остановить). События цепочки приходят как `RunEvent` с `run` = номер цепочки:
+`chain_start`, `chain_round {round}`, `chain_step {round, step, script, attempt, step_run, status}`, `chain_end {status}`. Итог в `chains/<номер>/chain.json`.
+`Subscribe` принимает и номер цепочки. Всем клиентам приходят `ChainStarted` и `ChainEnded`.
+
+`SchedulePut`: `rule` это `{"every": секунды}`, `{"daily": "ЧЧ:ММ", "days": [1..7], "utc_offset_min": 180}` (1 понедельник) или `{"at": время_мс}`; `target` это
+`{"script": id, "args"?, "phones"?}` или `{"chain": описание}`. Расписание хранится в `schedules.json` и переживает перезапуск; пропущенные за простой запуски не
+наверстываются; пока предыдущий запуск идёт, новый пропускается (`skip_if_running: false` отключает).
 
 ### События
 

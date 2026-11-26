@@ -84,6 +84,11 @@ impl Runs {
         }))
     }
 
+    /// Папка данных демона.
+    pub fn data_dir(&self) -> &Path {
+        &self.data
+    }
+
     /// Обработчик уведомлений `RunStarted` / `RunEnded` (для рассылки клиентам).
     pub fn set_notify(&self, f: Notify) {
         *self.notify.lock().unwrap() = Some(f);
@@ -159,7 +164,21 @@ impl Runs {
         only: Option<Vec<String>>,
         timeout: Option<Duration>,
     ) -> Result<Arc<Run>, String> {
+        self.start_with(script_id, phones, args, only, timeout, false)
+    }
+
+    /// То же с обвязкой: `stay_awake` держит экраны телефонов включёнными на время прогона и возвращает прежнюю настройку.
+    pub fn start_with(
+        self: &Arc<Self>,
+        script_id: &str,
+        phones: Option<Vec<u32>>,
+        args: Value,
+        only: Option<Vec<String>>,
+        timeout: Option<Duration>,
+        stay_awake: bool,
+    ) -> Result<Arc<Run>, String> {
         let (meta, source) = self.store.get(script_id)?;
+        let args = crate::params::apply(&crate::params::parse_schema(&source)?, &args)?;
         let known = self.backend.phones();
         let wanted: Vec<u32> = match phones {
             Some(p) => {
@@ -210,7 +229,21 @@ impl Runs {
             .spawn(move || {
                 let cfg = RunConfig { phones: r.phones.clone(), args: args.clone(), only, timeout, artifacts: Some(r.dir.clone()) };
                 let sink: Arc<dyn Sink> = r.log.clone();
-                let report = run_script(&source, &r.script_name, &cfg, me.backend.clone(), sink, r.stop.clone());
+                // Обвязка: экран не гаснет, пока идёт прогон (если телефон это умеет); прежняя настройка возвращается.
+                let mut restore: Vec<u32> = Vec::new();
+                if stay_awake {
+                    for p in &r.phones {
+                        match me.backend.device(*p, json!({"op": "StayAwake", "on": true})) {
+                            Ok(v) if v["previous"].as_str() == Some("0") => restore.push(*p),
+                            Ok(_) => {}
+                            Err(e) => sink.emit("log", json!({"level": "warn", "text": format!("телефон {p}: stay_awake: {e}")})),
+                        }
+                    }
+                }
+                let report = run_script(&source, &r.script_name, &cfg, me.backend.clone(), sink.clone(), r.stop.clone());
+                for p in restore {
+                    let _ = me.backend.device(p, json!({"op": "StayAwake", "on": false}));
+                }
                 let finished = now_ms();
                 let doc = json!({
                     "run": r.id, "script": {"id": r.script_id, "name": r.script_name}, "phones": r.phones, "args": args,

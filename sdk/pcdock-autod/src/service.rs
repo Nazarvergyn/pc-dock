@@ -3,7 +3,8 @@
 //! Идентификатор сценария во всех сообщениях называется `script` (поле `id` занято номером запроса).
 //!
 //! Команды (`"op"`): `Phones`, `ScriptList`, `ScriptGet`, `ScriptPut`, `ScriptRename`, `ScriptDelete`, `Run`, `Stop`,
-//! `Runs`, `RunInfo`, `Subscribe`, `Artifacts`, `Artifact`. Всем клиентам приходят `RunStarted` и `RunEnded`;
+//! `Runs`, `RunInfo`, `Subscribe`, `Artifacts`, `Artifact`, `ScriptParams`, `RunChain`, `Chains`, `ChainInfo`, `StopChain`,
+//! `ScheduleList`, `SchedulePut`, `ScheduleDelete`. Всем клиентам приходят `RunStarted` и `RunEnded`;
 //! события прогона (`RunEvent`) приходят подписчикам.
 
 use std::sync::Arc;
@@ -13,7 +14,10 @@ use pcdock_net::{Handler, Hub};
 use serde_json::{json, Value};
 
 use crate::backend::{Backend, PhoneInfo};
+use crate::chains::{parse_spec, Chains};
+use crate::params::parse_schema;
 use crate::runs::Runs;
+use crate::schedule::Scheduler;
 use crate::store::ScriptStore;
 
 /// Версия протокола (в `Hello`).
@@ -25,6 +29,8 @@ pub const KIND_ARTIFACT: u8 = 4;
 pub struct Service {
     store: Arc<ScriptStore>,
     runs: Arc<Runs>,
+    chains: Arc<Chains>,
+    scheduler: Arc<Scheduler>,
     backend: Arc<dyn Backend>,
 }
 
@@ -40,10 +46,30 @@ pub fn build(
     backend: Arc<dyn Backend>,
     token: Option<String>,
 ) -> Hub<()> {
-    let hub = Hub::new(Service { store, runs: runs.clone(), backend }, token);
+    build_with(store, runs, backend, token).expect("не удалось создать цепочки и расписание").0
+}
+
+/// Демон целиком: сервер, цепочки, расписание.
+pub type Built = (Hub<()>, Arc<Chains>, Arc<Scheduler>);
+
+/// То же, но возвращает ещё цепочки и расписание (демон запускает поток расписания и останавливает цепочки при выходе).
+pub fn build_with(
+    store: Arc<ScriptStore>,
+    runs: Arc<Runs>,
+    backend: Arc<dyn Backend>,
+    token: Option<String>,
+) -> Result<Built, String> {
+    let chains = Chains::new(runs.data_dir(), runs.clone())?;
+    let scheduler = Scheduler::new(runs.data_dir(), runs.clone(), chains.clone())?;
+    let hub = Hub::new(
+        Service { store, runs: runs.clone(), chains: chains.clone(), scheduler: scheduler.clone(), backend },
+        token,
+    );
     let h = hub.clone();
     runs.set_notify(Box::new(move |v| h.broadcast(|_| true, v)));
-    hub
+    let h = hub.clone();
+    chains.set_notify(Box::new(move |v| h.broadcast(|_| true, v)));
+    Ok((hub, chains, scheduler))
 }
 
 impl Handler<()> for Service {
@@ -108,7 +134,8 @@ impl Handler<()> for Service {
                     .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect());
                 let timeout = msg["timeout"].as_f64().filter(|t| *t > 0.0).map(Duration::from_secs_f64);
                 let args = if msg["args"].is_null() { json!({}) } else { msg["args"].clone() };
-                match self.runs.start(&script, phones, args, only, timeout) {
+                let stay = msg["stay_awake"].as_bool().unwrap_or(false);
+                match self.runs.start_with(&script, phones, args, only, timeout, stay) {
                     Ok(run) => {
                         reply(
                             json!({"ev": "RunStarted", "run": run.id, "script": run.script_id, "name": run.script_name, "phones": run.phones}),
@@ -121,6 +148,52 @@ impl Handler<()> for Service {
                     Err(e) => fail(e),
                 }
             }
+            "ScriptParams" => match self.store.get(&str_of("script").unwrap_or_default()) {
+                Ok((m, source)) => match parse_schema(&source) {
+                    Ok(p) => reply(json!({"ev": "ScriptParams", "script": m.id,
+                                          "params": p.iter().map(|x| x.to_json()).collect::<Vec<_>>()})),
+                    Err(e) => fail(e),
+                },
+                Err(e) => fail(e),
+            },
+            "RunChain" => match parse_spec(&msg) {
+                Ok(spec) => match self.chains.start(spec) {
+                    Ok(c) => {
+                        reply(json!({"ev": "ChainStarted", "chain": c.id, "name": c.name}));
+                        if msg["follow"].as_bool().unwrap_or(true) {
+                            self.subscribe_chain(hub, client, &c.id, 0);
+                        }
+                    }
+                    Err(e) => fail(e),
+                },
+                Err(e) => fail(e),
+            },
+            "Chains" => reply(json!({"ev": "Chains", "chains": self.chains.list()})),
+            "ChainInfo" => {
+                let chain = str_of("chain").unwrap_or_default();
+                match (self.chains.get(&chain).map(|c| c.summary()), self.chains.report(&chain)) {
+                    (summary, report) if summary.is_some() || report.is_some() => {
+                        reply(json!({"ev": "Chain", "chain": chain, "summary": summary, "report": report}))
+                    }
+                    _ => fail(format!("нет цепочки {chain}")),
+                }
+            }
+            "StopChain" => {
+                if self.chains.stop(&str_of("chain").unwrap_or_default()) {
+                    reply(json!({"ev": "Ok"}))
+                } else {
+                    fail("нет идущей цепочки".into())
+                }
+            }
+            "ScheduleList" => reply(json!({"ev": "Schedules", "schedules": self.scheduler.list()})),
+            "SchedulePut" => match self.scheduler.put(str_of("schedule").as_deref(), &msg) {
+                Ok(id) => reply(json!({"ev": "ScheduleSaved", "schedule": id})),
+                Err(e) => fail(e),
+            },
+            "ScheduleDelete" => match self.scheduler.delete(&str_of("schedule").unwrap_or_default()) {
+                Ok(()) => reply(json!({"ev": "Ok"})),
+                Err(e) => fail(e),
+            },
             "Stop" => {
                 if self.runs.stop(&str_of("run").unwrap_or_default()) {
                     reply(json!({"ev": "Ok"}))
@@ -140,6 +213,10 @@ impl Handler<()> for Service {
             }
             "Subscribe" => {
                 let run = str_of("run").unwrap_or_default();
+                if self.chains.get(&run).is_some() {
+                    self.subscribe_chain(hub, client, &run, msg["from"].as_u64().unwrap_or(0));
+                    return reply(json!({"ev": "Ok"}));
+                }
                 if self.runs.get(&run).is_none() {
                     return fail(format!("нет прогона {run}"));
                 }
@@ -173,6 +250,17 @@ impl Handler<()> for Service {
 }
 
 impl Service {
+    fn subscribe_chain(&self, hub: &Hub<()>, client: u64, id: &str, from: u64) {
+        let Some(c) = self.chains.get(id) else { return };
+        let hub = hub.clone();
+        c.log.subscribe(
+            from,
+            Box::new(move |ev| {
+                hub.with_clients(|m| m.get(&client).is_some_and(|c| c.out.json(ev.to_string())))
+            }),
+        );
+    }
+
     /// Подписывает клиента на события прогона с номера `from`: история, затем живой поток.
     fn subscribe(&self, hub: &Hub<()>, client: u64, run: &str, from: u64) {
         let Some(r) = self.runs.get(run) else { return };

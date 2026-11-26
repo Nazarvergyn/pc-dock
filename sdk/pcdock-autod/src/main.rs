@@ -111,7 +111,14 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let hub = service::build(store, runs.clone(), backend, token);
+    let (hub, chains, scheduler) = match service::build_with(store, runs.clone(), backend, token) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
+    scheduler.spawn(std::time::Duration::from_secs(5));
 
     if !args.no_tcp {
         match args.tcp.as_deref().unwrap_or("") {
@@ -154,6 +161,7 @@ fn main() {
     }
     let _ = stop_rx.recv();
     log::info!("завершаюсь: останавливаю идущие прогоны");
+    chains.stop_all();
     runs.stop_all();
     std::thread::sleep(std::time::Duration::from_millis(500));
 }
