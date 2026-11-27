@@ -311,8 +311,10 @@ impl Shared {
                         let _ = self.with_record(phone, |a| a.rec.busy += 1);
                         let (b, s) = (backend.clone(), serial.clone());
                         thread::spawn(move || {
-                            let e =
-                                b.run(&s, &DeviceOp::UiAt { x, y }, &[]).ok().map(|v| v["element"].clone());
+                            let e = b
+                                .run(&s, &DeviceOp::UiAtLabeled { x, y }, &[])
+                                .ok()
+                                .map(|v| v["element"].clone());
                             let _ = tx.send(e.filter(|e| !e.is_null()));
                         });
                     }

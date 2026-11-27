@@ -67,6 +67,11 @@ pub enum DeviceOp {
         y: f64,
     },
     UiFocused,
+    /// Как `UiAt`, но берётся самый маленький элемент с текстом, подписью или id (для записи касаний).
+    UiAtLabeled {
+        x: f64,
+        y: f64,
+    },
     /// Ждать появления (`gone`: исчезновения) элемента, не дольше `timeout` секунд.
     WaitFor {
         selector: Selector,
@@ -149,6 +154,7 @@ impl DeviceOp {
             Self::UiElements => "UiElements",
             Self::UiAt { .. } => "UiAt",
             Self::UiFocused => "UiFocused",
+            Self::UiAtLabeled { .. } => "UiAtLabeled",
             Self::WaitFor { .. } => "WaitFor",
             Self::TypeText { .. } => "TypeText",
             Self::NetworkInfo => "NetworkInfo",
@@ -803,6 +809,11 @@ impl DeviceBackend for AdbDevice {
             DeviceOp::UiAt { x, y } => {
                 let tree = self.tree(serial)?;
                 Ok(json!({ "element": tree.at(*x, *y).map(|n| n.to_json(&tree)) }))
+            }
+            DeviceOp::UiAtLabeled { x, y } => {
+                let tree = self.tree(serial)?;
+                let el = tree.labeled_at(*x, *y).or_else(|| tree.at(*x, *y));
+                Ok(json!({ "element": el.map(|n| n.to_json(&tree)) }))
             }
             DeviceOp::UiFocused => {
                 let tree = self.tree(serial)?;

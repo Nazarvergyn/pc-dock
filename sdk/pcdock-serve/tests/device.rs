@@ -68,7 +68,9 @@ impl DeviceBackend for Fake {
             DeviceOp::Info => Ok(json!({"model": "Fake 1"})),
             DeviceOp::Install { .. } => Err("Failure [INSTALL_FAILED_VERSION_DOWNGRADE]".into()),
             DeviceOp::InputRanges => Ok(json!({"max_x": 1000.0, "max_y": 2000.0})),
-            DeviceOp::UiAt { .. } => Ok(json!({"element": {"text": "Войти", "package": "com.a"}})),
+            DeviceOp::UiAt { .. } | DeviceOp::UiAtLabeled { .. } => {
+                Ok(json!({"element": {"text": "Войти", "package": "com.a"}}))
+            }
             DeviceOp::UiElements => Ok(json!({"elements": [
                 {"text": "Кабинет", "kind": "text", "package": "com.a"},
                 {"text": "", "desc": "", "id": "", "kind": "other"}]})),
