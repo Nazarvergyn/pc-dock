@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::ui::Selector;
+
 /// Команда клиента. `phone` — трубка-получатель.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "op")]
@@ -60,6 +62,205 @@ pub enum ClientMsg {
     /// Прервать передачу.
     FileCancel {
         transfer: u32,
+    },
+    /// Сведения о телефоне (модель, Android, ABI, экран). Ответ: `DeviceResult`.
+    DeviceInfo {
+        phone: u32,
+    },
+    /// Батарея, температура, процессор, память.
+    DeviceStats {
+        phone: u32,
+    },
+    /// Приложения по именам пакетов: установлено ли, версия, включено ли.
+    AppInfo {
+        phone: u32,
+        packages: Vec<String>,
+    },
+    /// Остановить приложение.
+    ForceStop {
+        phone: u32,
+        package: String,
+    },
+    /// Стереть данные приложения.
+    ClearAppData {
+        phone: u32,
+        package: String,
+    },
+    /// Удалить приложение (`keep_data`: оставить данные).
+    UninstallApp {
+        phone: u32,
+        package: String,
+        #[serde(default)]
+        keep_data: bool,
+    },
+    /// Установить APK, уже лежащий на телефоне (положите его командой `FilePut`). `sha256` проверяется на телефоне.
+    InstallApk {
+        phone: u32,
+        path: String,
+        #[serde(default)]
+        allow_downgrade: bool,
+        #[serde(default)]
+        sha256: Option<String>,
+    },
+    /// Журнал системы: последние `lines` строк (по умолчанию 500), по приложению и уровню (`V D I W E F`).
+    Logcat {
+        phone: u32,
+        #[serde(default)]
+        lines: Option<u32>,
+        #[serde(default)]
+        package: Option<String>,
+        #[serde(default)]
+        level: Option<String>,
+    },
+    /// Запустить приложение (`activity`: `пакет/Активность` не нужна, достаточно имени активности).
+    LaunchApp {
+        phone: u32,
+        package: String,
+        #[serde(default)]
+        activity: Option<String>,
+    },
+    /// Пакеты на телефоне: со значком запуска, а с `all` все. Ответ `data.packages`.
+    ListApps {
+        phone: u32,
+        #[serde(default)]
+        all: bool,
+    },
+    /// Приложение на переднем плане: `data.package`, `data.activity` (и `blocked`, если пакет в блок-листе).
+    ForegroundApp {
+        phone: u32,
+    },
+    /// Всё дерево экрана: `data.elements` с границами и центром в долях экрана.
+    UiDump {
+        phone: u32,
+    },
+    /// Элементы экрана по селектору (поля: `text`, `text_contains`, `id`, `desc`, `desc_contains`, `class`, `package`, `checked`,
+    /// `enabled`, `focused`, `clickable`, `scrollable`, `selected`, `ignore_case`, `any`: варианты «или»).
+    UiFind {
+        phone: u32,
+        selector: Selector,
+    },
+    /// Готовый список элементов для показа: вид (`kind`), подпись, точка нажатия.
+    UiElements {
+        phone: u32,
+    },
+    /// Элемент под точкой (доли экрана).
+    UiAt {
+        phone: u32,
+        x: f64,
+        y: f64,
+    },
+    /// Поле ввода в фокусе.
+    UiFocused {
+        phone: u32,
+    },
+    /// Ждать появления (`gone`: исчезновения) элемента, `timeout` секунд (по умолчанию 10, до 120). `data.ok`, `data.elements`.
+    WaitFor {
+        phone: u32,
+        selector: Selector,
+        #[serde(default)]
+        timeout: Option<f64>,
+        #[serde(default)]
+        gone: bool,
+    },
+    /// Набрать текст в поле в фокусе (по ADB только печатный ASCII).
+    TypeText {
+        phone: u32,
+        text: String,
+    },
+    /// Блок-лист пакетов (маска `*` в начале или в конце): запуск таких приложений командой `LaunchApp` отклоняется.
+    SetBlocklist {
+        packages: Vec<String>,
+    },
+    /// Системное окно (разрешение, установщик, сбой). `action`: `allow` или `deny` нажимает кнопку. `data.present`, `data.buttons`.
+    SystemDialog {
+        phone: u32,
+        #[serde(default)]
+        action: Option<String>,
+    },
+    /// Причины последних завершений приложения. `data.text`.
+    ExitInfo {
+        phone: u32,
+        package: String,
+    },
+    /// Проверка приложений при установке по ADB.
+    SetPackageVerifier {
+        phone: u32,
+        on: bool,
+    },
+    /// Буфер обмена телефона (нужен компаньон).
+    GetClipboard {
+        phone: u32,
+    },
+    SetClipboard {
+        phone: u32,
+        text: String,
+    },
+    /// Внешний адрес телефона. `data.ip`.
+    PublicIp {
+        phone: u32,
+    },
+    /// Правила выбора пути на ходу. `prefer`: `usb`/`adb`/`serial` предпочесть, `auto` сбросить; с `serial` для одного
+    /// телефона. `fallback_secs`: через сколько секунд пробовать другой путь (0: не переключаться); `scan_secs`: период поиска.
+    SetConnectPolicy {
+        #[serde(default)]
+        serial: Option<String>,
+        #[serde(default)]
+        prefer: Option<String>,
+        #[serde(default)]
+        fallback_secs: Option<f64>,
+        #[serde(default)]
+        scan_secs: Option<f64>,
+    },
+    /// Выдать компаньону права по ADB (статистика использования, уведомления). `data.granted`, `data.failed`.
+    CompanionPermissions {
+        phone: u32,
+    },
+    /// Установить APK компаньона (путь на телефоне), выдать права и запустить. Ответ как у `CompanionPermissions`.
+    CompanionInstall {
+        phone: u32,
+        path: String,
+        #[serde(default)]
+        sha256: Option<String>,
+    },
+    /// Команда прямо компаньону на телефоне: `call` — JSON `{"op": …}` (PROTOCOL.md §9), в ответ `data` компаньона.
+    /// Работает по USB-аксессуару, даже если у телефона есть ADB.
+    CompanionCall {
+        phone: u32,
+        call: serde_json::Value,
+    },
+    /// Перезапустить приложение-компаньон на телефоне.
+    CompanionRestart {
+        phone: u32,
+    },
+    /// Состояние демона: версия, протокол, телефоны. Ответ `Health`.
+    Health,
+    /// Выход в сеть (`online`), локальный адрес и интерфейс.
+    NetworkInfo {
+        phone: u32,
+    },
+    /// Режим полёта.
+    SetAirplaneMode {
+        phone: u32,
+        on: bool,
+    },
+    /// Мобильные данные.
+    SetMobileData {
+        phone: u32,
+        on: bool,
+    },
+    /// Не давать экрану гаснуть (при выключении вернуть прежнее значение из ответа `previous`).
+    StayAwake {
+        phone: u32,
+        on: bool,
+    },
+    /// Экран включён ли, заблокирован ли.
+    ScreenState {
+        phone: u32,
+    },
+    /// Системная кнопка по имени: `back home recents menu power wakeup sleep volume_up volume_down volume_mute enter delete tab`.
+    Button {
+        phone: u32,
+        name: String,
     },
     Unwatch {
         phone: u32,
@@ -146,20 +347,20 @@ pub enum ClientMsg {
         phone: u32,
         on: bool,
     },
-    LaunchApp {
+    AppLaunch {
         phone: u32,
         request: u32,
         package: String,
     },
-    ListApps {
+    AppListApps {
         phone: u32,
         request: u32,
     },
-    UiDump {
+    AppUiDump {
         phone: u32,
         request: u32,
     },
-    ExitInfo {
+    AppExitInfo {
         phone: u32,
         request: u32,
         since_ms: u64,
@@ -188,7 +389,7 @@ pub enum ClientMsg {
     /// Ввести текст (любой язык, эмодзи; не пустой, ≤ 16 КБ UTF-8) в поле с курсором (возможность 13). Ответ `Status`
     /// 25 `"<request> <JSON>"`: `{"ok":true,"method":"paste"|"set_text"|"clipboard","ms"}` или `{"ok":false,"error"}`;
     /// `"clipboard"` — текст только в буфере обмена телефона, клиент жмёт Ctrl+V сам (`Key` 0xE0 + 0x19).
-    TypeText {
+    AppTypeText {
         phone: u32,
         request: u32,
         text: String,
@@ -204,7 +405,7 @@ pub enum ClientMsg {
     /// Положить текст в буфер обмена телефона (возможность 15; те же правила текста, что у `TypeText`), не вставляя в
     /// поле. Ответ `Status` 27 `"<request> <JSON>"`: `{"ok":true,"ms"}` или `{"ok":false,"error":"bad_request"|
     /// "clipboard: …"|"not_negotiated"}`; старый телефон — `"<request> error unsupported"`.
-    SetClipboard {
+    AppSetClipboard {
         phone: u32,
         request: u32,
         text: String,
@@ -262,8 +463,22 @@ pub enum ServerMsg {
         path: String,
         names: Vec<String>,
     },
+    /// Результат операции над телефоном (`DeviceInfo`, `AppInfo`, `InstallApk` …): `op` имя команды, `data` объект.
+    DeviceResult {
+        phone: u32,
+        op: String,
+        data: serde_json::Value,
+    },
     /// Пароль принят.
     Authed,
+    /// Ответ на `Health`: версия сервера, протокол, подробности по телефонам.
+    Health {
+        server: String,
+        protocol: u32,
+        phones: Vec<serde_json::Value>,
+        /// Последние ошибки (до 100): `{at, phone, kind, detail}`; `at` в секундах Unix.
+        errors: Vec<serde_json::Value>,
+    },
     /// Список телефонов: номера и подробности (состояние, путь, серийник, имя, экран).
     Phones {
         phones: Vec<u32>,
@@ -417,6 +632,7 @@ mod tests {
     fn json_commands_roundtrip() {
         let msgs = vec![
             ClientMsg::List,
+            ClientMsg::Health,
             ClientMsg::Watch { phone: 7, fps: Some(5.0), on_change: true, audio: false },
             ClientMsg::TouchEx {
                 phone: 7,

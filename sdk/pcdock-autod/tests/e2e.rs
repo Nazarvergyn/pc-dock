@@ -95,6 +95,7 @@ struct Env {
     autod: std::net::SocketAddr,
     runs: Arc<Runs>,
     _serve: Serve,
+    scheduler: Arc<pcdock_autod::schedule::Scheduler>,
     _dir: std::path::PathBuf,
 }
 
@@ -168,9 +169,9 @@ fn env(name: &str) -> Env {
     }
     let store = Arc::new(ScriptStore::open(&dir).unwrap());
     let runs = Runs::new(&dir, store.clone(), backend.clone()).unwrap();
-    let hub = service::build(store, runs.clone(), backend, None);
+    let (hub, _chains, scheduler) = service::build_with(store, runs.clone(), backend, None).unwrap();
     let autod = hub.run_tcp("127.0.0.1:0").unwrap();
-    Env { phone_events, phone_inputs, autod, runs, _serve: serve, _dir: dir }
+    Env { phone_events, phone_inputs, autod, runs, _serve: serve, scheduler, _dir: dir }
 }
 
 /// Читает события до `RunEnded` этого прогона; возвращает события прогона и итог.
@@ -582,4 +583,153 @@ fn lua_asks_the_phone_app_through_the_farm_daemon() {
     assert!(e.inputs().contains("Key { usage: 224, down: true }"), "Ctrl+V после clipboard: {}", e.inputs());
     assert!(e.inputs().contains("Key { usage: 25, down: true }"), "Ctrl+V после clipboard: {}", e.inputs());
     assert!(e.inputs().contains("SetWifi { request: "), "{}", e.inputs());
+}
+
+#[test]
+fn params_are_validated_and_defaults_applied_at_run() {
+    let e = env("params");
+    let c = e.client();
+    c.hello();
+    let id = e.put(
+        &c,
+        "Параметры",
+        "-- @param count number = 3 Сколько раз\n-- @param user string Имя\nassert.eq(args.count, 3)\nassert.eq(args.user, \"ann\")\n",
+    );
+    let p = c.request(json!({"op": "ScriptParams", "script": id})).unwrap();
+    assert_eq!(p["params"][0]["name"], "count");
+    assert_eq!(p["params"][1]["required"], true);
+    // нет обязательного, лишний параметр, неверный тип: запуск отклоняется
+    for bad in [json!({}), json!({"user": "a", "zzz": 1}), json!({"user": 5})] {
+        let r = c.request(json!({"op": "Run", "script": id, "args": bad, "follow": false}));
+        assert!(r.is_err(), "{bad} должен быть отклонён");
+    }
+    let ok = c.request(json!({"op": "Run", "script": id, "args": {"user": "ann"}, "follow": false})).unwrap();
+    let run = ok["run"].as_str().unwrap().to_string();
+    assert!(e.runs.wait(&run, Duration::from_secs(5)));
+    assert_eq!(c.request(json!({"op": "RunInfo", "run": run})).unwrap()["report"]["status"], "passed");
+}
+
+#[test]
+fn chain_runs_steps_in_rounds_retries_and_reports() {
+    let e = env("chain");
+    let c = e.client();
+    c.hello();
+    let events = c.take_events().unwrap();
+    let ok = e.put(&c, "ок", "assert.truthy(true)");
+    let bad = e.put(&c, "плохой", "assert.eq(1, 2)");
+    // два круга: «ок», затем плохой шаг с продолжением; итог цепочки failed
+    let started = c
+        .request(json!({"op": "RunChain", "name": "ночь", "rounds": 2,
+            "steps": [{"script": ok}, {"script": bad, "on_fail": "continue"}]}))
+        .unwrap();
+    assert_eq!(started["ev"], "ChainStarted");
+    let chain = started["chain"].as_str().unwrap().to_string();
+    let t0 = Instant::now();
+    let mut steps = Vec::new();
+    loop {
+        let v = events.recv_timeout(Duration::from_secs(20)).expect("событие цепочки не пришло");
+        assert!(t0.elapsed() < Duration::from_secs(60));
+        if v["ev"] == "RunEvent" && v["run"] == chain.as_str() {
+            if v["kind"] == "chain_step" {
+                steps.push((
+                    v["round"].as_u64().unwrap(),
+                    v["step"].as_u64().unwrap(),
+                    v["status"].as_str().unwrap().to_string(),
+                ));
+            }
+            if v["kind"] == "chain_end" {
+                assert_eq!(v["status"], "failed");
+                break;
+            }
+        }
+    }
+    assert_eq!(steps.len(), 4, "{steps:?}");
+    assert_eq!(steps[0], (1, 1, "passed".into()));
+    assert_eq!(steps[1], (1, 2, "failed".into()));
+    assert_eq!(steps[3].0, 2);
+    let info = c.request(json!({"op": "ChainInfo", "chain": chain})).unwrap();
+    assert_eq!(info["report"]["steps"].as_array().unwrap().len(), 4);
+
+    // «стоп» по умолчанию: после первого провала дальше не идём; повтор делает лишние попытки
+    let started = c
+        .request(json!({"op": "RunChain", "follow": false,
+            "steps": [{"script": bad, "on_fail": "retry", "retries": 2}, {"script": ok}]}))
+        .unwrap();
+    let chain = started["chain"].as_str().unwrap().to_string();
+    let t0 = Instant::now();
+    let report = loop {
+        let info = c.request(json!({"op": "ChainInfo", "chain": chain})).unwrap();
+        if info["summary"]["status"] != "running" {
+            break info;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(30));
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(report["summary"]["status"], "failed");
+    let n = loop {
+        if let Some(r) = report["report"]["steps"].as_array() {
+            break r.len();
+        }
+        let again = c.request(json!({"op": "ChainInfo", "chain": chain})).unwrap();
+        if let Some(r) = again["report"]["steps"].as_array() {
+            break r.len();
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(n, 3, "три попытки плохого шага и ни одного «ок»");
+    assert!(c.request(json!({"op": "RunChain", "steps": []})).is_err());
+}
+
+#[test]
+fn schedules_are_stored_checked_and_started_when_due() {
+    let e = env("sched");
+    let c = e.client();
+    c.hello();
+    let id = e.put(&c, "по времени", "assert.truthy(true)");
+    assert!(c
+        .request(json!({"op": "SchedulePut", "name": "x", "rule": {"every": 1}, "target": {"script": id}}))
+        .is_err());
+    assert!(c
+        .request(json!({"op": "SchedulePut", "name": "x", "rule": {"every": 60}, "target": {}}))
+        .is_err());
+    let saved = c
+        .request(json!({"op": "SchedulePut", "name": "каждую минуту", "rule": {"every": 60}, "target": {"script": id}}))
+        .unwrap();
+    let sid = saved["schedule"].as_str().unwrap().to_string();
+    let list = c.request(json!({"op": "ScheduleList"})).unwrap();
+    assert_eq!(list["schedules"][0]["schedule"], sid.as_str());
+    let next = list["schedules"][0]["next"].as_u64().unwrap();
+    // до срока ничего не запускается; в срок запускается один прогон
+    assert!(e.scheduler.tick(next - 1000).is_empty());
+    let started = e.scheduler.tick(next);
+    assert_eq!(started.len(), 1);
+    assert!(e.runs.wait(&started[0], Duration::from_secs(5)));
+    // пока сценарий не закончился (или после), повторный срок запускает снова только после итога
+    let again = e.scheduler.tick(next + 60_000);
+    assert_eq!(again.len(), 1);
+    let list = c.request(json!({"op": "ScheduleList"})).unwrap();
+    assert!(list["schedules"][0]["last"].as_u64().is_some());
+    c.request(json!({"op": "ScheduleDelete", "schedule": sid})).unwrap();
+    assert!(c.request(json!({"op": "ScheduleDelete", "schedule": sid})).is_err());
+}
+
+#[test]
+fn run_options_save_device_logs_and_report_failures_as_log_events() {
+    let e = env("opts");
+    let c = e.client();
+    let events = c.take_events().unwrap();
+    let id = e.put(&c, "Опции", r#"test("t", function() assert.truthy(phones()[1]:wait_ready(5)) end)"#);
+    let started = c
+        .request(
+            json!({"op": "Run", "script": id, "device_logs": true, "exit_info": ["com.a.b"], "record": 5}),
+        )
+        .unwrap();
+    let run = started["run"].as_str().unwrap().to_string();
+    let (evs, end) = follow(&events, &run);
+    assert_eq!(end["status"], "passed");
+    // Команды над телефоном в этом демоне выключены, поэтому журналы не сохранены, но прогон об этом сообщил.
+    let logs: Vec<String> =
+        evs.iter().filter(|v| v["kind"] == "log").map(|v| v["text"].to_string()).collect();
+    assert!(logs.iter().any(|t| t.contains("phone-1-logcat.txt")), "{logs:?}");
+    assert!(logs.iter().any(|t| t.contains("phone-1-exit-com.a.b.txt")), "{logs:?}");
 }

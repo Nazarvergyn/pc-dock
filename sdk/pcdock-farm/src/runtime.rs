@@ -67,6 +67,13 @@ pub enum FarmEvent {
         code: u16,
         detail: String,
     },
+    /// Ответ компаньона на команду.
+    CommandResult {
+        phone: PhoneId,
+        req: u32,
+        ok: bool,
+        body: String,
+    },
     PeerSilent {
         phone: PhoneId,
     },
@@ -470,6 +477,51 @@ impl Farm {
         Ok(())
     }
 
+    /// Правила выбора пути на ходу. `prefer`: `Some(Some(t))` предпочесть путь, `Some(None)` сбросить предпочтение;
+    /// с `serial` это касается одного телефона, без него общего порядка. `fallback_secs`: через сколько секунд пробовать
+    /// другой путь (0 — не переключаться). `scan_secs`: как часто искать телефоны.
+    pub fn set_connect_policy(
+        &mut self,
+        serial: Option<&str>,
+        prefer: Option<Option<Transport>>,
+        fallback_secs: Option<f64>,
+        scan_secs: Option<f64>,
+    ) -> Result<(), String> {
+        let auto = self.auto.as_mut().ok_or("обнаружение не включено")?;
+        for v in [fallback_secs, scan_secs].into_iter().flatten() {
+            if !v.is_finite() || !(0.0..=86400.0).contains(&v) {
+                return Err("секунды: от 0 до 86400".into());
+            }
+        }
+        if scan_secs == Some(0.0) {
+            return Err("scan_secs: больше 0".into());
+        }
+        match (serial, prefer) {
+            (Some(sn), Some(Some(t))) => {
+                auto.cfg.prefer.insert(sn.to_string(), t);
+            }
+            (Some(sn), Some(None)) => {
+                auto.cfg.prefer.remove(sn);
+            }
+            (None, Some(Some(t))) => {
+                auto.cfg.order.retain(|x| *x != t);
+                auto.cfg.order.insert(0, t);
+            }
+            (None, Some(None)) => {
+                auto.cfg.order = vec![Transport::Usb, Transport::Adb, Transport::Serial];
+            }
+            (_, None) => {}
+        }
+        if let Some(f) = fallback_secs {
+            auto.cfg.fallback_after = (f > 0.0).then(|| Duration::from_secs_f64(f));
+        }
+        if let Some(e) = scan_secs {
+            auto.cfg.every = Duration::from_secs_f64(e);
+        }
+        auto.last_scan = None;
+        Ok(())
+    }
+
     /// Снять закрепление. Телефоны, которые правила больше не принимают, отключаются (USB-аксессуар возвращается
     /// в обычный режим); возвращает их номера, событие `Lost` для каждого придёт из `drain`.
     pub fn unpin(&mut self, spec: &PhoneSpec) -> Result<Vec<PhoneId>, String> {
@@ -783,6 +835,7 @@ impl Farm {
                 | FarmEvent::AudioConfig { phone, .. }
                 | FarmEvent::Audio { phone, .. }
                 | FarmEvent::Status { phone, .. }
+                | FarmEvent::CommandResult { phone, .. }
                 | FarmEvent::PeerSilent { phone }
                 | FarmEvent::Malformed { phone, .. }
                 | FarmEvent::Disconnected { phone, .. }
@@ -985,6 +1038,7 @@ fn map_event(id: PhoneId, ev: Event) -> FarmEvent {
         }
         Event::Audio(f) => FarmEvent::Audio { phone: id, pts_us: f.pts_us, data: f.data },
         Event::Status(s) => FarmEvent::Status { phone: id, code: s.code, detail: s.detail },
+        Event::CommandResult(r) => FarmEvent::CommandResult { phone: id, req: r.req, ok: r.ok, body: r.body },
         Event::PeerSilent => FarmEvent::PeerSilent { phone: id },
         Event::Malformed(detail) => FarmEvent::Malformed { phone: id, detail },
         Event::Disconnected(reason) => FarmEvent::Disconnected { phone: id, reason: format!("{reason:?}") },

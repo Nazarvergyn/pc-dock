@@ -14,6 +14,13 @@
 //! Телефон (`phone`): `id`, `state()`, `info()`, `wait_ready(timeout)`, `tap(x, y, opts)`, `swipe(x1, y1, x2, y2, opts)`,
 //! `touch(phase, x, y, opts)`, `key(name|usage, opts)`, `type(text)`, `scroll(ticks)`, `scroll_h(ticks)`, `wake()`,
 //! `enable(kind, on)`, `frame(opts)`, `wait_frame(opts)`, `wait_change(timeout)`. Координаты: доли экрана 0..1.
+//! Команды над телефоном (работают по ADB): `device_info()`, `stats()`, `app_info(pkg|{pkgs})`, `installed(pkg)`, `force_stop(pkg)`,
+//! `clear_data(pkg)`, `uninstall(pkg, opts)`, `install_apk(path, opts)`, `logcat(opts)`, `mobile_data(on)`, `stay_awake(on)`,
+//! `screen()`, `button(name)`, `system_dialog("allow"|"deny")`, `exit_info(pkg)`, `package_verifier(on)`, `get_clipboard()`,
+//! `set_clipboard(текст)`, `public_ip()`.
+//! Экран: `launch(пакет, {activity})`, `apps({all})`, `foreground()`, `ui()`, `find(цель)`, `find_one(цель)`, `wait_for(цель, сек)`,
+//! `wait_gone(цель, сек)`, `tap_on(цель, {timeout})`, `type_text(текст)`, `type_into(цель, текст)`, `focused()`, `element_at(x, y)`,
+//! `network()`, `airplane(on)`, `ui_tiles()` (готовый список элементов для показа), `human(on)` (касания «как человек» на весь прогон). Цель: строка (`"Текст"`, `"~часть"`, `"id:имя"`, `"desc:подпись"`, варианты через `|`) или таблица-селектор.
 //! Кадр (`frame`): `seq`, `pts`, `bytes`, `width`, `height`, `save(name)`.
 
 use std::cell::RefCell;
@@ -34,6 +41,9 @@ use crate::events::Sink;
 use crate::jpeg::jpeg_size;
 use crate::uitree::{self, Selector};
 
+/// Действие в конце прогона (до `run_end`).
+pub type Finalizer = Arc<dyn Fn(&Arc<dyn Sink>) + Send + Sync>;
+
 /// Параметры прогона.
 pub struct RunConfig {
     /// Телефоны, выделенные прогону.
@@ -46,6 +56,8 @@ pub struct RunConfig {
     pub timeout: Option<Duration>,
     /// Куда складывать вложения (кадры); `None` — не сохранять.
     pub artifacts: Option<PathBuf>,
+    /// Вызывается после тестов, до события `run_end` (запись экрана, журналы телефона).
+    pub finalizer: Option<Finalizer>,
 }
 
 /// Итог одного теста.
@@ -105,6 +117,8 @@ struct State {
     fatal: AtomicBool,
     failure_shots: Mutex<u32>,
     acquired: Mutex<Vec<u32>>,
+    /// Режим «как человек»: касания с разбросом точки, силы и времени (`p:human(true)`).
+    human: AtomicBool,
 }
 
 impl State {
@@ -284,6 +298,14 @@ fn opt_f32(t: &Option<Table>, key: &str) -> Option<f32> {
     t.as_ref().and_then(|t| t.get::<Option<f64>>(key).ok().flatten()).map(|x| x as f32)
 }
 
+fn opt_str(t: &Option<Table>, key: &str) -> Option<String> {
+    t.as_ref().and_then(|t| t.get::<Option<String>>(key).ok().flatten())
+}
+
+fn opt_bool(t: &Option<Table>, key: &str) -> bool {
+    t.as_ref().and_then(|t| t.get::<Option<bool>>(key).ok().flatten()).unwrap_or(false)
+}
+
 fn opt_secs(t: &Option<Table>, key: &str, default: f64) -> Duration {
     Duration::from_secs_f64(
         t.as_ref().and_then(|t| t.get::<Option<f64>>(key).ok().flatten()).unwrap_or(default).max(0.0),
@@ -365,6 +387,98 @@ struct FrameHandle {
     st: Arc<State>,
 }
 
+/// Значение Lua в JSON (таблица-последовательность становится массивом, остальные объектами).
+fn lua_to_json(v: &Value, depth: usize) -> mlua::Result<Json> {
+    if depth > 16 {
+        return Err(mlua::Error::runtime("таблица слишком глубокая"));
+    }
+    Ok(match v {
+        Value::Nil => Json::Null,
+        Value::Boolean(b) => json!(b),
+        Value::Integer(i) => json!(i),
+        Value::Number(n) => json!(n),
+        Value::String(s) => json!(s.to_str()?.to_string()),
+        Value::Table(t) => {
+            let len = t.raw_len();
+            if len > 0 {
+                Json::Array(
+                    (1..=len)
+                        .map(|i| lua_to_json(&t.raw_get::<Value>(i)?, depth + 1))
+                        .collect::<mlua::Result<_>>()?,
+                )
+            } else {
+                let mut m = serde_json::Map::new();
+                for pair in t.pairs::<String, Value>() {
+                    let (k, val) = pair?;
+                    m.insert(k, lua_to_json(&val, depth + 1)?);
+                }
+                Json::Object(m)
+            }
+        }
+        _ => return Err(mlua::Error::runtime("значение нельзя передать телефону")),
+    })
+}
+
+/// Цель поиска: строка (`Текст`, `~часть текста`, `id:имя`, `desc:подпись`, `desc~часть`, варианты через `|`) или готовый селектор.
+fn target_json(v: &Value) -> mlua::Result<Json> {
+    fn one(s: &str) -> Json {
+        let s = s.trim();
+        if let Some(v) = s.strip_prefix("id:") {
+            json!({"id": v.trim()})
+        } else if let Some(v) = s.strip_prefix("desc~") {
+            json!({"desc_contains": v.trim()})
+        } else if let Some(v) = s.strip_prefix("desc:") {
+            json!({"desc": v.trim()})
+        } else if let Some(v) = s.strip_prefix('~') {
+            json!({"text_contains": v.trim()})
+        } else {
+            json!({"text": s})
+        }
+    }
+    match v {
+        Value::String(s) => {
+            let s = s.to_str()?;
+            let alts: Vec<Json> = s.split('|').filter(|a| !a.trim().is_empty()).map(one).collect();
+            match alts.len() {
+                0 => Err(mlua::Error::runtime("цель поиска пустая")),
+                1 => Ok(alts.into_iter().next().unwrap()),
+                _ => Ok(json!({ "any": alts })),
+            }
+        }
+        Value::Table(t) => lua_to_json(&Value::Table(t.clone()), 0),
+        _ => Err(mlua::Error::runtime("цель поиска: строка или таблица")),
+    }
+}
+
+/// Ждёт появления или исчезновения элемента кусками по 2 с, чтобы остановка прогона срабатывала вовремя.
+fn wait_target(t: &PhoneHandle, target: &Value, timeout: f64, gone: bool) -> mlua::Result<(bool, Json)> {
+    let sel = target_json(target)?;
+    let end = Instant::now() + Duration::from_secs_f64(timeout.clamp(0.0, 600.0));
+    loop {
+        let left = end.saturating_duration_since(Instant::now()).as_secs_f64();
+        let r = device_json(
+            t,
+            json!({"op": "WaitFor", "selector": sel, "timeout": left.min(2.0), "gone": gone}),
+        )?;
+        if r["ok"].as_bool() == Some(true) {
+            return Ok((true, r["elements"].clone()));
+        }
+        if left <= 2.0 {
+            return Ok((false, r["elements"].clone()));
+        }
+    }
+}
+
+/// Операция над телефоном; ошибка телефона или демона становится ошибкой Lua.
+fn device_json(t: &PhoneHandle, msg: Json) -> mlua::Result<Json> {
+    t.st.check_alive()?;
+    t.st.backend.device(t.id, msg).map_err(mlua::Error::runtime)
+}
+
+fn device_call(lua: &Lua, t: &PhoneHandle, msg: Json) -> mlua::Result<Value> {
+    json_to_lua(lua, &device_json(t, msg)?)
+}
+
 fn info_table(lua: &Lua, i: &PhoneInfo) -> mlua::Result<Table> {
     let t = lua.create_table()?;
     t.set("id", i.id)?;
@@ -410,7 +524,45 @@ impl UserData for FrameHandle {
     }
 }
 
+/// Случайное число 0..1 (xorshift, зерно из часов): криптостойкость не нужна.
+fn rand01() -> f32 {
+    use std::cell::Cell;
+    thread_local!(static S: Cell<u64> = Cell::new(
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1) | 1
+    ));
+    S.with(|s| {
+        let mut x = s.get();
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        s.set(x);
+        (x >> 40) as f32 / (1u64 << 24) as f32
+    })
+}
+
 impl PhoneHandle {
+    /// Касание (нажатие и отпускание в одной точке). В режиме «как человек» точка, сила, пятно и время удержания
+    /// получают разброс, если не заданы в `o`.
+    fn tap_at(&self, x: f32, y: f32, o: &Option<Table>) -> mlua::Result<()> {
+        if !self.st.human.load(Ordering::SeqCst) {
+            self.touch(0, x, y, o)?;
+            self.st.sleep(opt_secs(o, "hold", TAP_HOLD))?;
+            return self.touch(2, x, y, o);
+        }
+        let j = opt_f32(o, "jitter").unwrap_or(0.01);
+        let nx = (x + (rand01() * 2.0 - 1.0) * j).clamp(0.0, 1.0);
+        let ny = (y + (rand01() * 2.0 - 1.0) * j).clamp(0.0, 1.0);
+        let pressure = opt_f32(o, "pressure").unwrap_or(0.5 + rand01() * 0.3);
+        let size = opt_f32(o, "size").unwrap_or(0.04 + rand01() * 0.03);
+        let hold = opt_f32(o, "hold").unwrap_or(0.04 + rand01() * 0.08) as f64;
+        let b = &self.st.backend;
+        self.st.check_alive()?;
+        b.touch(self.id, 0, nx, ny, Some(pressure), Some(size), 0).map_err(mlua::Error::runtime)?;
+        self.st.sleep(Duration::from_secs_f64(hold))?;
+        b.touch(self.id, 2, nx, ny, Some(pressure), Some(size), 0).map_err(mlua::Error::runtime)?;
+        self.st.sleep(Duration::from_secs_f64(0.05 + rand01() as f64 * 0.15))
+    }
+
     fn touch(&self, phase: u32, x: f32, y: f32, o: &Option<Table>) -> mlua::Result<()> {
         self.st.check_alive()?;
         let finger = o.as_ref().and_then(|t| t.get::<Option<u8>>("finger").ok().flatten()).unwrap_or(0);
@@ -536,7 +688,7 @@ impl PhoneHandle {
     /// Ввести текст через приложение pc-dock (`TypeText`, возможность 13): телефон вставляет его в поле с курсором
     /// сам или кладёт в буфер обмена — тогда жмём Ctrl+V HID-клавиатурой. Возвращает способ ввода.
     fn text_input(&self, text: &str) -> mlua::Result<String> {
-        let r = self.app(json!({"op": "TypeText", "text": text}), Duration::from_secs(15))?;
+        let r = self.app(json!({"op": "AppTypeText", "text": text}), Duration::from_secs(15))?;
         let method = text_input_reply(&r).map_err(mlua::Error::runtime)?;
         if method == "clipboard" {
             // Ctrl (0xE0) + V (0x19)
@@ -559,7 +711,7 @@ impl PhoneHandle {
 
     /// Элементы экрана сейчас; ошибка, если телефон их не отдал.
     fn ui_nodes(&self) -> mlua::Result<(String, Vec<uitree::Node>)> {
-        let r = self.app(json!({"op": "UiDump"}), Duration::from_secs(10))?;
+        let r = self.app(json!({"op": "AppUiDump"}), Duration::from_secs(10))?;
         let xml = r.strip_prefix("xml").map(str::trim_start).ok_or_else(|| {
             mlua::Error::runtime(format!(
                 "элементы экрана недоступны: {}",
@@ -650,10 +802,10 @@ impl UserData for PhoneHandle {
                 t.st.sleep(Duration::from_millis(100))?;
             }
         });
-        methods.add_method("tap", |_, t, (x, y, o): (f32, f32, Option<Table>)| {
-            t.touch(0, x, y, &o)?;
-            t.st.sleep(opt_secs(&o, "hold", TAP_HOLD))?;
-            t.touch(2, x, y, &o)
+        methods.add_method("tap", |_, t, (x, y, o): (f32, f32, Option<Table>)| t.tap_at(x, y, &o));
+        methods.add_method("human", |_, t, on: bool| {
+            t.st.human.store(on, Ordering::SeqCst);
+            Ok(())
         });
         methods.add_method("touch", |_, t, (phase, x, y, o): (Value, f32, f32, Option<Table>)| {
             let phase = match &phase {
@@ -741,6 +893,164 @@ impl UserData for PhoneHandle {
             t.st.check_alive()?;
             t.st.backend.wake(t.id).map_err(mlua::Error::runtime)
         });
+        methods.add_method("launch", |_, t, (pkg, o): (String, Option<Table>)| {
+            device_json(t, json!({"op": "LaunchApp", "package": pkg, "activity": opt_str(&o, "activity")}))
+                .map(|_| ())
+        });
+        methods.add_method("apps", |lua, t, o: Option<Table>| {
+            let r = device_json(t, json!({"op": "ListApps", "all": opt_bool(&o, "all")}))?;
+            json_to_lua(lua, &r["packages"])
+        });
+        methods.add_method("foreground", |lua, t, ()| device_call(lua, t, json!({"op": "ForegroundApp"})));
+        methods.add_method("ui_tiles", |lua, t, ()| {
+            let r = device_json(t, json!({"op": "UiElements"}))?;
+            json_to_lua(lua, &r["elements"])
+        });
+        methods.add_method("ui", |lua, t, ()| {
+            let r = device_json(t, json!({"op": "UiElements"}))?;
+            json_to_lua(lua, &r["elements"])
+        });
+        methods.add_method("find", |lua, t, target: Value| {
+            let r = device_json(t, json!({"op": "UiFind", "selector": target_json(&target)?}))?;
+            json_to_lua(lua, &r["elements"])
+        });
+        methods.add_method("find_one", |lua, t, target: Value| {
+            let r = device_json(t, json!({"op": "UiFind", "selector": target_json(&target)?}))?;
+            json_to_lua(lua, &r["elements"][0])
+        });
+        methods.add_method("wait_for", |lua, t, (target, timeout): (Value, Option<f64>)| {
+            let (ok, els) = wait_target(t, &target, timeout.unwrap_or(10.0), false)?;
+            if ok {
+                json_to_lua(lua, &els[0])
+            } else {
+                Ok(Value::Nil)
+            }
+        });
+        methods.add_method("wait_gone", |_, t, (target, timeout): (Value, Option<f64>)| {
+            wait_target(t, &target, timeout.unwrap_or(10.0), true).map(|(ok, _)| ok)
+        });
+        methods.add_method("tap_on", |lua, t, (target, o): (Value, Option<Table>)| {
+            let timeout = opt_secs(&o, "timeout", 0.0).as_secs_f64();
+            let (ok, els) = wait_target(t, &target, timeout, false)?;
+            if !ok {
+                return Ok(Value::Nil);
+            }
+            let (x, y) =
+                (els[0]["x"].as_f64().unwrap_or(0.5) as f32, els[0]["y"].as_f64().unwrap_or(0.5) as f32);
+            t.tap_at(x, y, &o)?;
+            json_to_lua(lua, &els[0])
+        });
+        methods.add_method("type_text", |_, t, text: String| {
+            device_json(t, json!({"op": "TypeText", "text": text})).map(|_| ())
+        });
+        methods.add_method("focused", |lua, t, ()| {
+            let r = device_json(t, json!({"op": "UiFocused"}))?;
+            json_to_lua(lua, &r["element"])
+        });
+        methods.add_method("element_at", |lua, t, (x, y): (f64, f64)| {
+            let r = device_json(t, json!({"op": "UiAt", "x": x, "y": y}))?;
+            json_to_lua(lua, &r["element"])
+        });
+        methods.add_method("network", |lua, t, ()| device_call(lua, t, json!({"op": "NetworkInfo"})));
+        methods.add_method("airplane", |_, t, on: bool| {
+            device_json(t, json!({"op": "SetAirplaneMode", "on": on})).map(|_| ())
+        });
+        methods.add_method("device_info", |lua, t, ()| device_call(lua, t, json!({"op": "DeviceInfo"})));
+        methods.add_method("stats", |lua, t, ()| device_call(lua, t, json!({"op": "DeviceStats"})));
+        methods.add_method("app_info", |lua, t, pkgs: Value| {
+            // Одно имя: таблица с полями приложения; список имён: список таблиц.
+            let (list, single) = match pkgs {
+                Value::String(s) => (vec![s.to_str()?.to_string()], true),
+                Value::Table(tb) => {
+                    (tb.sequence_values::<String>().collect::<mlua::Result<Vec<_>>>()?, false)
+                }
+                _ => return Err(mlua::Error::runtime("app_info: имя пакета или список имён")),
+            };
+            let r = device_json(t, json!({"op": "AppInfo", "packages": list}))?;
+            let apps = r["apps"].clone();
+            if single {
+                json_to_lua(lua, &apps[0])
+            } else {
+                json_to_lua(lua, &apps)
+            }
+        });
+        methods.add_method("installed", |_, t, pkg: String| {
+            let r = device_json(t, json!({"op": "AppInfo", "packages": [pkg]}))?;
+            Ok(r["apps"][0]["installed"].as_bool().unwrap_or(false))
+        });
+        methods.add_method("force_stop", |_, t, pkg: String| {
+            device_json(t, json!({"op": "ForceStop", "package": pkg})).map(|_| ())
+        });
+        methods.add_method("clear_data", |_, t, pkg: String| {
+            device_json(t, json!({"op": "ClearAppData", "package": pkg})).map(|_| ())
+        });
+        methods.add_method("uninstall", |_, t, (pkg, o): (String, Option<Table>)| {
+            device_json(
+                t,
+                json!({"op": "UninstallApp", "package": pkg, "keep_data": opt_bool(&o, "keep_data")}),
+            )
+            .map(|_| ())
+        });
+        methods.add_method("install_apk", |_, t, (path, o): (String, Option<Table>)| {
+            device_json(
+                t,
+                json!({"op": "InstallApk", "path": path, "allow_downgrade": opt_bool(&o, "allow_downgrade"),
+                       "sha256": opt_str(&o, "sha256")}),
+            )
+            .map(|_| ())
+        });
+        methods.add_method("logcat", |_, t, o: Option<Table>| {
+            let lines = o.as_ref().and_then(|t| t.get::<Option<u32>>("lines").ok().flatten());
+            let r = device_json(
+                t,
+                json!({"op": "Logcat", "lines": lines, "package": opt_str(&o, "package"), "level": opt_str(&o, "level")}),
+            )?;
+            Ok(r["text"].as_str().unwrap_or("").to_string())
+        });
+        methods.add_method("mobile_data", |_, t, on: bool| {
+            device_json(t, json!({"op": "SetMobileData", "on": on})).map(|_| ())
+        });
+        methods.add_method("stay_awake", |lua, t, on: bool| {
+            device_call(lua, t, json!({"op": "StayAwake", "on": on}))
+        });
+        methods.add_method("system_dialog", |lua, t, action: Option<String>| {
+            device_call(lua, t, json!({"op": "SystemDialog", "action": action}))
+        });
+        methods.add_method("exit_info", |_, t, pkg: String| {
+            let r = device_json(t, json!({"op": "ExitInfo", "package": pkg}))?;
+            Ok(r["text"].as_str().unwrap_or("").to_string())
+        });
+        methods.add_method("package_verifier", |_, t, on: bool| {
+            device_json(t, json!({"op": "SetPackageVerifier", "on": on})).map(|_| ())
+        });
+        methods.add_method("get_clipboard", |_, t, ()| {
+            let r = device_json(t, json!({"op": "GetClipboard"}))?;
+            Ok(r["text"].as_str().unwrap_or("").to_string())
+        });
+        methods.add_method("set_clipboard", |_, t, text: String| {
+            device_json(t, json!({"op": "SetClipboard", "text": text})).map(|_| ())
+        });
+        methods.add_method("companion_permissions", |lua, t, ()| {
+            device_call(lua, t, json!({"op": "CompanionPermissions"}))
+        });
+        methods.add_method("companion_install", |lua, t, (path, o): (String, Option<Table>)| {
+            device_call(
+                lua,
+                t,
+                json!({"op": "CompanionInstall", "path": path, "sha256": opt_str(&o, "sha256")}),
+            )
+        });
+        methods.add_method("companion_restart", |_, t, ()| {
+            device_json(t, json!({"op": "CompanionRestart"})).map(|_| ())
+        });
+        methods.add_method("public_ip", |_, t, ()| {
+            let r = device_json(t, json!({"op": "PublicIp"}))?;
+            Ok(r["ip"].as_str().unwrap_or("").to_string())
+        });
+        methods.add_method("screen", |lua, t, ()| device_call(lua, t, json!({"op": "ScreenState"})));
+        methods.add_method("button", |_, t, name: String| {
+            device_json(t, json!({"op": "Button", "name": name})).map(|_| ())
+        });
         methods.add_method("enable", |_, t, (kind, on): (String, bool)| {
             t.st.check_alive()?;
             let k = match kind.as_str() {
@@ -788,13 +1098,13 @@ impl UserData for PhoneHandle {
         // Приложение на телефоне (нужно приложение pc-dock с возможностями 6–12).
         // Открыть приложение по пакету; возвращает итог телефона: "ok", "not_installed", "blocked_bal", "error …".
         methods.add_method("launch", |_, t, (pkg, o): (String, Option<Table>)| {
-            let r = t.app(json!({"op": "LaunchApp", "package": pkg}), opt_secs(&o, "timeout", 10.0))?;
+            let r = t.app(json!({"op": "AppLaunch", "package": pkg}), opt_secs(&o, "timeout", 10.0))?;
             t.st.emit("log", json!({"test": *t.st.current.lock().unwrap(), "level": "debug", "text": format!("открыть {pkg}: {r}")}));
             Ok(r)
         });
         // Приложения с главным экраном: таблица из ответа телефона.
         methods.add_method("apps", |lua, t, ()| {
-            let r = t.app(json!({"op": "ListApps"}), Duration::from_secs(15))?;
+            let r = t.app(json!({"op": "AppListApps"}), Duration::from_secs(15))?;
             reply_value(lua, &r)
         });
         // Пакет на переднем плане или nil.
@@ -829,7 +1139,7 @@ impl UserData for PhoneHandle {
         // Причины завершения приложения после `since_ms` (мс Unix): таблица или строка ("unsupported"…).
         methods.add_method("exit_info", |lua, t, (pkg, since): (String, Option<u64>)| {
             let r = t.app(
-                json!({"op": "ExitInfo", "package": pkg, "since_ms": since.unwrap_or(0)}),
+                json!({"op": "AppExitInfo", "package": pkg, "since_ms": since.unwrap_or(0)}),
                 Duration::from_secs(10),
             )?;
             reply_value(lua, &r)
@@ -1132,6 +1442,7 @@ pub fn run_script_ex(
         fatal: AtomicBool::new(false),
         failure_shots: Mutex::new(0),
         acquired: Mutex::new(Vec::new()),
+        human: AtomicBool::new(false),
     });
     sink.emit("run_start", json!({"script": script_name, "phones": cfg.phones, "args": cfg.args}));
 
@@ -1163,6 +1474,9 @@ pub fn run_script_ex(
         duration_ms: started.elapsed().as_millis() as u64,
         error,
     };
+    if let Some(f) = &cfg.finalizer {
+        f(&sink);
+    }
     sink.emit("run_end", report.to_json());
     report
 }
@@ -1440,6 +1754,8 @@ fn install(lua: &Lua, st: &Arc<State>, cfg: &RunConfig, hooks: &Rc<RefCell<Hooks
             Ok(PhoneHandle { id, st: s.clone() })
         })?,
     )?;
+    // Стандартная библиотека сценариев (retry, find_any, tap_any, human_tap, net_restart, ...).
+    lua.load(include_str!("std.lua")).set_name("std.lua").exec()?;
     Ok(())
 }
 
@@ -1555,10 +1871,10 @@ mod tests {
         fn app(&self, phone: u32, req: Json, _timeout: Duration) -> Result<String, String> {
             self.log.lock().unwrap().push(format!("app {phone} {req}"));
             Ok(match req["op"].as_str() {
-                Some("LaunchApp") => "ok".into(),
-                Some("ListApps") => r#"[{"package":"com.app","label":"App"}]"#.into(),
-                Some("UiDump") if self.ui.lock().unwrap().is_some() => self.ui.lock().unwrap().clone().unwrap(),
-                Some("UiDump") => concat!(
+                Some("AppLaunch") => "ok".into(),
+                Some("AppListApps") => r#"[{"package":"com.app","label":"App"}]"#.into(),
+                Some("AppUiDump") if self.ui.lock().unwrap().is_some() => self.ui.lock().unwrap().clone().unwrap(),
+                Some("AppUiDump") => concat!(
                     r#"xml <hierarchy rotation="0"><node text="" class="android.widget.FrameLayout" bounds="[0,0][1000,2000]">"#,
                     r#"<node text="Войти" resource-id="com.app:id/login" class="android.widget.Button" clickable="true" bounds="[100,1000][300,1200]" />"#,
                     "</node></hierarchy>"
@@ -1577,7 +1893,7 @@ mod tests {
                     r#"{"ok":true,"enabled":false,"method":"quick_settings","ms":700}"#.into()
                 }
                 Some("SetWifi") => r#"{"ok":false,"error":"tile_not_found","enabled":true,"ms":1500}"#.into(),
-                Some("TypeText") => match req["text"].as_str().unwrap_or("") {
+                Some("AppTypeText") => match req["text"].as_str().unwrap_or("") {
                     "старое приложение" => "error unsupported".into(),
                     t if t.starts_with("буфер") => r#"{"ok":true,"method":"clipboard","reason":"no_service","ms":2}"#.into(),
                     "сбой" => r#"{"ok":false,"error":"clipboard: SecurityException","ms":1}"#.into(),
@@ -1588,6 +1904,33 @@ mod tests {
         }
         fn foreground(&self, _phone: u32) -> Option<String> {
             Some("com.app".into())
+        }
+        fn device(&self, phone: u32, msg: Json) -> Result<Json, String> {
+            self.log.lock().unwrap().push(format!("device {phone} {msg}"));
+            match msg["op"].as_str().unwrap_or("") {
+                "AppInfo" => Ok(json!({"apps": msg["packages"].as_array().unwrap().iter()
+                    .map(|p| json!({"package": p, "installed": p == "com.have.app", "version_code": 7}))
+                    .collect::<Vec<_>>()})),
+                "Logcat" => Ok(json!({"text": "line1\nline2"})),
+                "UiFind" => {
+                    let sel = msg["selector"].to_string();
+                    if sel.contains("Войти") {
+                        Ok(json!({"elements": [{"text": "Войти", "x": 0.5, "y": 0.6}]}))
+                    } else {
+                        Ok(json!({"elements": []}))
+                    }
+                }
+                "WaitFor" => {
+                    let found = msg["selector"].to_string().contains("Войти");
+                    let gone = msg["gone"].as_bool() == Some(true);
+                    Ok(json!({"ok": found != gone,
+                              "elements": if found { json!([{"text": "Войти", "x": 0.5, "y": 0.6}]) } else { json!([]) }}))
+                }
+                "NetworkInfo" => Ok(json!({"online": true, "local_ip": "10.0.0.5"})),
+                "StayAwake" => Ok(json!({"previous": "0"})),
+                "InstallApk" => Err("Failure [INSTALL_FAILED_VERSION_DOWNGRADE]".into()),
+                _ => Ok(json!({})),
+            }
         }
         fn latest_frame(&self, _phone: u32) -> Option<Frame> {
             self.frames.lock().unwrap().last().cloned()
@@ -1615,6 +1958,7 @@ mod tests {
             only: None,
             timeout: Some(Duration::from_secs(20)),
             artifacts: None,
+            finalizer: None,
         }
     }
 
@@ -1662,12 +2006,19 @@ mod tests {
 
     #[test]
     fn wifi_failure_fails_the_test() {
-        assert!(wifi_check(&json!({"ok": true, "enabled": true}), false).unwrap_err().contains("ok, но Wi-Fi включён"));
-        assert!(wifi_check(&json!({"ok": false, "error": "no_service"}), true).unwrap_err().contains("службу"));
-        assert!(wifi_check(&json!({"ok": false, "error": "unsupported"}), true).unwrap_err().contains("обновите pc-dock"));
+        assert!(wifi_check(&json!({"ok": true, "enabled": true}), false)
+            .unwrap_err()
+            .contains("ok, но Wi-Fi включён"));
+        assert!(wifi_check(&json!({"ok": false, "error": "no_service"}), true)
+            .unwrap_err()
+            .contains("службу"));
+        assert!(wifi_check(&json!({"ok": false, "error": "unsupported"}), true)
+            .unwrap_err()
+            .contains("обновите pc-dock"));
         assert!(wifi_check(&json!({"ok": true, "enabled": false}), false).is_ok());
         let fake = Fake::new();
-        let (r, _) = run(r#"test("w", function() local p = phones()[1] p:wifi(false, {retry = false}) end)"#, &fake);
+        let (r, _) =
+            run(r#"test("w", function() local p = phones()[1] p:wifi(false, {retry = false}) end)"#, &fake);
         assert_eq!(r.status, "error", "{r:?}");
         assert!(r.tests[0].error.as_deref().unwrap_or("").contains("tile_not_found"), "{r:?}");
     }
@@ -1697,7 +2048,7 @@ mod tests {
         );
         assert_eq!(r.status, "passed", "{r:?}");
         let log = fake.log();
-        let apps: Vec<&String> = log.iter().filter(|l| l.contains(r#""op":"TypeText""#)).collect();
+        let apps: Vec<&String> = log.iter().filter(|l| l.contains(r#""op":"AppTypeText""#)).collect();
         assert_eq!(apps.len(), 5, "{log:?}");
         assert!(apps[0].contains(r#""text":"Привет 👋 #тест\nстрока""#), "{apps:?}");
         assert!(!log.iter().any(|l| l.contains(r#""text":"ab""#)), "латиница — HID, не TEXT_INPUT");
@@ -1755,7 +2106,7 @@ mod tests {
         );
         assert_eq!(r.status, "passed", "{r:?}");
         let log = fake.log().join("\n");
-        assert!(log.contains(r#""op":"LaunchApp""#) && log.contains(r#""package":"com.app""#), "{log}");
+        assert!(log.contains(r#""op":"AppLaunch""#) && log.contains(r#""package":"com.app""#), "{log}");
         assert!(
             log.contains(r#""method":"POST""#)
                 && log.contains(r#""timeout_ms":5000"#)
@@ -1949,6 +2300,104 @@ mod tests {
         assert_eq!(r.status, "error");
         assert!(r.tests[0].error.as_ref().unwrap().contains("вышло время"), "{:?}", r.tests[0].error);
         assert!(t0.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn targets_and_standard_library_work() {
+        assert!(target_json(&Value::Nil).is_err());
+        let fake = Fake::new();
+        let (r, _) = run(
+            r#"
+            local p = phones()[1]
+            -- цели: строка с вариантами и таблица
+            local el = p:find_one("Нет такого|Войти")
+            assert.eq(el.text, "Войти")
+            assert.eq(p:find_one({text = "Войти"}).y, 0.6)
+            -- p:find в pynelo-ветке: один элемент или nil (find_one); список — p:ui()
+            assert.falsy(p:find("Пусто"))
+            -- ожидание и нажатие по цели
+            assert.truthy(p:wait_for("Войти", 1))
+            assert.falsy(p:wait_for("Пусто", 0))
+            assert.truthy(p:wait_gone("Пусто", 1))
+            -- p:tap_on в pynelo-ветке: ничего не возвращает, не найдено — ошибка
+            p:tap_on("Войти")
+            assert.falsy((pcall(function() p:tap_on("Пусто", {timeout = 0}) end)))
+            -- стандартная библиотека
+            local found, idx = find_any(p, {"Пусто", "Войти"})
+            assert.eq(idx, 2)
+            assert.truthy(tap_any(p, {"Войти"}))
+            assert.eq(first_url("смотри https://example.com/a/b. вот"), "https://example.com/a/b")
+            local n = 0
+            assert.eq(retry(3, 0, function() n = n + 1; return n == 2 and "ok" end), "ok")
+            assert.truthy(wait_online(p, 1))
+            human_tap(p, 0.5, 0.5)
+            local res = net_restart(p, {attempts = 1, off_time = 0})
+            assert.eq(res.attempts, 1)
+            assert.eq(res.old_ip, "10.0.0.5")
+            "#,
+            &fake,
+        );
+        assert_eq!(r.status, "passed", "{r:?}");
+        let log = fake.log();
+        assert!(log.iter().any(|l| l.contains(r#""any""#) && l.contains("Нет такого")));
+        assert!(log.iter().any(|l| l.contains(r#""op":"SetMobileData""#) && l.contains("false")));
+        assert!(log.iter().any(|l| l.starts_with("touch 1 0 0.50 0.60")), "касание по центру найденного");
+    }
+
+    #[test]
+    fn human_mode_jitters_taps_and_new_device_methods_reach_the_backend() {
+        let fake = Fake::new();
+        let (r, _) = run(
+            r#"
+            local p = phones()[1]
+            p:tap(0.5, 0.5)
+            p:human(true)
+            p:tap(0.5, 0.5)
+            p:system_dialog("allow")
+            p:exit_info("com.have.app")
+            p:package_verifier(false)
+            p:public_ip()
+            "#,
+            &fake,
+        );
+        assert_eq!(r.status, "passed", "{r:?}");
+        let log = fake.log();
+        let touches: Vec<_> = log.iter().filter(|l| l.starts_with("touch")).collect();
+        assert_eq!(touches.len(), 4, "{log:?}");
+        assert!(touches[0].contains("p=None"), "{touches:?}");
+        assert!(touches[2].contains("p=Some"), "{touches:?}");
+        for op in ["SystemDialog", "ExitInfo", "SetPackageVerifier", "PublicIp"] {
+            assert!(log.iter().any(|l| l.contains(op)), "{op}: {log:?}");
+        }
+    }
+
+    #[test]
+    fn device_commands_return_data_and_errors() {
+        let fake = Fake::new();
+        let (r, _) = run(
+            r#"
+            local p = phones()[1]
+            assert.truthy(p:installed("com.have.app"))
+            assert.falsy(p:installed("com.not.here"))
+            assert.eq(p:app_info("com.have.app").version_code, 7)
+            local list = p:app_info({"com.have.app", "com.not.here"})
+            assert.eq(#list, 2)
+            assert.eq(p:logcat({lines = 10, level = "E"}), "line1\nline2")
+            assert.eq(p:stay_awake(true).previous, "0")
+            p:force_stop("com.have.app")
+            p:uninstall("com.have.app", {keep_data = true})
+            p:button("back")
+            local ok, err = pcall(function() p:install_apk("/sdcard/a.apk", {allow_downgrade = false}) end)
+            assert.falsy(ok)
+            assert.contains(tostring(err), "VERSION_DOWNGRADE")
+            "#,
+            &fake,
+        );
+        assert_eq!(r.status, "passed", "{r:?}");
+        let log = fake.log();
+        assert!(log.iter().any(|l| l.contains(r#""op":"ForceStop""#) && l.contains("com.have.app")));
+        assert!(log.iter().any(|l| l.contains(r#""keep_data":true"#)));
+        assert!(log.iter().any(|l| l.contains(r#""lines":10"#) && l.contains(r#""level":"E""#)));
     }
 
     #[test]

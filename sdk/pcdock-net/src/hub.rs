@@ -18,6 +18,8 @@ use crate::{envelope, KIND_JSON};
 pub struct Client<D> {
     pub out: Arc<Outbox>,
     pub authed: bool,
+    /// Роль по токену: `full` или та, что назначена токену через `add_role_token`.
+    pub role: Arc<str>,
     pub data: D,
 }
 
@@ -39,6 +41,8 @@ struct Inner<D> {
     clients: Mutex<HashMap<u64, Client<D>>>,
     next: AtomicU64,
     token: Option<Arc<str>>,
+    /// Дополнительные токены с ограниченной ролью: (токен, роль).
+    roles: Mutex<Vec<(Arc<str>, Arc<str>)>>,
     handler: Arc<dyn Handler<D>>,
 }
 
@@ -74,8 +78,28 @@ impl<D: Send + 'static> Hub<D> {
             clients: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
             token: token.filter(|t| !t.is_empty()).map(Arc::from),
+            roles: Mutex::new(Vec::new()),
             handler: Arc::new(handler),
         }))
+    }
+
+    /// Ещё один токен, дающий ограниченную роль (проверку роли делает обработчик). Пока есть такие токены,
+    /// клиенты без авторизации не принимаются, даже если основного токена нет.
+    pub fn add_role_token(&self, token: &str, role: &str) {
+        if !token.is_empty() {
+            self.0.roles.lock().unwrap().push((Arc::from(token), Arc::from(role)));
+        }
+    }
+
+    /// Роль клиента.
+    pub fn role_of(&self, client: u64) -> Arc<str> {
+        self.0
+            .clients
+            .lock()
+            .unwrap()
+            .get(&client)
+            .map(|c| c.role.clone())
+            .unwrap_or_else(|| Arc::from("none"))
     }
 
     /// Работа с клиентами под замком. Внутри не вызывайте методы `Hub`, которые берут тот же замок.
@@ -118,10 +142,10 @@ impl<D: Send + 'static> Hub<D> {
 
     pub fn add_client(&self, out: Arc<Outbox>) -> u64 {
         let id = self.0.next.fetch_add(1, Ordering::SeqCst);
-        let authed = self.0.token.is_none();
+        let authed = self.0.token.is_none() && self.0.roles.lock().unwrap().is_empty();
         out.json(self.0.handler.hello().to_string());
         let data = self.0.handler.client_data();
-        self.0.clients.lock().unwrap().insert(id, Client { out, authed, data });
+        self.0.clients.lock().unwrap().insert(id, Client { out, authed, role: Arc::from("full"), data });
         id
     }
 
@@ -153,13 +177,25 @@ impl<D: Send + 'static> Hub<D> {
         };
         if op == "Auth" {
             let given = msg.get("token").and_then(Value::as_str).unwrap_or("");
-            let ok = match &self.0.token {
-                Some(want) => constant_time_eq(want.as_bytes(), given.as_bytes()),
-                None => true,
+            let mut role: Option<Arc<str>> = match &self.0.token {
+                Some(want) => constant_time_eq(want.as_bytes(), given.as_bytes()).then(|| Arc::from("full")),
+                None if self.0.roles.lock().unwrap().is_empty() => Some(Arc::from("full")),
+                None => None,
             };
-            if ok {
+            if role.is_none() {
+                role = self
+                    .0
+                    .roles
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|(t, _)| constant_time_eq(t.as_bytes(), given.as_bytes()))
+                    .map(|(_, r)| r.clone());
+            }
+            if let Some(role) = role {
                 if let Some(c) = self.0.clients.lock().unwrap().get_mut(&id) {
                     c.authed = true;
+                    c.role = role;
                 }
                 return self.reply(id, req_id, json!({"ev": "Authed"}));
             }

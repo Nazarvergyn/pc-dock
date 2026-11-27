@@ -94,7 +94,11 @@ pub enum PacketType {
     WifiSet,
     /// Положить текст в буфер обмена телефона (хост → телефон, возможность `caps::CLIPBOARD_SET`).
     ClipboardSet,
+    /// Команда компаньону (хост → телефон): `u32 req`, затем JSON.
+    Command,
     Status,
+    /// Результат команды (телефон → хост): `u32 req`, `u8 ok`, JSON.
+    CommandResult,
     Error,
     /// Тип, неизвестный этой версии ядра (такие пакеты пропускаются).
     Unknown(u8),
@@ -123,6 +127,8 @@ impl PacketType {
             0x49 => Self::TextInput,
             0x4A => Self::WifiSet,
             0x4B => Self::ClipboardSet,
+            0x4C => Self::Command,
+            0x51 => Self::CommandResult,
             0x50 => Self::Status,
             0x7F => Self::Error,
             other => Self::Unknown(other),
@@ -151,6 +157,8 @@ impl PacketType {
             Self::TextInput => 0x49,
             Self::WifiSet => 0x4A,
             Self::ClipboardSet => 0x4B,
+            Self::Command => 0x4C,
+            Self::CommandResult => 0x51,
             Self::Status => 0x50,
             Self::Error => 0x7F,
             Self::Unknown(v) => v,
@@ -617,6 +625,35 @@ pub fn request_frame_packet() -> Packet {
     Packet::new(PacketType::RequestFrame, Vec::new())
 }
 
+/// Результат команды компаньона: `ok` и тело (JSON при успехе, текст ошибки при неудаче).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandResult {
+    pub req: u32,
+    pub ok: bool,
+    pub body: String,
+}
+
+impl CommandResult {
+    pub fn to_packet(&self) -> Packet {
+        let mut p = self.req.to_be_bytes().to_vec();
+        p.push(self.ok as u8);
+        p.extend_from_slice(self.body.as_bytes());
+        Packet::new(PacketType::CommandResult, p)
+    }
+
+    pub fn from_payload(data: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor::new(data);
+        Ok(Self { req: c.u32()?, ok: c.u8()? != 0, body: utf8(c.rest()) })
+    }
+}
+
+/// Команда компаньону: номер запроса и JSON `{"op": …}`.
+pub fn command_packet(req: u32, body: &str) -> Packet {
+    let mut p = req.to_be_bytes().to_vec();
+    p.extend_from_slice(body.as_bytes());
+    Packet::new(PacketType::Command, p)
+}
+
 /// Разбудить экран телефона (пустой пакет, хост → телефон).
 pub fn wake_packet() -> Packet {
     Packet::new(PacketType::Wake, Vec::new())
@@ -997,6 +1034,17 @@ impl LaunchApp {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn command_and_result_roundtrip() {
+        let p = super::command_packet(7, r#"{"op":"X"}"#);
+        assert_eq!(p.ptype.to_u8(), 0x4C);
+        assert_eq!(&p.payload[..4], &7u32.to_be_bytes());
+        let r = super::CommandResult { req: 7, ok: true, body: "{}".into() };
+        let back = super::CommandResult::from_payload(&r.to_packet().payload).unwrap();
+        assert_eq!(back, r);
+        assert!(super::CommandResult::from_payload(&[0, 0]).is_err());
+    }
+
     use super::*;
 
     fn sample_hello() -> Hello {

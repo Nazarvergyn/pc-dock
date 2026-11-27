@@ -142,12 +142,44 @@ impl Conn {
         }
     }
 
+    /// Следующий JSON-ответ, не считая рассылок о состояниях телефонов.
+    fn reply(&mut self) -> Value {
+        loop {
+            let v = self.json();
+            if !["State", "Appeared", "Lost", "Connected", "Display", "AudioConfig", "Status", "Warning"]
+                .contains(&v["ev"].as_str().unwrap_or(""))
+            {
+                return v;
+            }
+        }
+    }
+
+    /// Следующее сообщение `Status` (ответы приложения на телефоне), пропуская остальные рассылки.
+    fn status(&mut self) -> ServerMsg {
+        loop {
+            let m: ServerMsg = serde_json::from_value(self.json()).unwrap();
+            if matches!(m, ServerMsg::Status { .. }) {
+                return m;
+            }
+        }
+    }
+
     /// Следующее JSON-сообщение сервера как `ServerMsg`, не считая рассылки о состояниях телефонов
     /// (они приходят всем и могут вклиниться между ответами).
     fn msg(&mut self) -> ServerMsg {
         loop {
             let m: ServerMsg = serde_json::from_value(self.json()).unwrap();
-            if !matches!(m, ServerMsg::State { .. } | ServerMsg::Appeared { .. } | ServerMsg::Lost { .. }) {
+            if !matches!(
+                m,
+                ServerMsg::State { .. }
+                    | ServerMsg::Appeared { .. }
+                    | ServerMsg::Lost { .. }
+                    | ServerMsg::Connected { .. }
+                    | ServerMsg::Display { .. }
+                    | ServerMsg::AudioConfig { .. }
+                    | ServerMsg::Status { .. }
+                    | ServerMsg::Warning { .. }
+            ) {
                 return m;
             }
         }
@@ -243,31 +275,31 @@ fn request_ids_are_echoed_in_replies() {
     c.expect_hello();
 
     c.send_raw(r#"{"op":"List","id":41}"#);
-    let v = c.json();
+    let v = c.reply();
     assert_eq!(v["ev"], "Phones");
     assert_eq!(v["id"], 41);
 
     // Команда без собственного ответа: `Ok` с тем же номером.
     c.send_raw(r#"{"op":"Wake","phone":3,"id":42}"#);
-    let v = c.json();
+    let v = c.reply();
     assert_eq!((v["ev"].as_str(), v["id"].as_u64()), (Some("Ok"), Some(42)));
 
     // Ошибка тоже несёт номер запроса.
     c.send_raw(r#"{"op":"Wake","phone":99,"id":43}"#);
-    let v = c.json();
+    let v = c.reply();
     assert_eq!((v["ev"].as_str(), v["id"].as_u64()), (Some("Error"), Some(43)));
 
     // Выбор пути: неизвестное имя и телефон без обнаружения дают ошибку с номером запроса.
     c.send_raw(r#"{"op":"SetTransport","phone":3,"transport":"wifi","id":44}"#);
-    let v = c.json();
+    let v = c.reply();
     assert_eq!((v["ev"].as_str(), v["id"].as_u64()), (Some("Error"), Some(44)));
     c.send_raw(r#"{"op":"SetTransport","phone":3,"transport":"adb","id":45}"#);
-    let v = c.json();
+    let v = c.reply();
     assert_eq!((v["ev"].as_str(), v["id"].as_u64()), (Some("Error"), Some(45)));
 
     // Без номера всё как раньше: ответа `Ok` нет, ошибка без `id`.
     c.send_raw(r#"{"op":"Wake","phone":99}"#);
-    let v = c.json();
+    let v = c.reply();
     assert_eq!(v["ev"], "Error");
     assert!(v.get("id").is_none());
 }
@@ -565,20 +597,21 @@ fn app_requests_reach_the_phone_and_replies_go_to_the_requester_without_watch() 
     let mut other = Conn::open(addr);
     other.expect_hello();
 
-    asker.send_raw(r#"{"op":"LaunchApp","phone":5,"request":7,"package":"com.example.app","id":1}"#);
-    assert_eq!(asker.json()["ev"], "Ok");
-    asker.send_raw(r#"{"op":"UiDump","phone":5,"request":8}"#);
-    asker.send_raw(r#"{"op":"ExitInfo","phone":5,"request":9,"since_ms":100,"package":"com.example.app"}"#);
+    asker.send_raw(r#"{"op":"AppLaunch","phone":5,"request":7,"package":"com.example.app","id":1}"#);
+    assert_eq!(asker.reply()["ev"], "Ok");
+    asker.send_raw(r#"{"op":"AppUiDump","phone":5,"request":8}"#);
+    asker
+        .send_raw(r#"{"op":"AppExitInfo","phone":5,"request":9,"since_ms":100,"package":"com.example.app"}"#);
     asker.send_raw(r#"{"op":"IpCheck","phone":5,"request":10,"url":"https://example.com/ip"}"#);
     asker.send_raw(concat!(
         r#"{"op":"HttpLocal","phone":5,"request":12,"method":"POST","url":"http://192.168.1.1/cgi?1","#,
         r#""headers":{"Referer":"http://192.168.1.1/","Content-Type":"text/plain"},"body":"[x]","timeout_ms":5000}"#
     ));
     asker.send_raw(r#"{"op":"HttpLocal","phone":5,"request":13,"url":"http://192.168.1.1/"}"#);
-    asker.send_raw(r#"{"op":"TypeText","phone":5,"request":14,"text":"Привет 👋 #тест\nстрока"}"#);
+    asker.send_raw(r#"{"op":"AppTypeText","phone":5,"request":14,"text":"Привет 👋 #тест\nстрока"}"#);
     asker.send_raw(r#"{"op":"SetWifi","phone":5,"request":15,"on":false}"#);
-    asker.send_raw(r#"{"op":"ListApps","phone":5,"request":11,"id":2}"#);
-    assert_eq!(asker.json()["ev"], "Ok");
+    asker.send_raw(r#"{"op":"AppListApps","phone":5,"request":11,"id":2}"#);
+    assert_eq!(asker.reply()["ev"], "Ok");
     let t0 = Instant::now();
     while !phone.log().contains("ListApps") && t0.elapsed() < Duration::from_secs(3) {
         std::thread::sleep(Duration::from_millis(10));
@@ -603,26 +636,26 @@ fn app_requests_reach_the_phone_and_replies_go_to_the_requester_without_watch() 
 
     // Ответ телефона приходит тому, кто спрашивал, хотя он не подписан на кадры; остальным — нет.
     phone.push(Event::Status(pcdock_core::packet::Status { code: 18, detail: "7 ok".into() }));
-    match asker.msg() {
+    match asker.status() {
         ServerMsg::Status { phone: 5, code: 18, detail } => assert_eq!(detail, "7 ok"),
         m => panic!("ждали Status 18, пришло {m:?}"),
     }
     let reply =
         r#"12 {"ok":true,"code":401,"body":"[error]0","headers":{"set-cookie":"JSESSIONID=1"},"ms":30}"#;
     phone.push(Event::Status(pcdock_core::packet::Status { code: 24, detail: reply.into() }));
-    match asker.msg() {
+    match asker.status() {
         ServerMsg::Status { phone: 5, code: 24, detail } => assert_eq!(detail, reply),
         m => panic!("ждали Status 24, пришло {m:?}"),
     }
     let reply = r#"14 {"ok":true,"method":"clipboard","reason":"no_service","ms":3}"#;
     phone.push(Event::Status(pcdock_core::packet::Status { code: 25, detail: reply.into() }));
-    match asker.msg() {
+    match asker.status() {
         ServerMsg::Status { phone: 5, code: 25, detail } => assert_eq!(detail, reply),
         m => panic!("ждали Status 25, пришло {m:?}"),
     }
     let reply = r#"15 {"ok":true,"enabled":false,"method":"quick_settings","ms":900}"#;
     phone.push(Event::Status(pcdock_core::packet::Status { code: 26, detail: reply.into() }));
-    match asker.msg() {
+    match asker.status() {
         ServerMsg::Status { phone: 5, code: 26, detail } => assert_eq!(detail, reply),
         m => panic!("ждали Status 26, пришло {m:?}"),
     }

@@ -42,6 +42,18 @@
 Если демон запущен с `--token`, первой командой должна быть `{"op":"Auth","token":"…"}`; ответ `{"ev":"Authed"}`. До этого любые другие команды
 получают `Error`, события не приходят. На неверный токен ответ задерживается на 0,5 с.
 
+### Команды над телефоном
+
+Команды `DeviceInfo`, `DeviceStats`, `AppInfo`, `ForceStop`, `ClearAppData`, `UninstallApp`, `InstallApk`, `Logcat`, `SetMobileData`,
+`StayAwake`, `ScreenState`, `Button` отвечают событием `{"ev":"DeviceResult","phone":N,"op":"ИМЯ","data":{…}}` (с тем же `id`). Выполняются
+по ADB в отдельном потоке (установка не задерживает остальных); у телефона должен быть известен серийник и доступен ADB, иначе ответ `Error`.
+Демон запуска `pcdockd --no-device-ops` их отключает.
+
+Элемент экрана (`UiFind`, `UiDump` …): `text`, `desc`, `id`, `class`, `package`, `kind`, `bounds` `[l,t,r,b]` в пикселях, `x`, `y` (центр), `w`, `h` в долях экрана
+(готовы для касания), `clickable`, `enabled`, `checked`, `focused`, `scrollable`. Селектор: `text`, `text_contains`, `id` (целиком или короткое имя), `desc`,
+`desc_contains`, `class`, `package`, `checked`, `enabled`, `focused`, `clickable`, `scrollable`, `selected`, `ignore_case`, `any` (список вариантов «или»);
+неизвестное поле это ошибка.
+
 ### Команды и ответы
 
 Команда это JSON-объект с полем `op` и необязательным числовым `id`. Если `id` есть, ответ на команду несёт то же `id`:
@@ -71,6 +83,8 @@
 | `op` | Поля | Ответ |
 |---|---|---|
 | `List` | | `Phones {phones, details}`; `details`: для каждого `{phone, state, transport, address, serial, name, display}` |
+| `SetConnectPolicy` | `serial?`, `prefer?` (`usb`/`adb`/`serial`/`auto`), `fallback_secs?`, `scan_secs?` | правила выбора пути на ходу: предпочтение (для телефона или общее), через сколько секунд пробовать другой путь (0: не переключаться), период поиска; `Ok` |
+| `Health` | | `Health {server, protocol, phones, errors}`; `phones` как `details` в `List`; `errors`: последние 100 ошибок `{at, phone, kind, detail}` (обрыв связи, предупреждения, битые пакеты, сбои команд над телефоном) |
 | `Watch` | `phone`, `fps?`, `on_change?`, `audio?` | `Watched`; затем последний кадр из кэша. Повторный `Watch` меняет условия |
 | `Unwatch` | `phone` | `Watched {on:false}` |
 | `Snapshot` | `phone` | `Ok` (если был `id`) и один видеопакет только вам; нет кадра: `Error` |
@@ -82,6 +96,37 @@
 | `DeviceEnable` | `phone, kind, on` | `kind`: 0 касание, 1 мышь, 2 клавиатура |
 | `ReleaseAll`, `RequestFrame`, `Wake` | `phone` | |
 | `SetTransport` | `phone`, `transport` (`usb`, `adb`, `serial`) | перевести телефон на другой путь; `Ok` значит «принято», итог придёт событием `Appeared` (успех) или `Warning` (путь недоступен) |
+| `DeviceInfo` | `phone` | `DeviceResult`: `manufacturer`, `model`, `android`, `sdk`, `abis`, `serial`, `screen_w`, `screen_h`, `dpi` |
+| `DeviceStats` | `phone` | `battery` (`level`, `temperature_c`, `charging`), `cpu_percent`, `mem_total_kb`, `mem_available_kb` |
+| `AppInfo` | `phone`, `packages` | `apps`: по пакету `installed`, `version_code`, `version_name`, `enabled`, `first_install`, `last_update` |
+| `ForceStop`, `ClearAppData` | `phone`, `package` | остановить приложение; стереть его данные |
+| `UninstallApp` | `phone`, `package`, `keep_data?` | удалить приложение |
+| `InstallApk` | `phone`, `path`, `allow_downgrade?`, `sha256?` | установить APK, уже лежащий на телефоне в разрешённой папке (сначала `FilePut`); `sha256` проверяется на телефоне; ошибка несёт причину `pm` |
+| `Logcat` | `phone`, `lines?` (500, до 5000), `package?`, `level?` (`V D I W E F`) | `data.text` |
+| `SetMobileData` | `phone`, `on` | мобильные данные |
+| `SystemDialog` | `phone`, `action?` (`allow`/`deny`) | `data.present`, `data.package`, `data.texts`, `data.buttons`, `data.target` (нажатая кнопка) |
+| `ExitInfo` | `phone`, `package` | `data.text`: `dumpsys activity exit-info` |
+| `SetPackageVerifier` | `phone`, `on` | проверка приложений при установке по ADB |
+| `GetClipboard`, `SetClipboard` | `phone` / `phone`, `text` | `data.text`; по ADB ошибка, нужен компаньон |
+| `CompanionPermissions` | `phone` | выдать компаньону права по ADB; `data.granted`, `data.failed` |
+| `CompanionCall` | `phone`, `call` (`{"op": …}`) | команда прямо компаньону по USB-аксессуару (см. PROTOCOL.md §9), `data` ответа компаньона |
+| `CompanionRestart` | `phone` | остановить и запустить приложение-компаньон |
+| `CompanionInstall` | `phone`, `path`, `sha256?` | `InstallApk` APK компаньона, затем права и запуск; ответ как у `CompanionPermissions` |
+| `PublicIp` | `phone` | `data.ip` |
+| `StayAwake` | `phone`, `on` | `data.previous`: прежнее значение настройки |
+| `ScreenState` | `phone` | `wakefulness`, `on`, `locked` |
+| `Button` | `phone`, `name` | `back home recents menu power wakeup sleep volume_up volume_down volume_mute enter delete tab` |
+| `LaunchApp` | `phone`, `package`, `activity?` | запустить приложение (пакет из блок-листа отклоняется) |
+| `ListApps` | `phone`, `all?` | `data.packages`: со значком запуска, с `all` все |
+| `ForegroundApp` | `phone` | `data.package`, `data.activity`, `data.blocked` |
+| `UiDump`, `UiElements` | `phone` | `data.elements`: все элементы экрана / готовый список для показа (`kind`: `button field switch image list text other`) |
+| `UiFind` | `phone`, `selector` | `data.elements` по селектору |
+| `UiAt`, `UiFocused` | `phone`, `x`, `y` / `phone` | `data.element`: под точкой / поле ввода в фокусе |
+| `WaitFor` | `phone`, `selector`, `timeout?`, `gone?` | ждать появления (исчезновения) элемента; `data.ok`, `data.elements` |
+| `TypeText` | `phone`, `text` | набрать текст в поле в фокусе (по ADB печатный ASCII) |
+| `NetworkInfo` | `phone` | `data.online`, `data.local_ip`, `data.interface` |
+| `SetAirplaneMode` | `phone`, `on` | режим полёта |
+| `SetBlocklist` | `packages` | блок-лист пакетов (маска `*` в начале или конце), общий на демон; `Ok` |
 | `SetStream` | `phone, video, audio` | |
 | `FilePut` | `phone, dest, size, media?` | `FileReady {transfer}`, затем данные клиента (тип 3), итог `FileDone`/`FileFailed` |
 | `FileGet` | `phone, src` | `FileInfo {transfer, size}`, данные сервера (тип 3), итог `FileDone`/`FileFailed` |
@@ -172,11 +217,29 @@
 | `Runs` | | `Runs {runs:[{run, script, name, phones, started, finished, status}]}` |
 | `RunInfo` | `run` | `Run {run, summary, report, artifacts}` |
 | `Subscribe` | `run, from?` | `Ok`; затем события с номера `from` (история, потом живой поток) |
+| `ScriptParams` | `script` | `ScriptParams {script, params:[{name, type, required, default, description}]}` из комментариев `-- @param` |
+| `RunChain` | `steps, rounds?, round_pause?, name?, follow?` | `ChainStarted {chain, name}`; затем события цепочки |
+| `Chains` | | `Chains {chains}` |
+| `ChainInfo` | `chain` | `Chain {chain, summary, report}` |
+| `StopChain` | `chain` | `Ok` |
+| `ScheduleList` | | `Schedules {schedules}` |
+| `SchedulePut` | `schedule?, name, rule, target, enabled?, skip_if_running?` | `ScheduleSaved {schedule}` |
+| `ScheduleDelete` | `schedule` | `Ok` |
 | `Artifacts` | `run` | `Artifacts {run, names}` |
 | `Artifact` | `run, name` | `Artifact {run, name, size}` и пакет типа 4: `[длина имени u8][имя][содержимое]` |
 
 `Run`: `phones` телефоны, выделяемые прогону (по умолчанию все готовые); телефон занимается эксклюзивно, пока прогон идёт; `args` параметры, доступные
-сценарию как `args`; `tests` выполнить только тесты с этими именами; `timeout` срок прогона в секундах.
+сценарию как `args`; `tests` выполнить только тесты с этими именами; `timeout` срок прогона в секундах; `stay_awake` не давать экранам гаснуть на время
+прогона (прежняя настройка возвращается); `device_logs` в конце сохранить `logcat` каждого телефона в папку прогона (`phone-N-logcat.txt`), `exit_info` список пакетов, для которых сохранить `ExitInfo` (`phone-N-exit-ПАКЕТ.txt`); `record` записывать экраны с таким числом кадров в секунду (до 30): `rec-N.mp4`, если на ПК есть `ffmpeg`, иначе кадры JPEG в `rec-N/`. Сбой любого из них идёт в журнал прогона предупреждением. Если в сценарии есть `-- @param`, `args` проверяются по схеме (тип, обязательность, лишние поля) и дополняются значениями по умолчанию.
+
+`RunChain`: `steps` список `{script, args?, phones?, on_fail?, retries?, pause?, timeout?}`, `rounds` кругов (1), `round_pause` секунд между кругами.
+`on_fail`: `stop` (по умолчанию), `continue`, `retry` (повторить `retries` раз, потом остановить). События цепочки приходят как `RunEvent` с `run` = номер цепочки:
+`chain_start`, `chain_round {round}`, `chain_step {round, step, script, attempt, step_run, status}`, `chain_end {status}`. Итог в `chains/<номер>/chain.json`.
+`Subscribe` принимает и номер цепочки. Всем клиентам приходят `ChainStarted` и `ChainEnded`.
+
+`SchedulePut`: `rule` это `{"every": секунды}`, `{"daily": "ЧЧ:ММ", "days": [1..7], "utc_offset_min": 180}` (1 понедельник) или `{"at": время_мс}`; `target` это
+`{"script": id, "args"?, "phones"?}` или `{"chain": описание}`. Расписание хранится в `schedules.json` и переживает перезапуск; пропущенные за простой запуски не
+наверстываются; пока предыдущий запуск идёт, новый пропускается (`skip_if_running: false` отключает).
 
 ### События
 
@@ -201,3 +264,7 @@
 
 Папка данных (`--data`): `scripts/<id>.lua` и `scripts/index.json` (id → читаемое имя, даты, размер), `runs/<run>/events.jsonl` (все события),
 `runs/<run>/report.json` (итоговый отчёт) и вложения (кадры). Файлы и идентификаторы выдаёт демон; пути от клиента не принимаются.
+
+## Роли токенов
+
+`pcdockd --role-token РОЛЬ=ТОКЕН` (можно повторять) добавляет токен с ограничением; основной токен остаётся полным. Роли: `view` (список, просмотр, чтение сведений, поиск по экрану), `input` (то же и ввод: касания, клавиши, кнопки, текст), `nofiles` (всё, кроме передачи файлов). Запрещённая команда отвечает `Error` с названием роли.

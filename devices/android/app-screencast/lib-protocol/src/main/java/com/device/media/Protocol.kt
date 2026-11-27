@@ -41,7 +41,9 @@ object Proto {
     const val T_WIFI_SET = 0x4A
     /** Положить текст в буфер обмена (хост → телефон): u32 request_id, текст UTF-8. Ответ — STATUS 27. */
     const val T_CLIPBOARD_SET = 0x4B
+    const val T_COMMAND = 0x4C
     const val T_STATUS = 0x50
+    const val T_COMMAND_RESULT = 0x51
     const val T_ERROR = 0x7F
 
     const val CAP_VIDEO_JPEG = 1 shl 0
@@ -318,6 +320,14 @@ object Messages {
         return Packet(Proto.T_VIDEO_FRAME, 1, b.array())
     }
 
+    /** Ответ на T_COMMAND: u32 req, u8 ok, затем JSON (ok) или текст ошибки. */
+    fun commandResult(req: Int, ok: Boolean, body: String): Packet {
+        val d = body.toByteArray(Charsets.UTF_8)
+        val b = ByteBuffer.allocate(5 + d.size)
+        b.putInt(req).put(if (ok) 1 else 0).put(d)
+        return Packet(Proto.T_COMMAND_RESULT, 0, b.array())
+    }
+
     fun pong(nonce: ByteArray): Packet = Packet(Proto.T_PONG, 0, nonce)
 
     fun audioConfig(sampleRate: Int, channels: Int): Packet {
@@ -361,4 +371,13 @@ object Messages {
         null
     }
 
+    /** Разбор T_COMMAND: номер запроса и JSON-текст. */
+    fun parseCommand(payload: ByteArray): Pair<Int, String>? = try {
+        val b = ByteBuffer.wrap(payload)
+        val req = b.int
+        val rest = ByteArray(b.remaining()).also { b.get(it) }
+        req to rest.toString(Charsets.UTF_8)
+    } catch (e: Exception) {
+        null
+    }
 }

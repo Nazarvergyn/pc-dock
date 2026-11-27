@@ -11,7 +11,7 @@ android {
         applicationId = "com.device.media"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
+        versionCode = (findProperty("pcdockVersionCode") as String?)?.toInt() ?: 1
         versionName = (findProperty("pcdockVersion") as String?) ?: "0.1.0-alpha.3"
     }
 

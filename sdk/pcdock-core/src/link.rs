@@ -52,6 +52,11 @@ pub enum InputCmd {
     ReleaseAll,
     RequestFrame,
     Wake,
+    /// Команда компаньону на телефоне (`body` — JSON); ответ приходит событием `CommandResult`.
+    Command {
+        req: u32,
+        body: String,
+    },
     /// Включить или выключить видео и звук; `max_fps` — не чаще стольких кадров в секунду (0 — без ограничения).
     SetStream {
         video: bool,

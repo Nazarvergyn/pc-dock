@@ -38,6 +38,10 @@ struct Args {
     #[arg(long = "files")]
     files: bool,
 
+    /// Выключить команды над телефоном (сведения, приложения, установка, журнал, питание, сеть, кнопки). Они работают по ADB.
+    #[arg(long = "no-device-ops")]
+    no_device_ops: bool,
+
     /// Папка на телефоне, доступная для файлов (можно несколько раз). По умолчанию: /sdcard,
     /// /storage/emulated/0, /data/local/tmp.
     #[arg(long = "files-root")]
@@ -73,6 +77,11 @@ struct Args {
     /// `PCDOCK_TOKEN`. Без него слушать можно только на localhost.
     #[arg(long)]
     token: Option<String>,
+
+    /// Токен с ограниченной ролью: `РОЛЬ=ТОКЕН`, роли `view` (просмотр), `input` (просмотр и ввод), `nofiles` (всё, кроме файлов).
+    /// Можно повторять.
+    #[arg(long = "role-token")]
+    role_tokens: Vec<String>,
 
     /// Слушать TCP (протокол с конвертом). Пусто = не слушать.
     #[arg(long, default_value = "127.0.0.1:9001")]
@@ -216,7 +225,19 @@ fn main() {
     if let Some(f) = &files {
         log::info!("передача файлов включена, папки: {}", f.roots.join(", "));
     }
-    let serve = Serve::with_options(daemon, token, files);
+    let device: Option<std::sync::Arc<dyn pcdock_serve::DeviceBackend>> = (!args.no_device_ops)
+        .then(|| std::sync::Arc::new(pcdock_serve::AdbDevice::new(args.adb_server.clone())) as _);
+    let serve = Serve::with_device(daemon, token, files, device);
+    for rt in &args.role_tokens {
+        let Some((role, tok)) = rt.split_once('=') else {
+            log::error!("--role-token: нужен вид РОЛЬ=ТОКЕН");
+            std::process::exit(2);
+        };
+        if let Err(e) = serve.add_role_token(tok, role) {
+            log::error!("--role-token: {e}");
+            std::process::exit(2);
+        }
+    }
     if !args.no_tcp {
         match args.tcp.as_deref().unwrap_or("") {
             "" => {}

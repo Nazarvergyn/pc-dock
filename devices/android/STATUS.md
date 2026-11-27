@@ -18,6 +18,19 @@
 - Работа с телефоном на Windows и macOS (CI собирает и тестирует на обеих системах; на реальной Windows бинарники запускались: libusb, именованная труба, `pcdock-check`), Android ниже 15, сутки работы в фоне (HyperOS), возврат AOA-телефона в обычный режим после остановки демона.
 - Serial-транспорт на микроконтроллере.
 
+## Добавлено после alpha.3 (на ветке, на телефоне не проверялось)
+
+Команды над телефоном, разбор экрана, блок-лист, стандартная библиотека Lua, параметры, цепочки и расписание в `pcdock-autod`. Проверено тестами на фейках и
+разбором образцов вывода `getprop`, `dumpsys`, `uiautomator`; **на настоящем телефоне эти команды не запускались**: формат вывода `dumpsys` и
+`uiautomator dump` на Xiaomi и Oppo мог отличаться от образцов.
+
+Чего нет:
+- Без ADB (только AOA) команды выполняет компаньон (PROTOCOL.md §9): запуск, список и сведения о приложениях, фоновая остановка, буфер обмена, состояние экрана и сети, кнопка `home`. Не умеет: разбор экрана (`UiFind` и др.), ввод текста, остальные кнопки, установку и удаление, `logcat`. Это ограничения Android без особых прав.
+- Проверено на OPPO CPH2505 (Android 15, ADB): `DeviceInfo`, `DeviceStats`, `AppInfo` (с подписью), `ScreenState`, `ForegroundApp`, `NetworkInfo`, `UiElements`, `UiFind`, `WaitFor`, `SystemDialog`, `ExitInfo`, `PublicIp`, `ListApps`, `Logcat`, `Health`, `CompanionPermissions`. Исправлено по результатам: `ForegroundApp` при открытой шторке, `PublicIp` через `curl`, ложные срабатывания `SystemDialog` на шторке. По AOA (OPPO CPH2505) через `CompanionCall` проверены `Info`, `AppInfo`, `LaunchApp` (Настройки открылись), `ForegroundApp` (нужно право «Доступ к данным об использовании», выдаётся `CompanionPermissions`), `ScreenState`, `NetworkInfo`, `ForceStop`, `Button home`, `SetClipboard`; `GetClipboard` вернул пусто (Android 10+ отдаёт буфер только приложению в фокусе); `Button back` и неизвестные команды отвечают понятной ошибкой.
+- Не проверялись на телефоне: `Health` (с журналом ошибок), `SystemDialog`, `ExitInfo`, `SetPackageVerifier`, `PublicIp`, подписи в `AppInfo`, `SetConnectPolicy`, роли токенов, `CompanionPermissions`/`CompanionRestart`, запись экрана и журналы телефона в прогоне, команды компаньона.
+- `TypeText` по ADB только ASCII; чтение буфера обмена работает, только если приложение компаньона в фокусе (Android 10+); настоящее ожидание Wi-Fi не сделано.
+- Установка берёт APK только с телефона (его кладёт `FilePut`); без `--files` папки по умолчанию `/sdcard`, `/data/local/tmp`.
+
 ## Известные проблемы и ограничения
 
 - В WSL2 новый USB-ID телефона (режим аксессуара, смена режима USB у Oppo) надо разрешить в `usbipd` вручную; без этого телефон пропадает из WSL.

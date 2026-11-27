@@ -96,6 +96,8 @@ pub enum Event {
     AudioConfig(AudioConfig),
     Audio(AudioFrame),
     Status(Status),
+    /// Ответ компаньона на команду.
+    CommandResult(CommandResult),
     /// Телефон не ответил на `HELLO` за `peer_timeout_ms`. Вероятно, приложение-приёмник не запущено:
     /// адаптер может сбросить USB, чтобы телефон заново прошёл через режим аксессуара.
     PeerSilent,
@@ -301,6 +303,10 @@ impl Session {
             PacketType::AudioFrame => match AudioFrame::from_payload(&packet.payload) {
                 Ok(f) => self.events.push_back(Event::Audio(f)),
                 Err(e) => self.malformed("AUDIO_FRAME", e),
+            },
+            PacketType::CommandResult => match CommandResult::from_payload(&packet.payload) {
+                Ok(r) => self.events.push_back(Event::CommandResult(r)),
+                Err(e) => self.malformed("COMMAND_RESULT", e),
             },
             PacketType::Status => match Status::from_payload(&packet.payload) {
                 Ok(s) => self.events.push_back(Event::Status(s)),
@@ -625,6 +631,13 @@ impl Session {
         }
         self.send_packet(req.to_packet());
         Ok(())
+    }
+
+    /// Отправляет команду компаньону на телефоне; ответ придёт событием `Event::CommandResult` с тем же `req`.
+    pub fn command(&mut self, req: u32, body: &str) {
+        if self.state == State::Active {
+            self.send_packet(command_packet(req, body));
+        }
     }
 
     // ----- команды ввода (PROTOCOL.md §8) -----
