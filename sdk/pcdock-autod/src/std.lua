@@ -89,12 +89,21 @@ function scroll_until(p, target, opts)
   return p:find_one(target)
 end
 
--- Ждать выход в сеть (до `timeout` секунд). Возвращает сведения о сети или nil.
+-- Ждать выход в сеть (до `timeout` секунд). Возвращает сведения о сети или nil. Если у прогона задан `check_url`,
+-- сеть считается рабочей, когда по нему получен внешний адрес (`public_ip` в ответе).
 function wait_online(p, timeout)
   local deadline = now() + (timeout or 30)
   repeat
     local ok, n = pcall(function() return p:network() end)
-    if ok and n and n.online then return n end
+    if ok and n and n.online then
+      if not check_url then return n end
+      -- Свой адрес проверки (check_url прогона): сеть есть, когда по нему отвечает внешний адрес.
+      local ok2, ip = pcall(function() return p:public_ip() end)
+      if ok2 and ip ~= "" then
+        n.public_ip = ip
+        return n
+      end
+    end
     sleep(1)
   until now() >= deadline
   return nil

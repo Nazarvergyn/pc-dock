@@ -198,6 +198,13 @@ pub enum ClientMsg {
     /// Внешний адрес телефона. `data.ip`.
     PublicIp {
         phone: u32,
+        #[serde(default)]
+        url: Option<String>,
+    },
+    /// Wi-Fi телефона вкл/выкл. `data.previous`: было ли включено.
+    SetWifi {
+        phone: u32,
+        on: bool,
     },
     /// Правила выбора пути на ходу. `prefer`: `usb`/`adb`/`serial` предпочесть, `auto` сбросить; с `serial` для одного
     /// телефона. `fallback_secs`: через сколько секунд пробовать другой путь (0: не переключаться); `scan_secs`: период поиска.
@@ -210,6 +217,9 @@ pub enum ClientMsg {
         fallback_secs: Option<f64>,
         #[serde(default)]
         scan_secs: Option<f64>,
+        /// Применить, только если для телефона (`serial`) предпочтение ещё не задано.
+        #[serde(default)]
+        if_unset: bool,
     },
     /// Выдать компаньону права по ADB (статистика использования, уведомления). `data.granted`, `data.failed`.
     CompanionPermissions {
@@ -230,6 +240,49 @@ pub enum ClientMsg {
     },
     /// Перезапустить приложение-компаньон на телефоне.
     CompanionRestart {
+        phone: u32,
+    },
+    /// Начать запись касаний человека в сценарий (по ADB). Ответ `RecordState`; дальше событие `RecordState` при каждом изменении.
+    RecordStart {
+        phone: u32,
+    },
+    /// Пауза записи (`on` по умолчанию `true`; `false`: продолжить).
+    RecordPause {
+        phone: u32,
+        #[serde(default)]
+        on: Option<bool>,
+    },
+    /// Закончить запись: ответ `RecordResult` с готовым Lua. `name`, `origin`: имя и описание сценария.
+    RecordStop {
+        phone: u32,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        origin: Option<String>,
+    },
+    /// Снимок записи телефона (`RecordState`).
+    RecordState {
+        phone: u32,
+    },
+    /// Снимки всех идущих записей (`RecordList`).
+    RecordList,
+    /// Заменить шаги: порядок как в списке, `id: 0` новый шаг, не названные удалены.
+    RecordSetSteps {
+        phone: u32,
+        steps: Vec<serde_json::Value>,
+    },
+    /// Свежий список элементов экрана для выбора проверки (`RecordScreen`).
+    RecordScreen {
+        phone: u32,
+    },
+    /// Добавить проверку «на экране видно» по элементу `idx` снимка `num`.
+    RecordAddCheck {
+        phone: u32,
+        num: u32,
+        idx: u32,
+    },
+    /// Убрать запись без сохранения.
+    RecordDiscard {
         phone: u32,
     },
     /// Состояние демона: версия, протокол, телефоны. Ответ `Health`.
@@ -397,7 +450,7 @@ pub enum ClientMsg {
     /// Включить (`on: true`) или выключить Wi-Fi телефона (возможность 14). Ответ `Status` 26 `"<request> <JSON>"`:
     /// `{"ok":true,"enabled":true,"method":"api"|"quick_settings"|"already","ms"}` или
     /// `{"ok":false,"error":"no_service"|"tile_not_found"|"timeout"|…,"enabled":false,"ms"}`.
-    SetWifi {
+    AppSetWifi {
         phone: u32,
         request: u32,
         on: bool,
@@ -471,6 +524,32 @@ pub enum ServerMsg {
     },
     /// Пароль принят.
     Authed,
+    /// Снимок записи (ответ на `RecordStart`/`RecordState`/`RecordSetSteps`/`RecordAddCheck`/`RecordPause` и событие при изменении).
+    RecordState {
+        phone: u32,
+        state: serde_json::Value,
+    },
+    /// Ответ на `SetConnectPolicy` для одного телефона: `same` (уже так), `switching` (переключаем путь), `connecting` (подключаем).
+    ConnectPolicy {
+        chosen: Option<String>,
+    },
+    RecordList {
+        records: Vec<serde_json::Value>,
+    },
+    RecordScreen {
+        phone: u32,
+        num: u32,
+        elements: Vec<serde_json::Value>,
+    },
+    /// Итог записи: Lua-сценарий. `problem`: первый шаг, который не перевёлся (он в сценарий не вошёл).
+    RecordResult {
+        phone: u32,
+        name: String,
+        origin: String,
+        lua: String,
+        problem: Option<String>,
+        steps: u32,
+    },
     /// Ответ на `Health`: версия сервера, протокол, подробности по телефонам.
     Health {
         server: String,

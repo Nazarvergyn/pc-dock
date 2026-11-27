@@ -30,6 +30,22 @@ pub struct RunOptions {
     pub exit_info: Vec<String>,
     /// Записывать экран каждого телефона с таким числом кадров в секунду (mp4, если на ПК есть `ffmpeg`, иначе JPEG-кадры).
     pub record_fps: Option<f64>,
+    /// Wi-Fi только на время прогона: включить перед запуском и вернуть прежнее состояние после.
+    pub wifi_during_run: WifiRun,
+    /// Адрес проверки IP: его берут `public_ip()` и `wait_online` в сценарии.
+    pub check_url: Option<String>,
+    /// Телефоны по серийным номерам (добавляются к `phones`).
+    pub serials: Vec<String>,
+}
+
+/// Для каких телефонов прогона включать Wi-Fi на время работы.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum WifiRun {
+    #[default]
+    Off,
+    All,
+    /// Только для телефонов с этими серийными номерами.
+    Serials(Vec<String>),
 }
 
 /// Один прогон.
@@ -193,6 +209,21 @@ impl Runs {
         let (meta, source) = self.store.get(script_id)?;
         let args = crate::params::apply(&crate::params::parse_schema(&source)?, &args)?;
         let known = self.backend.phones();
+        let phones = if opts.serials.is_empty() {
+            phones
+        } else {
+            let mut ids = phones.unwrap_or_default();
+            for sn in &opts.serials {
+                let p = known
+                    .iter()
+                    .find(|k| k.serial.as_deref() == Some(sn))
+                    .ok_or_else(|| format!("нет телефона с серийным номером {sn}"))?;
+                if !ids.contains(&p.id) {
+                    ids.push(p.id);
+                }
+            }
+            Some(ids)
+        };
         let wanted: Vec<u32> = match phones {
             Some(p) => {
                 for id in &p {
@@ -262,7 +293,15 @@ impl Runs {
                         }
                     }
                 });
-                let cfg = RunConfig { phones: r.phones.clone(), args: args.clone(), only, timeout, artifacts: Some(r.dir.clone()), finalizer: Some(finalizer) };
+                let cfg = RunConfig {
+                    phones: r.phones.clone(),
+                    args: args.clone(),
+                    only,
+                    timeout,
+                    artifacts: Some(r.dir.clone()),
+                    finalizer: Some(finalizer),
+                    check_url: opts.check_url.clone(),
+                };
                 let sink: Arc<dyn Sink> = r.log.clone();
                 // Обвязка: экран не гаснет, пока идёт прогон (если телефон это умеет); прежняя настройка возвращается.
                 let mut restore: Vec<u32> = Vec::new();
@@ -275,7 +314,28 @@ impl Runs {
                         }
                     }
                 }
+                // Wi-Fi только на время прогона: включаем и запоминаем, где он был выключен.
+                let mut wifi_restore: Vec<u32> = Vec::new();
+                for p in &r.phones {
+                    let serial = me.backend.phone(*p).and_then(|i| i.serial);
+                    let wanted = match &opts.wifi_during_run {
+                        WifiRun::Off => false,
+                        WifiRun::All => true,
+                        WifiRun::Serials(list) => serial.as_ref().is_some_and(|s| list.contains(s)),
+                    };
+                    if !wanted {
+                        continue;
+                    }
+                    match me.backend.device(*p, json!({"op": "SetWifi", "on": true})) {
+                        Ok(v) if v["previous"].as_bool() == Some(false) => wifi_restore.push(*p),
+                        Ok(_) => {}
+                        Err(e) => sink.emit("log", json!({"level": "warn", "text": format!("телефон {p}: wifi_during_run: {e}")})),
+                    }
+                }
                 let report = run_script_ex(&source, &r.script_name, &cfg, me.backend.clone(), sink.clone(), r.stop.clone(), r.abort.clone());
+                for p in wifi_restore {
+                    let _ = me.backend.device(p, json!({"op": "SetWifi", "on": false}));
+                }
                 for p in restore {
                     let _ = me.backend.device(p, json!({"op": "StayAwake", "on": false}));
                 }

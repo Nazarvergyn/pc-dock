@@ -6,6 +6,7 @@
 pub mod device;
 pub mod files;
 pub mod protocol;
+pub mod record;
 pub mod server;
 pub mod ui;
 

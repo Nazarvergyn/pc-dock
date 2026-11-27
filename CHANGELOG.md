@@ -9,6 +9,8 @@
 
 Команда `Health` (версия, телефоны, журнал последних ошибок), `SystemDialog`, `ExitInfo`, `SetPackageVerifier`, `PublicIp`, подписи в `AppInfo`; компаньон на телефоне (пакеты `COMMAND`/`COMMAND_RESULT`): команды работают без ADB, плюс буфер обмена.
 
+Запись сценария с телефона (`RecordStart/Pause/State/List/SetSteps/Screen/AddCheck/Discard/Stop`), `SetWifi`; `Run`: `wifi_during_run`, `check_url`, телефоны по серийным номерам; `SetConnectPolicy`: `if_unset` и ответ `chosen`; `CompanionRestart`: `accessibility_was_on`; `List`: `error` у неготового телефона.
+
 ## 0.1.0-alpha.3
 
 Команда `SetTransport` (ручной выбор пути AOA/ADB/serial), установщики `install.sh` и `install.ps1`; в демо (pygame: F1/F2/F3, веб: список «Путь») переключение пути.

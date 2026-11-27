@@ -82,8 +82,8 @@
 
 | `op` | Поля | Ответ |
 |---|---|---|
-| `List` | | `Phones {phones, details}`; `details`: для каждого `{phone, state, transport, address, serial, name, display}` |
-| `SetConnectPolicy` | `serial?`, `prefer?` (`usb`/`adb`/`serial`/`auto`), `fallback_secs?`, `scan_secs?` | правила выбора пути на ходу: предпочтение (для телефона или общее), через сколько секунд пробовать другой путь (0: не переключаться), период поиска; `Ok` |
+| `List` | | `Phones {phones, details}`; `details`: для каждого `{phone, state, transport, address, serial, name, display, error?}`; `error {code, detail}` есть у телефона, который не готов (подсказка по состоянию или последняя ошибка демона) |
+| `SetConnectPolicy` | `serial?`, `prefer?` (`usb`/`adb`/`serial`/`auto`), `fallback_secs?`, `scan_secs?`, `if_unset?` | правила выбора пути на ходу: предпочтение (для телефона или общее), через сколько секунд пробовать другой путь (0: не переключаться), период поиска; `if_unset`: не менять, если для телефона `serial` предпочтение уже задано. Ответ `Ok`, а при `serial` и `prefer` `ConnectPolicy {chosen}`: `same` (уже так), `switching` (переключаем), `connecting` (подключаем) |
 | `Health` | | `Health {server, protocol, phones, errors}`; `phones` как `details` в `List`; `errors`: последние 100 ошибок `{at, phone, kind, detail}` (обрыв связи, предупреждения, битые пакеты, сбои команд над телефоном) |
 | `Watch` | `phone`, `fps?`, `on_change?`, `audio?` | `Watched`; затем последний кадр из кэша. Повторный `Watch` меняет условия |
 | `Unwatch` | `phone` | `Watched {on:false}` |
@@ -110,9 +110,10 @@
 | `GetClipboard`, `SetClipboard` | `phone` / `phone`, `text` | `data.text`; по ADB ошибка, нужен компаньон |
 | `CompanionPermissions` | `phone` | выдать компаньону права по ADB; `data.granted`, `data.failed` |
 | `CompanionCall` | `phone`, `call` (`{"op": …}`) | команда прямо компаньону по USB-аксессуару (см. PROTOCOL.md §9), `data` ответа компаньона |
-| `CompanionRestart` | `phone` | остановить и запустить приложение-компаньон |
+| `CompanionRestart` | `phone` | остановить и запустить приложение-компаньон; `data.accessibility_was_on`: была ли включена служба спецвозможностей |
 | `CompanionInstall` | `phone`, `path`, `sha256?` | `InstallApk` APK компаньона, затем права и запуск; ответ как у `CompanionPermissions` |
-| `PublicIp` | `phone` | `data.ip` |
+| `PublicIp` | `phone`, `url?` | `data.ip`; `url`: свой адрес проверки (http/https, в ответе адрес в тексте) |
+| `SetWifi` | `phone`, `on` | `data.previous`: был ли Wi-Fi включён |
 | `StayAwake` | `phone`, `on` | `data.previous`: прежнее значение настройки |
 | `ScreenState` | `phone` | `wakefulness`, `on`, `locked` |
 | `Button` | `phone`, `name` | `back home recents menu power wakeup sleep volume_up volume_down volume_mute enter delete tab` |
@@ -230,7 +231,7 @@
 
 `Run`: `phones` телефоны, выделяемые прогону (по умолчанию все готовые); телефон занимается эксклюзивно, пока прогон идёт; `args` параметры, доступные
 сценарию как `args`; `tests` выполнить только тесты с этими именами; `timeout` срок прогона в секундах; `stay_awake` не давать экранам гаснуть на время
-прогона (прежняя настройка возвращается); `device_logs` в конце сохранить `logcat` каждого телефона в папку прогона (`phone-N-logcat.txt`), `exit_info` список пакетов, для которых сохранить `ExitInfo` (`phone-N-exit-ПАКЕТ.txt`); `record` записывать экраны с таким числом кадров в секунду (до 30): `rec-N.mp4`, если на ПК есть `ffmpeg`, иначе кадры JPEG в `rec-N/`. Сбой любого из них идёт в журнал прогона предупреждением. Если в сценарии есть `-- @param`, `args` проверяются по схеме (тип, обязательность, лишние поля) и дополняются значениями по умолчанию.
+прогона (прежняя настройка возвращается); `device_logs` в конце сохранить `logcat` каждого телефона в папку прогона (`phone-N-logcat.txt`), `exit_info` список пакетов, для которых сохранить `ExitInfo` (`phone-N-exit-ПАКЕТ.txt`); `wifi_during_run` (`true` или список серийных номеров) включить Wi-Fi на время прогона и вернуть прежнее состояние после; `check_url` адрес проверки IP для `public_ip()` и `wait_online` (в Lua это глобальная `check_url`); `phones` принимает и серийные номера строками; `record` записывать экраны с таким числом кадров в секунду (до 30): `rec-N.mp4`, если на ПК есть `ffmpeg`, иначе кадры JPEG в `rec-N/`. Сбой любого из них идёт в журнал прогона предупреждением. Если в сценарии есть `-- @param`, `args` проверяются по схеме (тип, обязательность, лишние поля) и дополняются значениями по умолчанию.
 
 `RunChain`: `steps` список `{script, args?, phones?, on_fail?, retries?, pause?, timeout?}`, `rounds` кругов (1), `round_pause` секунд между кругами.
 `on_fail`: `stop` (по умолчанию), `continue`, `retry` (повторить `retries` раз, потом остановить). События цепочки приходят как `RunEvent` с `run` = номер цепочки:
@@ -268,3 +269,21 @@
 ## Роли токенов
 
 `pcdockd --role-token РОЛЬ=ТОКЕН` (можно повторять) добавляет токен с ограничением; основной токен остаётся полным. Роли: `view` (список, просмотр, чтение сведений, поиск по экрану), `input` (то же и ввод: касания, клавиши, кнопки, текст), `nofiles` (всё, кроме передачи файлов). Запрещённая команда отвечает `Error` с названием роли.
+
+## Запись сценария
+
+Касания человека на телефоне (по ADB, `getevent`) превращаются в шаги и готовый Lua. Интерфейс не нужен: команды может слать и скрипт.
+
+| Команда | Параметры | Ответ |
+|---|---|---|
+| `RecordStart` | `phone` | `RecordState`; дальше событие `RecordState` при каждом изменении |
+| `RecordPause` | `phone`, `on?` (по умолчанию `true`; `false`: продолжить) | `RecordState` |
+| `RecordState` | `phone` | `RecordState {state}` |
+| `RecordList` | | `RecordList {records}`: снимки всех идущих записей |
+| `RecordSetSteps` | `phone`, `steps: [{id, t, v, warn?, src, pkg, time?}]` | `RecordState`. Порядок как в списке; `id: 0` новый шаг; не названные шаги удалены; у шага с новыми `t`/`v` Lua строится заново |
+| `RecordScreen` | `phone` | `RecordScreen {num, elements: [{idx, kind, label}]}`: свежий список элементов экрана |
+| `RecordAddCheck` | `phone`, `num`, `idx` | `RecordState` с шагом `check` («на экране видно»): цель берётся из текста, подписи или id элемента |
+| `RecordDiscard` | `phone` | `Ok`: запись убрана без сохранения |
+| `RecordStop` | `phone`, `name?`, `origin?` | `RecordResult {name, origin, lua, problem, steps}`; `problem`: первый шаг, который не перевёлся в Lua (такие шаги в сценарий не входят) |
+
+Снимок `state`: `status` (`recording`, `paused`, `stopped`), `steps` (`id, t` вид шага, `time` секунды от начала, `v`, `warn`, `src`, `pkg`, `lua`, `problem`), `busy`, `notice`, `foreground`, `started_at`, `app`, `default_name`. Виды шагов: `tap` (`x`, `y`, `target?`), `long` (`x`, `y`, `hold`), `swipe` (`x1`, `y1`, `x2`, `y2`, `duration`), `button` (`name`), `text` (`text`), `check` (`target`), `wait` (`seconds`). Ошибки: `not_found: …` (записи нет), `bad_request: …` (неверные шаги или элемент), `failed: …` (экран не прочитался).

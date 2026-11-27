@@ -609,7 +609,7 @@ fn app_requests_reach_the_phone_and_replies_go_to_the_requester_without_watch() 
     ));
     asker.send_raw(r#"{"op":"HttpLocal","phone":5,"request":13,"url":"http://192.168.1.1/"}"#);
     asker.send_raw(r#"{"op":"AppTypeText","phone":5,"request":14,"text":"Привет 👋 #тест\nстрока"}"#);
-    asker.send_raw(r#"{"op":"SetWifi","phone":5,"request":15,"on":false}"#);
+    asker.send_raw(r#"{"op":"AppSetWifi","phone":5,"request":15,"on":false}"#);
     asker.send_raw(r#"{"op":"AppListApps","phone":5,"request":11,"id":2}"#);
     assert_eq!(asker.reply()["ev"], "Ok");
     let t0 = Instant::now();

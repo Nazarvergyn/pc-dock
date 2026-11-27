@@ -247,6 +247,24 @@ impl UiTree {
             .min_by_key(|n| (n.bounds[2] - n.bounds[0]) as i64 * (n.bounds[3] - n.bounds[1]) as i64)
     }
 
+    /// Самый маленький видимый элемент с текстом, подписью или id, внутри которого лежит точка: для записи
+    /// касаний (под пальцем часто пустой контейнер, а подпись у соседнего слоя).
+    pub fn labeled_at(&self, x: f64, y: f64) -> Option<&UiNode> {
+        let (px, py) = ((x * self.width as f64) as i32, (y * self.height as f64) as i32);
+        self.nodes
+            .iter()
+            .filter(|n| {
+                let [l, t, r, b] = n.bounds;
+                n.visible(self)
+                    && (!n.text.is_empty() || !n.desc.is_empty() || !n.id.is_empty())
+                    && px >= l
+                    && px < r
+                    && py >= t
+                    && py < b
+            })
+            .min_by_key(|n| (n.bounds[2] - n.bounds[0]) as i64 * (n.bounds[3] - n.bounds[1]) as i64)
+    }
+
     /// Готовый список для показа: видимые элементы с текстом, описанием, идентификатором или нажимаемые.
     pub fn elements(&self) -> Vec<&UiNode> {
         self.nodes
@@ -287,6 +305,16 @@ mod tests {
         assert_eq!(t.nodes[1].text, "Войти & продолжить");
         assert_eq!(t.nodes[1].bounds, [100, 1000, 900, 1200]);
         assert!(parse_dump("ERROR: null root node returned by UiTestAutomationBridge.").is_err());
+    }
+
+    #[test]
+    fn labeled_at_skips_empty_containers_under_the_finger() {
+        let xml = r#"<hierarchy rotation="0"><node class="android.widget.FrameLayout" package="a" bounds="[0,0][1000,2000]"><node text="Wi-Fi" class="android.widget.TextView" package="a" bounds="[0,100][1000,300]"/><node class="android.widget.LinearLayout" package="a" bounds="[400,150][600,250]"/></node></hierarchy>"#;
+        let tree = parse_dump(xml).unwrap();
+        // Точка внутри пустого LinearLayout: `at` берёт его, `labeled_at` слой с подписью.
+        assert_eq!(tree.at(0.5, 0.1).unwrap().class, "android.widget.LinearLayout");
+        assert_eq!(tree.labeled_at(0.5, 0.1).unwrap().text, "Wi-Fi");
+        assert!(tree.labeled_at(0.5, 0.9).is_none());
     }
 
     #[test]
