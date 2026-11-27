@@ -320,7 +320,7 @@ impl Shared {
                         let (kind, mut v) = gesture_step(&g);
                         let el = pending
                             .take()
-                            .and_then(|rx| rx.recv_timeout(Duration::from_millis(2500)).ok().flatten());
+                            .and_then(|rx| rx.recv_timeout(Duration::from_secs(8)).ok().flatten());
                         let mut warn = None;
                         if kind == "tap" {
                             match el.as_ref().and_then(element_target) {
