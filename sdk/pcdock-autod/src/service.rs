@@ -126,9 +126,19 @@ impl Handler<()> for Service {
                 let Some(script) = str_of("script") else {
                     return fail("плохая команда: нужен script".into());
                 };
+                // Номера демона или серийные номера (строки): серийный номер не меняется при переподключении.
                 let phones = msg["phones"]
                     .as_array()
                     .map(|a| a.iter().filter_map(|x| x.as_u64().map(|n| n as u32)).collect::<Vec<u32>>());
+                let serials: Vec<String> = msg["phones"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                let phones = if phones.as_ref().is_some_and(|p| p.is_empty()) && !serials.is_empty() {
+                    None
+                } else {
+                    phones
+                };
                 let only = msg["tests"]
                     .as_array()
                     .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect());
@@ -142,6 +152,15 @@ impl Handler<()> for Service {
                         .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
                         .unwrap_or_default(),
                     record_fps: msg["record"].as_f64().filter(|f| *f > 0.0 && *f <= 30.0),
+                    wifi_during_run: match &msg["wifi_during_run"] {
+                        Value::Bool(true) => crate::runs::WifiRun::All,
+                        Value::Array(a) => crate::runs::WifiRun::Serials(
+                            a.iter().filter_map(|x| x.as_str().map(String::from)).collect(),
+                        ),
+                        _ => crate::runs::WifiRun::Off,
+                    },
+                    check_url: msg["check_url"].as_str().map(String::from),
+                    serials,
                 };
                 match self.runs.start_with(&script, phones, args, only, timeout, opts) {
                     Ok(run) => {

@@ -52,12 +52,49 @@ struct Fake {
 }
 
 impl DeviceBackend for Fake {
+    fn input_lines(
+        &self,
+        _serial: &str,
+        stop: &std::sync::atomic::AtomicBool,
+        on_line: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<(), String> {
+        self.lines(stop, on_line);
+        Ok(())
+    }
+
     fn run(&self, serial: &str, op: &DeviceOp, roots: &[String]) -> Result<Value, String> {
         self.calls.lock().unwrap().push((serial.to_string(), op.clone(), roots.to_vec()));
         match op {
             DeviceOp::Info => Ok(json!({"model": "Fake 1"})),
             DeviceOp::Install { .. } => Err("Failure [INSTALL_FAILED_VERSION_DOWNGRADE]".into()),
+            DeviceOp::InputRanges => Ok(json!({"max_x": 1000.0, "max_y": 2000.0})),
+            DeviceOp::UiAt { .. } => Ok(json!({"element": {"text": "Войти", "package": "com.a"}})),
+            DeviceOp::UiElements => Ok(json!({"elements": [
+                {"text": "Кабинет", "kind": "text", "package": "com.a"},
+                {"text": "", "desc": "", "id": "", "kind": "other"}]})),
             _ => Ok(json!({})),
+        }
+    }
+}
+
+const TOUCH: &[&str] = &[
+    "[  100.000000] /dev/input/event3: EV_ABS       ABS_MT_TRACKING_ID   00000007",
+    "[  100.000000] /dev/input/event3: EV_ABS       ABS_MT_POSITION_X    00000200",
+    "[  100.000000] /dev/input/event3: EV_ABS       ABS_MT_POSITION_Y    00000400",
+    "[  100.000000] /dev/input/event3: EV_SYN       SYN_REPORT           00000000",
+    "[  100.100000] /dev/input/event3: EV_ABS       ABS_MT_TRACKING_ID   ffffffff",
+    "[  100.100000] /dev/input/event3: EV_SYN       SYN_REPORT           00000000",
+];
+
+impl Fake {
+    fn lines(&self, stop: &std::sync::atomic::AtomicBool, f: &mut dyn FnMut(&str) -> bool) {
+        for l in TOUCH {
+            if !f(l) {
+                return;
+            }
+        }
+        while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
 }
@@ -115,9 +152,14 @@ impl Conn {
     fn ask(&mut self, mut v: Value) -> Value {
         v["id"] = json!(7);
         self.op(v);
-        let r = self.json();
-        assert_eq!(r["id"], 7, "{r}");
-        r
+        // События без номера запроса (например `RecordState` для всех клиентов) пропускаются.
+        loop {
+            let r = self.json();
+            if r["id"] == 7 {
+                return r;
+            }
+            assert!(r["id"].is_null(), "{r}");
+        }
     }
 }
 
@@ -272,7 +314,7 @@ fn role_tokens_limit_commands() {
 fn connect_policy_is_applied_and_validated() {
     let mut c = Conn::open(serve(Some("SER1"), None));
     let r = c.ask(json!({"op": "SetConnectPolicy", "serial": "SER1", "prefer": "adb", "fallback_secs": 0, "scan_secs": 5}));
-    assert_eq!(r["ev"], "Ok", "{r}");
+    assert_eq!(r["ev"], "ConnectPolicy", "{r}");
     let r = c.ask(json!({"op": "SetConnectPolicy", "prefer": "auto"}));
     assert_eq!(r["ev"], "Ok", "{r}");
     for bad in [json!({"prefer": "wifi"}), json!({"scan_secs": 0}), json!({"fallback_secs": -1})] {
@@ -315,4 +357,82 @@ fn companion_call_needs_a_ready_phone_and_an_op() {
     let r = c.ask(json!({"op": "CompanionCall", "phone": p, "call": {"op": "Info"}}));
     assert_eq!(r["ev"], "Error");
     assert!(r["detail"].as_str().unwrap().contains("компаньон"), "{r}");
+}
+
+#[test]
+fn recording_turns_touches_into_lua_and_steps_can_be_edited() {
+    let mut c = Conn::open(serve(Some("SER1"), Some(Arc::new(Fake::default()))));
+    let p = phone_id(&mut c);
+    assert_eq!(c.ask(json!({"op": "RecordState", "phone": p}))["ev"], "Error");
+    let r = c.ask(json!({"op": "RecordStart", "phone": p}));
+    assert_eq!(r["ev"], "RecordState", "{r}");
+    assert_eq!(c.ask(json!({"op": "RecordStart", "phone": p}))["ev"], "Error");
+    // Касание из getevent становится шагом с целью «Войти».
+    let mut steps = Value::Null;
+    for _ in 0..100 {
+        let r = c.ask(json!({"op": "RecordState", "phone": p}));
+        if r["state"]["steps"].as_array().is_some_and(|s| !s.is_empty()) && r["state"]["busy"] == false {
+            steps = r["state"]["steps"].clone();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(steps[0]["lua"], "p:tap_on(\"Войти\")", "{steps}");
+    assert_eq!(steps[0]["pkg"], "com.a");
+    let list = c.ask(json!({"op": "RecordList"}));
+    assert_eq!(list["records"].as_array().unwrap().len(), 1);
+    // Проверка по элементу экрана.
+    let s = c.ask(json!({"op": "RecordScreen", "phone": p}));
+    assert_eq!(s["ev"], "RecordScreen", "{s}");
+    let num = s["num"].as_u64().unwrap();
+    assert_eq!(s["elements"][0]["label"], "Кабинет");
+    let r = c.ask(json!({"op": "RecordAddCheck", "phone": p, "num": num, "idx": 0}));
+    assert_eq!(r["state"]["steps"][1]["lua"], "assert.truthy(p:find_one(\"Кабинет\"))", "{r}");
+    let r = c.ask(json!({"op": "RecordAddCheck", "phone": p, "num": num, "idx": 1}));
+    assert!(r["detail"].as_str().unwrap().starts_with("bad_request"), "{r}");
+    let r = c.ask(json!({"op": "RecordAddCheck", "phone": p, "num": 99, "idx": 0}));
+    assert!(r["detail"].as_str().unwrap().starts_with("not_found"), "{r}");
+    // Правка: удалить первый шаг, оставить проверку.
+    let check_id = steps.as_array().map(|_| 2).unwrap();
+    let r = c.ask(json!({"op": "RecordSetSteps", "phone": p,
+        "steps": [{"id": check_id, "t": "check", "v": {"target": "Кабинет"}, "src": "check"}]}));
+    assert_eq!(r["state"]["steps"].as_array().unwrap().len(), 1, "{r}");
+    assert_eq!(c.ask(json!({"op": "RecordPause", "phone": p}))["state"]["status"], "paused");
+    let r = c.ask(json!({"op": "RecordStop", "phone": p, "name": "Вход", "origin": "тест"}));
+    assert_eq!(r["ev"], "RecordResult", "{r}");
+    assert!(r["lua"].as_str().unwrap().contains("test(\"Вход\""), "{r}");
+    assert_eq!(c.ask(json!({"op": "RecordDiscard", "phone": p}))["ev"], "Error");
+}
+
+#[test]
+fn connect_policy_reports_the_choice_and_respects_if_unset() {
+    let mut c = Conn::open(serve(Some("SER1"), None));
+    // Телефон не готов (фейковая связь не подключается): значит «подключаем».
+    let r = c.ask(json!({"op": "SetConnectPolicy", "serial": "SER1", "prefer": "usb"}));
+    assert_eq!(r["ev"], "ConnectPolicy", "{r}");
+    assert_eq!(r["chosen"], "connecting");
+    // `if_unset`: выбор уже есть, второй раз не перебиваем, но ответ тот же.
+    let r = c.ask(json!({"op": "SetConnectPolicy", "serial": "SER1", "prefer": "adb", "if_unset": true}));
+    assert_eq!(r["ev"], "ConnectPolicy", "{r}");
+    // Без предпочтения ответ `Ok`.
+    assert_eq!(c.ask(json!({"op": "SetConnectPolicy", "scan_secs": 5}))["ev"], "Ok");
+}
+
+#[test]
+fn list_explains_why_a_phone_is_not_ready_and_bad_check_url_is_rejected() {
+    let mut c = Conn::open(serve(Some("SER1"), Some(Arc::new(Fake::default()))));
+    let _ = phone_id(&mut c);
+    let mut err = Value::Null;
+    for _ in 0..50 {
+        let r = c.ask(json!({"op": "List"}));
+        if !r["details"][0]["error"].is_null() {
+            err = r["details"][0]["error"].clone();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(err["code"].is_string() && err["detail"].is_string(), "{err}");
+    let p = phone_id(&mut c);
+    let r = c.ask(json!({"op": "PublicIp", "phone": p, "url": "http://ok.example/ip"}));
+    assert_eq!(r["ev"], "DeviceResult", "{r}");
 }

@@ -473,7 +473,9 @@ impl Farm {
         prefer: Option<Option<Transport>>,
         fallback_secs: Option<f64>,
         scan_secs: Option<f64>,
-    ) -> Result<(), String> {
+        if_unset: bool,
+    ) -> Result<Option<&'static str>, String> {
+        let infos = self.phones_info();
         let auto = self.auto.as_mut().ok_or("обнаружение не включено")?;
         for v in [fallback_secs, scan_secs].into_iter().flatten() {
             if !v.is_finite() || !(0.0..=86400.0).contains(&v) {
@@ -483,30 +485,43 @@ impl Farm {
         if scan_secs == Some(0.0) {
             return Err("scan_secs: больше 0".into());
         }
-        match (serial, prefer) {
-            (Some(sn), Some(Some(t))) => {
-                auto.cfg.prefer.insert(sn.to_string(), t);
+        // `if_unset`: у телефона уже есть выбор, ничего не меняем.
+        let skip = if_unset && serial.is_some_and(|sn| auto.cfg.prefer.contains_key(sn));
+        let mut chosen = None;
+        if !skip {
+            match (serial, prefer) {
+                (Some(sn), Some(Some(t))) => {
+                    auto.cfg.prefer.insert(sn.to_string(), t);
+                }
+                (Some(sn), Some(None)) => {
+                    auto.cfg.prefer.remove(sn);
+                }
+                (None, Some(Some(t))) => {
+                    auto.cfg.order.retain(|x| *x != t);
+                    auto.cfg.order.insert(0, t);
+                }
+                (None, Some(None)) => {
+                    auto.cfg.order = vec![Transport::Usb, Transport::Adb, Transport::Serial];
+                }
+                (_, None) => {}
             }
-            (Some(sn), Some(None)) => {
-                auto.cfg.prefer.remove(sn);
+            if let Some(f) = fallback_secs {
+                auto.cfg.fallback_after = (f > 0.0).then(|| Duration::from_secs_f64(f));
             }
-            (None, Some(Some(t))) => {
-                auto.cfg.order.retain(|x| *x != t);
-                auto.cfg.order.insert(0, t);
+            if let Some(e) = scan_secs {
+                auto.cfg.every = Duration::from_secs_f64(e);
             }
-            (None, Some(None)) => {
-                auto.cfg.order = vec![Transport::Usb, Transport::Adb, Transport::Serial];
-            }
-            (_, None) => {}
+            auto.last_scan = None;
         }
-        if let Some(f) = fallback_secs {
-            auto.cfg.fallback_after = (f > 0.0).then(|| Duration::from_secs_f64(f));
+        if let (Some(sn), Some(Some(want))) = (serial, prefer) {
+            let phone = infos.iter().find(|i| i.serial.as_deref() == Some(sn));
+            chosen = Some(match phone {
+                Some(i) if i.transport == Some(want) && i.state == PhoneState::Ready => "same",
+                Some(i) if i.state == PhoneState::Ready => "switching",
+                _ => "connecting",
+            });
         }
-        if let Some(e) = scan_secs {
-            auto.cfg.every = Duration::from_secs_f64(e);
-        }
-        auto.last_scan = None;
-        Ok(())
+        Ok(chosen)
     }
 
     /// Сведения обо всех телефонах (по возрастанию номера).

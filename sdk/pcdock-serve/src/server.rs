@@ -27,6 +27,7 @@ use serde_json::{json, Value};
 use super::device::{check_package, companion_body, is_blocked, DeviceBackend, DeviceOp};
 use super::files::{FileOptions, DEFAULT_ROOTS, MAX_FILE};
 use super::protocol::{encode_audio, encode_video, ClientMsg, ServerMsg, PKG_AUDIO, PKG_FILE, PKG_VIDEO};
+use super::record::{element_target, gesture_step, Input, Ranges, Recording, Tracker};
 
 /// Версия протокола приложения (приходит клиенту в `Hello`).
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -67,6 +68,8 @@ struct Shared {
     blocklist: Mutex<Vec<String>>,
     /// Последние ошибки (не больше `MAX_ERRORS`): для `Health`.
     errors: Mutex<std::collections::VecDeque<Value>>,
+    /// Идущие записи сценариев по телефонам.
+    records: Mutex<HashMap<PhoneId, ActiveRecord>>,
     /// Команды компаньону, ждущие ответа: номер запроса → кому отдать `(ok, тело)`.
     pending: Mutex<HashMap<u32, SyncSender<(bool, String)>>>,
     next_req: AtomicU32,
@@ -124,6 +127,7 @@ impl Serve {
             device,
             blocklist: Mutex::new(Vec::new()),
             errors: Mutex::new(Default::default()),
+            records: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             next_req: AtomicU32::new(1),
             next_transfer: AtomicU32::new(1),
@@ -253,10 +257,124 @@ pub fn role_allows(role: &str, op: &str) -> bool {
     }
 }
 
+/// Идущая запись: данные, флаги потока захвата.
+struct ActiveRecord {
+    rec: Recording,
+    stop: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+}
+
 /// Сколько последних ошибок помнит демон.
 const MAX_ERRORS: usize = 100;
 
 impl Shared {
+    /// Работа с записью телефона под замком; нет записи: `not_found`.
+    fn with_record<R>(&self, phone: PhoneId, f: impl FnOnce(&mut ActiveRecord) -> R) -> Result<R, String> {
+        let mut m = self.records.lock().unwrap();
+        m.get_mut(&phone).map(f).ok_or_else(|| format!("not_found: нет записи телефона {phone}"))
+    }
+
+    /// Снимок записи: ответ автору запроса и событие всем остальным.
+    fn record_reply(&self, hub: &Hub<ClientState>, client: u64, id: Option<u64>, phone: PhoneId) {
+        let Ok(state) = self.with_record(phone, |a| a.rec.snapshot(phone)) else { return };
+        let msg = to_value(&ServerMsg::RecordState { phone, state });
+        hub.reply(client, id, msg.clone());
+        hub.broadcast(|_| true, &msg);
+    }
+
+    /// Читает касания, пока запись идёт, и превращает их в шаги.
+    #[allow(clippy::too_many_arguments)]
+    fn capture(
+        self: &Arc<Self>,
+        hub: &Hub<ClientState>,
+        backend: Arc<dyn DeviceBackend>,
+        serial: String,
+        phone: PhoneId,
+        ranges: Ranges,
+        stop: Arc<AtomicBool>,
+        paused: Arc<AtomicBool>,
+    ) {
+        let started = Instant::now();
+        let mut tracker = Tracker::new(ranges);
+        let mut pending: Option<std::sync::mpsc::Receiver<Option<Value>>> = None;
+        let result = backend.clone().input_lines(&serial, &stop, &mut |line| {
+            for input in tracker.feed(line) {
+                if paused.load(Ordering::SeqCst) {
+                    pending = None;
+                    continue;
+                }
+                match input {
+                    Input::Down { x, y, .. } => {
+                        // Экран читается сразу, пока приложение не успело отреагировать на касание.
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        pending = Some(rx);
+                        let _ = self.with_record(phone, |a| a.rec.busy += 1);
+                        let (b, s) = (backend.clone(), serial.clone());
+                        thread::spawn(move || {
+                            let e =
+                                b.run(&s, &DeviceOp::UiAt { x, y }, &[]).ok().map(|v| v["element"].clone());
+                            let _ = tx.send(e.filter(|e| !e.is_null()));
+                        });
+                    }
+                    Input::Gesture(g) => {
+                        let (kind, mut v) = gesture_step(&g);
+                        let el = pending
+                            .take()
+                            .and_then(|rx| rx.recv_timeout(Duration::from_millis(2500)).ok().flatten());
+                        let mut warn = None;
+                        if kind == "tap" {
+                            match el.as_ref().and_then(element_target) {
+                                Some(t) => v["target"] = json!(t),
+                                None => warn = Some("цель не найдена: шаг по координатам".to_string()),
+                            }
+                        }
+                        let pkg = el.as_ref().and_then(|e| e["package"].as_str().map(String::from));
+                        let t = (started.elapsed().as_secs_f64() - (g.t1 - g.t0)).max(0.0);
+                        let r = self.with_record(phone, |a| {
+                            a.rec.busy = a.rec.busy.saturating_sub(1);
+                            if pkg.is_some() {
+                                a.rec.foreground = pkg.clone();
+                            }
+                            a.rec.add(t, kind, v, "gesture", pkg, warn);
+                        });
+                        if r.is_err() {
+                            return false;
+                        }
+                        self.record_event(hub, phone);
+                    }
+                    Input::Key { name, .. } => {
+                        let t = started.elapsed().as_secs_f64();
+                        if self
+                            .with_record(phone, |a| {
+                                a.rec.add(t, "button", json!({"name": name}), "gesture", None, None);
+                            })
+                            .is_err()
+                        {
+                            return false;
+                        }
+                        self.record_event(hub, phone);
+                    }
+                }
+            }
+            !stop.load(Ordering::SeqCst)
+        });
+        if let Err(e) = result {
+            self.note_error(phone, "record", &e);
+            let _ = self.with_record(phone, |a| {
+                a.rec.notice = Some(format!("запись остановилась: {e}"));
+                a.rec.status = "paused";
+            });
+            self.record_event(hub, phone);
+        }
+    }
+
+    /// Событие со снимком записи всем клиентам.
+    fn record_event(&self, hub: &Hub<ClientState>, phone: PhoneId) {
+        if let Ok(state) = self.with_record(phone, |a| a.rec.snapshot(phone)) {
+            hub.broadcast(|_| true, &to_value(&ServerMsg::RecordState { phone, state }));
+        }
+    }
+
     /// Команда компаньону на телефоне и ожидание ответа (до 15 с).
     fn companion_call(&self, phone: PhoneId, body: Value) -> Result<Value, String> {
         let req = self.next_req.fetch_add(1, Ordering::SeqCst);
@@ -276,6 +394,32 @@ impl Shared {
                 Err("компаньон на телефоне не ответил (приложение не запущено или старая версия)".into())
             }
         }
+    }
+
+    /// Сведения о телефоне с причиной, почему он не готов (`error: {code, detail}`): подсказка по состоянию
+    /// и последняя ошибка демона про этот телефон.
+    fn phone_with_error(&self, i: &pcdock_farm::PhoneInfo) -> Value {
+        let mut v = phone_json(i);
+        if i.state != PhoneState::Ready {
+            let hint = i.state.hint();
+            let last = self
+                .errors
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|e| e["phone"] == json!(i.id))
+                .and_then(|e| e["detail"].as_str().map(String::from));
+            let detail = match (hint.is_empty(), last) {
+                (false, _) => Some(hint.to_string()),
+                (true, Some(l)) => Some(l),
+                (true, None) => None,
+            };
+            if let Some(d) = detail {
+                v["error"] = json!({ "code": state_name(i.state), "detail": d });
+            }
+        }
+        v
     }
 
     /// Запоминает ошибку для `Health`.
@@ -396,15 +540,144 @@ impl Handler<ClientState> for Handle {
             ClientMsg::List => {
                 let info = self.shared.daemon.lock().unwrap().phones_info();
                 let phones = info.iter().map(|i| i.id).collect();
-                let details = info.iter().map(phone_json).collect();
+                let details = info.iter().map(|i| self.shared.phone_with_error(i)).collect();
                 reply(ServerMsg::Phones { phones, details })
             }
+            ClientMsg::RecordStart { phone } => self.record_start(hub, client, id, phone),
+            ClientMsg::RecordPause { phone, on } => {
+                let on = on.unwrap_or(true);
+                let r = self.shared.with_record(phone, |a| {
+                    a.paused.store(on, Ordering::SeqCst);
+                    a.rec.status = if on { "paused" } else { "recording" };
+                });
+                match r {
+                    Ok(()) => self.shared.record_reply(hub, client, id, phone),
+                    Err(e) => fail(e),
+                }
+            }
+            ClientMsg::RecordStop { phone, name, origin } => {
+                let a = self.shared.records.lock().unwrap().remove(&phone);
+                let Some(a) = a else {
+                    return fail(format!("not_found: нет записи телефона {phone}"));
+                };
+                a.stop.store(true, Ordering::SeqCst);
+                let name = name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| {
+                    a.rec.snapshot(phone)["default_name"].as_str().unwrap_or("Запись").to_string()
+                });
+                let origin = origin.unwrap_or_default();
+                let (lua, problem) = a.rec.script(&name, &origin);
+                let steps = a.rec.steps.len() as u32;
+                hub.broadcast(
+                    |_| true,
+                    &to_value(&ServerMsg::RecordState {
+                        phone,
+                        state: json!({"phone": phone, "status": "stopped", "steps": []}),
+                    }),
+                );
+                reply(ServerMsg::RecordResult { phone, name, origin, lua, problem, steps })
+            }
+            ClientMsg::RecordState { phone } => match self.shared.with_record(phone, |_| ()) {
+                Ok(()) => self.shared.record_reply(hub, client, id, phone),
+                Err(e) => fail(e),
+            },
+            ClientMsg::RecordList => {
+                let records =
+                    self.shared.records.lock().unwrap().iter().map(|(p, a)| a.rec.snapshot(*p)).collect();
+                reply(ServerMsg::RecordList { records })
+            }
+            ClientMsg::RecordSetSteps { phone, steps } => {
+                let r = self
+                    .shared
+                    .with_record(phone, |a| a.rec.set_steps(&steps).map_err(|e| format!("bad_request: {e}")));
+                match r {
+                    Ok(Ok(())) => self.shared.record_reply(hub, client, id, phone),
+                    Ok(Err(e)) | Err(e) => fail(e),
+                }
+            }
+            ClientMsg::RecordScreen { phone } => {
+                let serial = match self.shared.with_record(phone, |_| ()).and_then(|_| self.serial_of(phone))
+                {
+                    Ok(s) => s,
+                    Err(e) => return fail(e),
+                };
+                let Some(backend) = self.shared.device.clone() else {
+                    return fail("failed: команды над телефоном выключены".into());
+                };
+                let (shared, hub) = (self.shared.clone(), hub.clone());
+                thread::spawn(move || match backend.run(&serial, &DeviceOp::UiElements, &[]) {
+                    Ok(v) => {
+                        let els: Vec<Value> = v["elements"].as_array().cloned().unwrap_or_default();
+                        let num = shared.with_record(phone, |a| a.rec.remember_screen(els.clone()));
+                        match num {
+                            Ok(num) => {
+                                let elements = els
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, e)| {
+                                        json!({"idx": i, "kind": e["kind"],
+                                        "label": element_target(e).unwrap_or_default()})
+                                    })
+                                    .collect();
+                                hub.reply(
+                                    client,
+                                    id,
+                                    to_value(&ServerMsg::RecordScreen { phone, num, elements }),
+                                );
+                            }
+                            Err(e) => hub.error(client, id, e),
+                        }
+                    }
+                    Err(e) => hub.error(client, id, format!("failed: {e}")),
+                });
+            }
+            ClientMsg::RecordAddCheck { phone, num, idx } => {
+                let r = self.shared.with_record(phone, |a| {
+                    let e = a
+                        .rec
+                        .screen_element(num, idx as usize)
+                        .map_err(|e| format!("not_found: {e}"))?
+                        .clone();
+                    let target = element_target(&e).ok_or_else(|| {
+                        "bad_request: у элемента нет текста, подписи и id: проверку не построить".to_string()
+                    })?;
+                    let t = a.rec.steps.last().map(|s| s.t).unwrap_or(0.0);
+                    a.rec.add(
+                        t,
+                        "check",
+                        json!({"target": target}),
+                        "check",
+                        e["package"].as_str().map(String::from),
+                        None,
+                    );
+                    Ok::<(), String>(())
+                });
+                match r {
+                    Ok(Ok(())) => self.shared.record_reply(hub, client, id, phone),
+                    Ok(Err(e)) | Err(e) => fail(e),
+                }
+            }
+            ClientMsg::RecordDiscard { phone } => match self.shared.records.lock().unwrap().remove(&phone) {
+                Some(a) => {
+                    a.stop.store(true, Ordering::SeqCst);
+                    hub.broadcast(
+                        |_| true,
+                        &to_value(&ServerMsg::RecordState {
+                            phone,
+                            state: json!({"phone": phone, "status": "stopped", "steps": []}),
+                        }),
+                    );
+                    if id.is_some() {
+                        reply(ServerMsg::Ok);
+                    }
+                }
+                None => fail(format!("not_found: нет записи телефона {phone}")),
+            },
             ClientMsg::Health => {
                 let info = self.shared.daemon.lock().unwrap().phones_info();
                 reply(ServerMsg::Health {
                     server: format!("pcdockd/{}", env!("CARGO_PKG_VERSION")),
                     protocol: PROTOCOL_VERSION,
-                    phones: info.iter().map(phone_json).collect(),
+                    phones: info.iter().map(|i| self.shared.phone_with_error(i)).collect(),
                     errors: self.shared.errors.lock().unwrap().iter().cloned().collect(),
                 })
             }
@@ -578,7 +851,12 @@ impl Handler<ClientState> for Handle {
             ClientMsg::SetClipboard { phone, text } => {
                 self.device_call(hub, client, id, phone, Ok(DeviceOp::SetClipboard { text }))
             }
-            ClientMsg::PublicIp { phone } => self.device_call(hub, client, id, phone, Ok(DeviceOp::PublicIp)),
+            ClientMsg::PublicIp { phone, url } => {
+                self.device_call(hub, client, id, phone, Ok(DeviceOp::PublicIp { url }))
+            }
+            ClientMsg::SetWifi { phone, on } => {
+                self.device_call(hub, client, id, phone, Ok(DeviceOp::SetWifi { on }))
+            }
             ClientMsg::CompanionPermissions { phone } => {
                 self.device_call(hub, client, id, phone, Ok(DeviceOp::CompanionPermissions))
             }
@@ -608,7 +886,7 @@ impl Handler<ClientState> for Handle {
                 };
                 self.device_call(hub, client, id, phone, op)
             }
-            ClientMsg::SetConnectPolicy { serial, prefer, fallback_secs, scan_secs } => {
+            ClientMsg::SetConnectPolicy { serial, prefer, fallback_secs, scan_secs, if_unset } => {
                 let prefer = match prefer.as_deref() {
                     None => None,
                     Some("auto") => Some(None),
@@ -622,11 +900,15 @@ impl Handler<ClientState> for Handle {
                     prefer,
                     fallback_secs,
                     scan_secs,
+                    if_unset,
                 );
                 match r {
-                    Ok(()) => {
+                    Ok(chosen) => {
                         if id.is_some() {
-                            reply(ServerMsg::Ok);
+                            match chosen {
+                                Some(c) => reply(ServerMsg::ConnectPolicy { chosen: Some(c.to_string()) }),
+                                None => reply(ServerMsg::Ok),
+                            }
                         }
                     }
                     Err(e) => fail(e),
@@ -756,6 +1038,69 @@ impl Handle {
                 }
             })
             .expect("не встал поток операции над телефоном");
+    }
+
+    /// Серийник телефона (запись и чтение экрана идут по ADB).
+    fn serial_of(&self, phone: PhoneId) -> Result<String, String> {
+        self.shared
+            .daemon
+            .lock()
+            .unwrap()
+            .phones_info()
+            .into_iter()
+            .find(|i| i.id == phone)
+            .ok_or_else(|| format!("not_found: нет трубки {phone}"))
+            .and_then(|i| {
+                i.serial.ok_or("failed: у телефона неизвестен серийник: запись идёт по ADB".to_string())
+            })
+    }
+
+    /// Начало записи: пределы сенсора, запись в таблицу, поток чтения касаний.
+    fn record_start(&self, hub: &Hub<ClientState>, client: u64, id: Option<u64>, phone: PhoneId) {
+        let fail = |detail: String| hub.error(client, id, detail);
+        if self.shared.records.lock().unwrap().contains_key(&phone) {
+            return fail(format!("bad_request: запись телефона {phone} уже идёт"));
+        }
+        let serial = match self.serial_of(phone) {
+            Ok(s) => s,
+            Err(e) => return fail(e),
+        };
+        let Some(backend) = self.shared.device.clone() else {
+            return fail("failed: команды над телефоном выключены (pcdockd --no-device-ops)".into());
+        };
+        let (shared, hub) = (self.shared.clone(), hub.clone());
+        thread::Builder::new()
+            .name(format!("record-{phone}"))
+            .spawn(move || {
+                let ranges = backend.run(&serial, &DeviceOp::InputRanges, &[]).and_then(|v| {
+                    Ok(Ranges {
+                        max_x: v["max_x"].as_f64().ok_or("нет max_x")?,
+                        max_y: v["max_y"].as_f64().ok_or("нет max_y")?,
+                    })
+                });
+                let ranges = match ranges {
+                    Ok(r) => r,
+                    Err(e) => return hub.error(client, id, format!("failed: {e}")),
+                };
+                let (stop, paused) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+                {
+                    let mut m = shared.records.lock().unwrap();
+                    if m.contains_key(&phone) {
+                        return hub.error(
+                            client,
+                            id,
+                            format!("bad_request: запись телефона {phone} уже идёт"),
+                        );
+                    }
+                    m.insert(
+                        phone,
+                        ActiveRecord { rec: Recording::new(), stop: stop.clone(), paused: paused.clone() },
+                    );
+                }
+                shared.record_reply(&hub, client, id, phone);
+                shared.capture(&hub, backend, serial, phone, ranges, stop, paused);
+            })
+            .expect("не встал поток записи");
     }
 
     /// Передача файлов включена, путь разрешён, у телефона известен серийник.
@@ -1121,12 +1466,22 @@ fn map_input(msg: ClientMsg) -> Result<(PhoneId, InputCmd), String> {
         | ClientMsg::Button { .. }
         | ClientMsg::NetworkInfo { .. }
         | ClientMsg::Health
+        | ClientMsg::RecordStart { .. }
+        | ClientMsg::RecordPause { .. }
+        | ClientMsg::RecordStop { .. }
+        | ClientMsg::RecordState { .. }
+        | ClientMsg::RecordList
+        | ClientMsg::RecordSetSteps { .. }
+        | ClientMsg::RecordScreen { .. }
+        | ClientMsg::RecordAddCheck { .. }
+        | ClientMsg::RecordDiscard { .. }
         | ClientMsg::SystemDialog { .. }
         | ClientMsg::ExitInfo { .. }
         | ClientMsg::SetPackageVerifier { .. }
         | ClientMsg::GetClipboard { .. }
         | ClientMsg::SetClipboard { .. }
         | ClientMsg::PublicIp { .. }
+        | ClientMsg::SetWifi { .. }
         | ClientMsg::CompanionPermissions { .. }
         | ClientMsg::CompanionRestart { .. }
         | ClientMsg::CompanionCall { .. }

@@ -55,6 +55,8 @@ pub struct RunConfig {
     pub timeout: Option<Duration>,
     /// Куда складывать вложения (кадры); `None` — не сохранять.
     pub artifacts: Option<PathBuf>,
+    /// Адрес проверки IP для `public_ip()` и `wait_online`.
+    pub check_url: Option<String>,
     /// Вызывается после тестов, до события `run_end` (запись экрана, журналы телефона).
     pub finalizer: Option<Finalizer>,
 }
@@ -111,6 +113,8 @@ struct State {
     fatal: AtomicBool,
     failure_shots: Mutex<u32>,
     acquired: Mutex<Vec<u32>>,
+    /// Адрес проверки IP (`check_url` прогона): его берёт `public_ip()` и `wait_online`.
+    check_url: Option<String>,
     /// Режим «как человек»: касания с разбросом точки, силы и времени (`p:human(true)`).
     human: AtomicBool,
 }
@@ -815,8 +819,11 @@ impl UserData for PhoneHandle {
         methods.add_method("companion_restart", |_, t, ()| {
             device_json(t, json!({"op": "CompanionRestart"})).map(|_| ())
         });
-        methods.add_method("public_ip", |_, t, ()| {
-            let r = device_json(t, json!({"op": "PublicIp"}))?;
+        methods
+            .add_method("wifi", |lua, t, on: bool| device_call(lua, t, json!({"op": "SetWifi", "on": on})));
+        methods.add_method("public_ip", |_, t, url: Option<String>| {
+            let url = url.or_else(|| t.st.check_url.clone());
+            let r = device_json(t, json!({"op": "PublicIp", "url": url}))?;
             Ok(r["ip"].as_str().unwrap_or("").to_string())
         });
         methods.add_method("screen", |lua, t, ()| device_call(lua, t, json!({"op": "ScreenState"})));
@@ -1092,6 +1099,7 @@ pub fn run_script(
         failure_shots: Mutex::new(0),
         acquired: Mutex::new(Vec::new()),
         human: AtomicBool::new(false),
+        check_url: cfg.check_url.clone(),
     });
     sink.emit("run_start", json!({"script": script_name, "phones": cfg.phones, "args": cfg.args}));
 
@@ -1270,6 +1278,7 @@ fn install(lua: &Lua, st: &Arc<State>, cfg: &RunConfig, hooks: &Rc<RefCell<Hooks
         g.set(name, Value::Nil)?;
     }
     g.set("args", json_to_lua(lua, &cfg.args)?)?;
+    g.set("check_url", cfg.check_url.clone())?;
 
     // Тесты.
     let h = hooks.clone();
@@ -1557,6 +1566,7 @@ mod tests {
             timeout: Some(Duration::from_secs(20)),
             artifacts: None,
             finalizer: None,
+            check_url: None,
         }
     }
 
@@ -1765,6 +1775,8 @@ mod tests {
             p:exit_info("com.have.app")
             p:package_verifier(false)
             p:public_ip()
+            p:wifi(true)
+            assert.eq(check_url, nil)
             "#,
             &fake,
         );
@@ -1774,7 +1786,7 @@ mod tests {
         assert_eq!(touches.len(), 4, "{log:?}");
         assert!(touches[0].contains("p=None"), "{touches:?}");
         assert!(touches[2].contains("p=Some"), "{touches:?}");
-        for op in ["SystemDialog", "ExitInfo", "SetPackageVerifier", "PublicIp"] {
+        for op in ["SystemDialog", "ExitInfo", "SetPackageVerifier", "PublicIp", "SetWifi"] {
             assert!(log.iter().any(|l| l.contains(op)), "{op}: {log:?}");
         }
     }

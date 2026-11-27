@@ -97,8 +97,14 @@ pub enum DeviceOp {
     SetClipboard {
         text: String,
     },
-    /// Внешний адрес телефона.
-    PublicIp,
+    /// Внешний адрес телефона; `url` свой адрес проверки (http/https, ответ — адрес в тексте).
+    PublicIp {
+        url: Option<String>,
+    },
+    /// Wi-Fi вкл/выкл; в ответе `previous`: было ли включено.
+    SetWifi {
+        on: bool,
+    },
     /// Выдать компаньону права, которые выдаются по ADB (статистика использования, уведомления).
     CompanionPermissions,
     /// Перезапустить приложение-компаньон (остановка и запуск главного окна).
@@ -107,6 +113,8 @@ pub enum DeviceOp {
     CompanionCall {
         body: Value,
     },
+    /// Пределы координат сенсора (`getevent -pl`): для записи касаний.
+    InputRanges,
     /// Установить APK компаньона, выдать права и запустить.
     CompanionInstall {
         path: String,
@@ -150,9 +158,11 @@ impl DeviceOp {
             Self::SetPackageVerifier { .. } => "SetPackageVerifier",
             Self::GetClipboard => "GetClipboard",
             Self::SetClipboard { .. } => "SetClipboard",
-            Self::PublicIp => "PublicIp",
+            Self::PublicIp { .. } => "PublicIp",
+            Self::SetWifi { .. } => "SetWifi",
             Self::CompanionPermissions => "CompanionPermissions",
             Self::CompanionRestart => "CompanionRestart",
+            Self::InputRanges => "InputRanges",
             Self::CompanionCall { .. } => "CompanionCall",
             Self::CompanionInstall { .. } => "CompanionInstall",
         }
@@ -163,6 +173,16 @@ impl DeviceOp {
 pub trait DeviceBackend: Send + Sync {
     /// `serial` — серийник телефона; `roots` — папки, из которых можно ставить APK.
     fn run(&self, serial: &str, op: &DeviceOp, roots: &[String]) -> Result<Value, String>;
+
+    /// Строки потока касаний (`getevent -lt`) до `stop` или обрыва; `on_line` вернула `false`: хватит.
+    fn input_lines(
+        &self,
+        _serial: &str,
+        _stop: &std::sync::atomic::AtomicBool,
+        _on_line: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<(), String> {
+        Err("запись касаний по этому пути не поддерживается".into())
+    }
 }
 
 /// Исполнитель по ADB.
@@ -390,6 +410,18 @@ pub fn parse_signatures(out: &str) -> Vec<String> {
     inner.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
 }
 
+/// Адрес проверки IP: http или https, только безопасные для shell символы.
+pub fn check_url(u: &str) -> Result<String, String> {
+    let ok = (u.starts_with("http://") || u.starts_with("https://"))
+        && u.len() <= 300
+        && u.chars().all(|c| c.is_ascii_alphanumeric() || ":/._?=&%-~+".contains(c));
+    if ok {
+        Ok(u.to_string())
+    } else {
+        Err(format!("check_url: нужен http(s)-адрес без пробелов и кавычек, не {u:?}"))
+    }
+}
+
 /// Пакеты, чьи окна считаются системными диалогами.
 const DIALOG_PACKAGES: &[&str] = &[
     "android",
@@ -603,6 +635,37 @@ impl AdbDevice {
 }
 
 impl DeviceBackend for AdbDevice {
+    fn input_lines(
+        &self,
+        serial: &str,
+        stop: &std::sync::atomic::AtomicBool,
+        on_line: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<(), String> {
+        use std::io::BufRead;
+        use std::sync::atomic::Ordering;
+        let stream = self.adb.spawn(serial, "getevent -lt")?;
+        stream.set_read_timeout(Some(std::time::Duration::from_millis(300))).map_err(|e| e.to_string())?;
+        let mut rd = std::io::BufReader::new(stream);
+        let mut line = String::new();
+        while !stop.load(Ordering::SeqCst) {
+            match rd.read_line(&mut line) {
+                Ok(0) => return Err("getevent завершился".into()),
+                Ok(_) => {
+                    if line.ends_with('\n') {
+                        if !on_line(line.trim_end()) {
+                            return Ok(());
+                        }
+                        line.clear();
+                    }
+                }
+                Err(e)
+                    if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        Ok(())
+    }
+
     fn run(&self, serial: &str, op: &DeviceOp, roots: &[String]) -> Result<Value, String> {
         match op {
             DeviceOp::Info => self.info(serial),
@@ -822,21 +885,37 @@ impl DeviceBackend for AdbDevice {
                 self.run(serial, &DeviceOp::CompanionRestart, roots)?;
                 Ok(perms)
             }
+            DeviceOp::InputRanges => {
+                let out = self.sh(serial, "getevent -pl")?;
+                let r = crate::record::parse_ranges(&out)
+                    .ok_or("в getevent нет ABS_MT_POSITION_X/Y (нет сенсорного экрана?)")?;
+                Ok(json!({ "max_x": r.max_x, "max_y": r.max_y }))
+            }
             DeviceOp::CompanionCall { .. } => Err("CompanionCall идёт только через компаньона".into()),
             DeviceOp::CompanionRestart => {
+                let services =
+                    self.sh(serial, "settings get secure enabled_accessibility_services").unwrap_or_default();
+                let accessibility_was_on = services.contains(COMPANION_PACKAGE);
                 self.sh(serial, &format!("am force-stop {COMPANION_PACKAGE}"))?;
                 let out = self
                     .sh(serial, &format!("am start -n {COMPANION_PACKAGE}/com.device.media.MainActivity"))?;
                 if out.contains("Error") || out.contains("Exception") {
                     return Err(out.trim().to_string());
                 }
-                Ok(json!({}))
+                Ok(json!({ "accessibility_was_on": accessibility_was_on }))
             }
-            DeviceOp::PublicIp => {
-                let out = self.sh(
-                    serial,
-                    "curl -s -m 5 http://api.ipify.org || toybox wget -q -T 5 -O - http://api.ipify.org",
-                )?;
+            DeviceOp::SetWifi { on } => {
+                let was = self.sh(serial, "settings get global wifi_on")?.trim() != "0";
+                self.sh(serial, if *on { "svc wifi enable" } else { "svc wifi disable" })?;
+                Ok(json!({ "previous": was }))
+            }
+            DeviceOp::PublicIp { url } => {
+                let url = match url {
+                    Some(u) => check_url(u)?,
+                    None => "http://api.ipify.org".to_string(),
+                };
+                let out =
+                    self.sh(serial, &format!("curl -s -m 5 '{url}' || toybox wget -q -T 5 -O - '{url}'"))?;
                 parse_ip(&out)
                     .map(|ip| json!({ "ip": ip }))
                     .ok_or_else(|| "внешний адрес не получен".to_string())
