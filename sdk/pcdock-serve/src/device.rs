@@ -103,6 +103,10 @@ pub enum DeviceOp {
     CompanionPermissions,
     /// Перезапустить приложение-компаньон (остановка и запуск главного окна).
     CompanionRestart,
+    /// Команда напрямую компаньону на телефоне (без ADB): `body` — JSON `{"op": …}` из PROTOCOL.md §9.
+    CompanionCall {
+        body: Value,
+    },
     /// Установить APK компаньона, выдать права и запустить.
     CompanionInstall {
         path: String,
@@ -149,6 +153,7 @@ impl DeviceOp {
             Self::PublicIp => "PublicIp",
             Self::CompanionPermissions => "CompanionPermissions",
             Self::CompanionRestart => "CompanionRestart",
+            Self::CompanionCall { .. } => "CompanionCall",
             Self::CompanionInstall { .. } => "CompanionInstall",
         }
     }
@@ -218,6 +223,7 @@ pub fn button_keycode(name: &str) -> Option<&'static str> {
 /// Команда для компаньона на телефоне (работает без ADB): JSON `{"op": …}`. `None`: компаньон эту операцию не умеет.
 pub fn companion_body(op: &DeviceOp) -> Option<Value> {
     Some(match op {
+        DeviceOp::CompanionCall { body } => body.clone(),
         DeviceOp::Info => json!({"op": "Info"}),
         DeviceOp::LaunchApp { package, activity } => {
             json!({"op": "LaunchApp", "package": package, "activity": activity})
@@ -816,6 +822,7 @@ impl DeviceBackend for AdbDevice {
                 self.run(serial, &DeviceOp::CompanionRestart, roots)?;
                 Ok(perms)
             }
+            DeviceOp::CompanionCall { .. } => Err("CompanionCall идёт только через компаньона".into()),
             DeviceOp::CompanionRestart => {
                 self.sh(serial, &format!("am force-stop {COMPANION_PACKAGE}"))?;
                 let out = self

@@ -222,6 +222,12 @@ pub enum ClientMsg {
         #[serde(default)]
         sha256: Option<String>,
     },
+    /// Команда прямо компаньону на телефоне: `call` — JSON `{"op": …}` (PROTOCOL.md §9), в ответ `data` компаньона.
+    /// Работает по USB-аксессуару, даже если у телефона есть ADB.
+    CompanionCall {
+        phone: u32,
+        call: serde_json::Value,
+    },
     /// Перезапустить приложение-компаньон на телефоне.
     CompanionRestart {
         phone: u32,

@@ -109,6 +109,7 @@
 | `SetPackageVerifier` | `phone`, `on` | проверка приложений при установке по ADB |
 | `GetClipboard`, `SetClipboard` | `phone` / `phone`, `text` | `data.text`; по ADB ошибка, нужен компаньон |
 | `CompanionPermissions` | `phone` | выдать компаньону права по ADB; `data.granted`, `data.failed` |
+| `CompanionCall` | `phone`, `call` (`{"op": …}`) | команда прямо компаньону по USB-аксессуару (см. PROTOCOL.md §9), `data` ответа компаньона |
 | `CompanionRestart` | `phone` | остановить и запустить приложение-компаньон |
 | `CompanionInstall` | `phone`, `path`, `sha256?` | `InstallApk` APK компаньона, затем права и запуск; ответ как у `CompanionPermissions` |
 | `PublicIp` | `phone` | `data.ip` |

@@ -582,6 +582,12 @@ impl Handler<ClientState> for Handle {
             ClientMsg::CompanionPermissions { phone } => {
                 self.device_call(hub, client, id, phone, Ok(DeviceOp::CompanionPermissions))
             }
+            ClientMsg::CompanionCall { phone, call } => {
+                if !call.get("op").is_some_and(Value::is_string) {
+                    return fail("плохая команда: call.op".into());
+                }
+                self.device_call(hub, client, id, phone, Ok(DeviceOp::CompanionCall { body: call }))
+            }
             ClientMsg::CompanionRestart { phone } => {
                 self.device_call(hub, client, id, phone, Ok(DeviceOp::CompanionRestart))
             }
@@ -699,8 +705,10 @@ impl Handle {
             Err(e) => return fail(e),
         };
         // Буфер обмена по ADB недоступен; без серийника (AOA) ADB тоже нет: идём через компаньона на телефоне.
-        let via_companion =
-            matches!(op, DeviceOp::GetClipboard | DeviceOp::SetClipboard { .. }) || info.serial.is_none();
+        let via_companion = matches!(
+            op,
+            DeviceOp::GetClipboard | DeviceOp::SetClipboard { .. } | DeviceOp::CompanionCall { .. }
+        ) || info.serial.is_none();
         let companion = if via_companion { companion_body(&op) } else { None };
         if via_companion && companion.is_none() && info.serial.is_none() {
             return fail("у телефона неизвестен серийник: нужен ADB (компаньон эту команду не умеет)".into());
@@ -1121,6 +1129,7 @@ fn map_input(msg: ClientMsg) -> Result<(PhoneId, InputCmd), String> {
         | ClientMsg::PublicIp { .. }
         | ClientMsg::CompanionPermissions { .. }
         | ClientMsg::CompanionRestart { .. }
+        | ClientMsg::CompanionCall { .. }
         | ClientMsg::CompanionInstall { .. }
         | ClientMsg::SetAirplaneMode { .. }
         | ClientMsg::LaunchApp { .. }

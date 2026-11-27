@@ -47,13 +47,23 @@ object PhoneCommands {
         CommandResultData(false, e.message ?: e.javaClass.simpleName)
     }
 
+    /** Время как у ADB-пути: `гггг-мм-дд чч:мм:сс` по часам телефона. */
+    private fun fmt(ms: Long): String =
+        java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date(ms))
+
     private fun info(ctx: Context): JSONObject {
         val bm = ctx.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
         val dm = ctx.resources.displayMetrics
+        // Полный размер экрана, а не область без панелей (как `wm size` по ADB).
+        val full = if (Build.VERSION.SDK_INT >= 30) {
+            (ctx.getSystemService(Context.WINDOW_SERVICE) as android.view.WindowManager).maximumWindowMetrics.bounds
+        } else {
+            null
+        }
         return JSONObject()
             .put("model", Build.MODEL).put("manufacturer", Build.MANUFACTURER)
             .put("android", Build.VERSION.RELEASE).put("sdk", Build.VERSION.SDK_INT)
-            .put("screen_w", dm.widthPixels).put("screen_h", dm.heightPixels).put("dpi", dm.densityDpi)
+            .put("screen_w", full?.width() ?: dm.widthPixels).put("screen_h", full?.height() ?: dm.heightPixels).put("dpi", dm.densityDpi)
             .put("battery", JSONObject().put("level", bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)))
     }
 
@@ -97,7 +107,7 @@ object PhoneCommands {
                 val code = if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode else @Suppress("DEPRECATION") pi.versionCode.toLong()
                 o.put("installed", true).put("version_code", code).put("version_name", pi.versionName)
                     .put("enabled", pi.applicationInfo?.enabled ?: true)
-                    .put("first_install", pi.firstInstallTime).put("last_update", pi.lastUpdateTime)
+                    .put("first_install", fmt(pi.firstInstallTime)).put("last_update", fmt(pi.lastUpdateTime))
                     .put("system", (pi.applicationInfo?.flags ?: 0) and ApplicationInfo.FLAG_SYSTEM != 0)
             } catch (e: PackageManager.NameNotFoundException) {
                 o.put("installed", false)

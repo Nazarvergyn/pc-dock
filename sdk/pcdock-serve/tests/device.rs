@@ -305,3 +305,14 @@ fn every_device_command_reaches_the_backend() {
     }
     assert_eq!(fake.calls.lock().unwrap().len(), 7);
 }
+
+#[test]
+fn companion_call_needs_a_ready_phone_and_an_op() {
+    let mut c = Conn::open(serve(Some("SER1"), Some(Arc::new(Fake::default()))));
+    let p = phone_id(&mut c);
+    let r = c.ask(json!({"op": "CompanionCall", "phone": p, "call": {"nope": 1}}));
+    assert!(r["detail"].as_str().unwrap().contains("call.op"), "{r}");
+    let r = c.ask(json!({"op": "CompanionCall", "phone": p, "call": {"op": "Info"}}));
+    assert_eq!(r["ev"], "Error");
+    assert!(r["detail"].as_str().unwrap().contains("компаньон"), "{r}");
+}
